@@ -1,7 +1,10 @@
-# CLIMBmix — Nemotron-CLIMB Reproduction
+# CLIMBmix — Nemotron-CLIMB Unofficial Reproduction
 
-> **Disclaimer**: This repository is a personal clean-room implementation of the Nemotron-CLIMB paper,
-> not an official NVIDIA release. For educational and research purposes only.
+> **DISCLAIMER**: This is an **unofficial** reproduction of the Nemotron-CLIMB paper.
+> It is NOT affiliated with, endorsed by, or connected to NVIDIA or the original authors.
+> This project is for **personal research purposes only** and should NOT be used for
+> commercial applications. The original paper and official data can be found at:
+> [https://research.nvidia.com/labs/lpr/climb/](https://research.nvidia.com/labs/lpr/climb/)
 
 > **Paper**: Shizhe Diao et al. (NVIDIA, NeurIPS 2025)
 >
