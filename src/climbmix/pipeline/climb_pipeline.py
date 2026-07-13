@@ -231,7 +231,7 @@ class CLIMBPipeline:
                     "iteration": r.iteration,
                     "n_configs": r.n_configs,
                     "n_trained": r.n_trained,
-                    "best_loss": r.best_loss,
+                    "best_score": r.best_score,
                     "predictor_r2": r.predictor_r2,
                 }
                 for r in iter_results

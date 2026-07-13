@@ -5,10 +5,17 @@ Paper (Section 3.1):
   "We initialize a Dirichlet distribution based on each cluster's
    token count and sample configurations."
 
-  Each mixture configuration α = (α₁, ..., α_K) is sampled from
-  Dir(α₀ * p₁, α₀ * p₂, ..., α₀ * p_K) where p_i is the
-  proportional token count of cluster i, and α₀ controls
+  Each mixture configuration alpha = (alpha_1, ..., alpha_K) is sampled from
+  Dir(alpha_0 * p_1, alpha_0 * p_2, ..., alpha_0 * p_K) where p_i is the
+  proportional token count of cluster i, and alpha_0 controls
   the concentration around the proportions.
+
+For iterative bootstrapping (Section 3.2):
+  Iteration 1: sample from Dirichlet centered on natural proportions
+  Iteration 2+: "randomly sample M new configurations from the top N
+  ranked configurations" — we implement this as Dirichlet sampling
+  centered around each top-N config's weights, which naturally
+  produces simplex-constrained samples without post-processing.
 """
 
 import numpy as np
@@ -19,13 +26,6 @@ from climbmix.core.types import MixtureConfig, MixtureWeights, CLIMBConfig
 
 
 class DirichletSampler:
-    """
-    Samples mixture configurations from Dirichlet distribution.
-
-    In CLIMB, the Dirichlet concentration is set proportional to
-    each cluster's token count, encouraging sampling around
-    natural cluster proportions while allowing exploration.
-    """
 
     def __init__(
         self,
@@ -48,14 +48,12 @@ class DirichletSampler:
         self._concentration = self.config.get_dirichlet_concentration(cluster_token_counts)
 
     def sample_one(self) -> MixtureConfig:
-        """Sample a single mixture configuration."""
         alpha = self._concentration * self._proportions
         weights = self._rng.dirichlet(alpha)
         mw = MixtureWeights(weights=weights.astype(np.float64))
         return MixtureConfig(mixture_weights=mw)
 
     def sample_batch(self, n: int) -> List[MixtureConfig]:
-        """Sample n mixture configurations."""
         alpha = self._concentration * self._proportions
         all_weights = self._rng.dirichlet(alpha, size=n)
         configs = []
@@ -68,29 +66,38 @@ class DirichletSampler:
         self,
         top_n_configs: List[MixtureConfig],
         m: int,
-        jitter_scale: float = 0.1,
+        exploration_concentration: float = 5.0,
     ) -> List[MixtureConfig]:
         """
-        Sample M configurations near the top-N candidates.
+        Sample M configurations by Dirichlet exploration around top-N candidates.
 
-        Used in iterative bootstrapping: add small jitter to
-        promising configs to explore nearby region.
+        Paper: "randomly sample M new configurations from the top N ranked
+        configurations." We implement this as Dirichlet sampling centered
+        around each top-N config, which naturally stays on the simplex
+        without needing clip-and-renormalize post-processing.
+
+        For each selected top-N config with weights w, we sample from
+        Dir(concentration * w) to generate nearby exploration configs.
+        Higher concentration = closer to the original config.
         """
         if m <= len(top_n_configs):
             indices = self._rng.choice(len(top_n_configs), size=m, replace=False)
-            selected = [top_n_configs[i] for i in indices]
+            base_configs = [top_n_configs[i] for i in indices]
         else:
-            selected = top_n_configs.copy()
+            indices = self._rng.choice(len(top_n_configs), size=len(top_n_configs), replace=False)
+            base_configs = [top_n_configs[i] for i in indices]
+
+        new_configs = []
+        for base in base_configs:
+            alpha = exploration_concentration * base.mixture_weights.weights
+            alpha = np.maximum(alpha, 0.01)
+            new_weights = self._rng.dirichlet(alpha)
+            mw = MixtureWeights(weights=new_weights.astype(np.float64))
+            new_configs.append(MixtureConfig(mixture_weights=mw))
+
+        if m > len(top_n_configs):
             remaining = m - len(top_n_configs)
-            extra = self.sample_batch(remaining)
-            selected.extend(extra)
+            extras = self.sample_batch(remaining)
+            new_configs.extend(extras)
 
-        jittered = []
-        for config in selected:
-            jitter = self._rng.normal(0, jitter_scale, size=self.num_clusters)
-            new_weights = config.mixture_weights.weights + jitter
-            new_weights = np.maximum(new_weights, 0.01)
-            mw = MixtureWeights(weights=new_weights)
-            jittered.append(MixtureConfig(mixture_weights=mw.normalize()))
-
-        return jittered
+        return new_configs

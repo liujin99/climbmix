@@ -1,10 +1,28 @@
 """
 Proxy runner for CLIMB — trains proxy models on mixture-selected data.
 
-Simpler than quadmix's runner because CLIMB:
-  - Selects data by cluster mixture weights (not quality ranking + sigmoid)
-  - Uses larger proxy models (350M instead of 1M)
-  - Evaluates on downstream benchmark tasks
+Key paper-aligned design choices:
+  1. Continual pre-training from phase-1 checkpoint (ProxyConfig.phase1_checkpoint_path)
+     Paper rationale: measuring *incremental improvement* from data mixture on a
+     pretrained model, not absolute loss from random init. A pretrained model has
+     baseline knowledge; the validation gain reflects the mixture's value.
+     Analogous to real pre-training: you add new data to an existing model.
+
+  2. WSD (Warmup-Stable-Decay) schedule (Section 2.2)
+     - Warmup phase: linear LR increase
+     - Stable phase: constant high LR for most of training
+     - Decay phase: LR drops to decay_learning_rate at the end
+     This avoids premature LR decay (cosine) and is more stable for short
+     proxy training runs on mixture-selected data.
+
+  3. Token-based batch sizing that scales with model size
+     Paper: 2M tokens per batch for 350M model. Smaller models use smaller
+     batches. This is configured via ProxyConfig.SIZE_PARAMS.
+
+  4. Benchmark accuracy validation via lm-eval-harness
+     Paper: evaluates on PIQA, ARC-Easy, HellaSwag (0-shot).
+     Accuracy directly measures downstream capability, unlike loss which
+     can be dominated by easy tokens.
 """
 
 import os
@@ -25,10 +43,6 @@ from climbmix.pipeline.loss_utils import chunked_loss_from_hidden
 
 
 class ProxyRunner:
-    """
-    Trains proxy models on data selected by mixture weights,
-    evaluates on downstream tasks.
-    """
 
     def __init__(
         self,
@@ -42,6 +56,7 @@ class ProxyRunner:
         output_dir: str = "./proxy_validation",
     ):
         self.config = config
+        config.proxy.apply_size_defaults()
         self.cluster_labels = cluster_labels
         self.texts = texts
         self._token_ids = token_ids
@@ -51,16 +66,24 @@ class ProxyRunner:
 
         self.model_variant = config.proxy.model_size
         self.device_type = config.device.device_type
-        self.global_batch_size = config.proxy.batch_size
+        self.batch_tokens = config.proxy.batch_tokens
         self.micro_batch_size = config.proxy.micro_batch_size
         self.max_step = config.proxy.training_steps
-        self.warmup_fraction = config.proxy.warmup_fraction
         self.learning_rate = config.proxy.learning_rate
+        self.decay_learning_rate = config.proxy.decay_learning_rate
+        self.lr_schedule_name = config.proxy.lr_schedule
+        self.warmup_fraction = config.proxy.warmup_fraction
+        self.stable_fraction = config.proxy.stable_fraction
+        self.decay_fraction = config.proxy.decay_fraction
         self.weight_decay = config.proxy.weight_decay
         self.grad_clip = config.proxy.grad_clip
+        self.phase1_checkpoint_path = config.proxy.phase1_checkpoint_path
+        self.validation_metric = config.proxy.validation_metric
+        self.val_tasks = config.val_tasks
 
         self.model_config = ModelArchitectureConfig.from_name(self.model_variant)
         self.block_size = self.model_config.block_size
+        self.global_batch_size = max(1, self.batch_tokens // self.block_size)
         self.gradient_accumulation_steps = max(1, self.global_batch_size // self.micro_batch_size)
 
         if token_counts is None and texts is not None:
@@ -68,7 +91,6 @@ class ProxyRunner:
                 [max(1, len(t) // 4) for t in texts], dtype=np.int64
             )
 
-        # Load validation data
         if val_data is not None:
             self._val_token_ids = val_data["token_ids"]
             self._val_loss_mask = val_data.get("loss_mask", None)
@@ -83,7 +105,6 @@ class ProxyRunner:
             self._val_loss_mask = None
             self._val_task_labels = None
 
-        # Tokenizer
         try:
             from transformers import AutoTokenizer
             self.tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-neox-20b")
@@ -96,7 +117,6 @@ class ProxyRunner:
         mixture_config: MixtureConfig,
         experiment_id: int = 0,
     ) -> np.ndarray:
-        """Select documents based on mixture weights."""
         selected, _ = select_data_by_mixture(
             self.cluster_labels,
             mixture_config.mixture_weights,
@@ -109,7 +129,6 @@ class ProxyRunner:
         self,
         selected_indices: np.ndarray,
     ) -> torch.Tensor:
-        """Tokenize selected documents."""
         if self._token_ids is not None:
             return self._token_ids[selected_indices]
 
@@ -127,12 +146,30 @@ class ProxyRunner:
         )
         return enc["input_ids"]
 
+    def _create_model(self, device) -> ProxyModel:
+        model = ProxyModel(config=self.model_config).to(device)
+        if device.type == "npu":
+            model = model.to(torch.bfloat16)
+
+        if self.phase1_checkpoint_path is not None:
+            checkpoint = torch.load(
+                self.phase1_checkpoint_path,
+                map_location=device,
+                weights_only=True,
+            )
+            if "model_state_dict" in checkpoint:
+                model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+            else:
+                model.load_state_dict(checkpoint, strict=False)
+            print(f"  Loaded phase-1 checkpoint from {self.phase1_checkpoint_path}")
+
+        return model
+
     def run_experiment(
         self,
         mixture_config: MixtureConfig,
         experiment_id: int = 0,
     ) -> ProxyResult:
-        """Train one proxy model on mixture-selected data."""
 
         device_mgr = DeviceManager(
             device_type=DeviceType(self.device_type),
@@ -140,18 +177,13 @@ class ProxyRunner:
         )
         device = device_mgr.get_device()
 
-        # Select documents
         selected_indices = self._select_documents(mixture_config, experiment_id)
         print(f"  [Exp {experiment_id}] Selected {len(selected_indices)} docs "
               f"with mixture weights")
 
-        # Tokenize
         train_tokens = self._tokenize_selected(selected_indices)
 
-        # Create model
-        model = ProxyModel(config=self.model_config).to(device)
-        if device.type == "npu":
-            model = model.to(torch.bfloat16)
+        model = self._create_model(device)
 
         non_emb = model.count_params(non_embedding_only=True)
         print(f"  [Exp {experiment_id}] Model: {model.count_params():,} total, "
@@ -164,7 +196,6 @@ class ProxyRunner:
             weight_decay=self.weight_decay,
         )
 
-        # Prepare training data
         pad_id = self.tokenizer.pad_token_id if self.tokenizer else 0
         eos_id = self.tokenizer.eos_token_id if self.tokenizer else 0
 
@@ -183,9 +214,6 @@ class ProxyRunner:
         max_iters = num_steps * grad_acc
         total_blocks = max(1, flat_train.size(0) - self.block_size)
 
-        warmup_steps = max(1, int(num_steps * self.warmup_fraction))
-
-        # Training loop
         model.train()
         epoch_rng = np.random.default_rng(experiment_id + 42)
         perm = epoch_rng.permutation(total_blocks)
@@ -195,7 +223,8 @@ class ProxyRunner:
         t_start = time.time()
 
         print(f"  [Exp {experiment_id}] Training {num_steps} steps "
-              f"(grad_acc={grad_acc}, warmup={warmup_steps})")
+              f"(batch={self.batch_tokens} tokens, grad_acc={grad_acc}, "
+              f"schedule={self.lr_schedule_name})")
 
         for iter_ct in range(max_iters):
             micro_in_step = iter_ct % grad_acc
@@ -227,7 +256,7 @@ class ProxyRunner:
 
             is_acc = (iter_ct + 1) % grad_acc != 0
             if not is_acc:
-                lr = self._lr_schedule(iter_ct, max_iters)
+                lr = self._lr_schedule(step_ct, num_steps)
                 for pg in optimizer.param_groups:
                     pg["lr"] = lr
                 torch.nn.utils.clip_grad_norm_(model.parameters(), self.grad_clip)
@@ -243,8 +272,29 @@ class ProxyRunner:
 
             loss_accum += loss.detach()
 
-        # Validation
-        val_loss, per_task_losses = self._run_validation(model, device)
+        val_loss, per_task_losses = 3.5, None
+        val_accuracy = 0.0
+        per_task_accuracies = None
+
+        if self.validation_metric == "accuracy":
+            from climbmix.pipeline.benchmark_eval import (
+                evaluate_with_lm_eval,
+                compute_average_accuracy,
+            )
+            task_accs = evaluate_with_lm_eval(
+                model, self.model_config, self.val_tasks,
+                device=str(device),
+                output_dir=os.path.join(self.output_dir, f"exp_{experiment_id:04d}"),
+            )
+            if task_accs:
+                val_accuracy = compute_average_accuracy(task_accs)
+                per_task_accuracies = task_accs
+                print(f"  [Exp {experiment_id}] Validation accuracy: {val_accuracy:.4f}")
+            else:
+                val_loss, per_task_losses = self._run_loss_validation(model, device)
+                print(f"  [Exp {experiment_id}] lm-eval unavailable, using loss: {val_loss:.4f}")
+        else:
+            val_loss, per_task_losses = self._run_loss_validation(model, device)
 
         avg_train = (loss_accum / max_iters).item() if max_iters > 0 else 0
 
@@ -257,18 +307,24 @@ class ProxyRunner:
             "variant": self.model_variant,
             "train_loss": avg_train,
             "val_loss": val_loss,
+            "val_accuracy": val_accuracy,
             "mixture_weights": mixture_config.mixture_weights.to_dict(),
             "num_selected_docs": len(selected_indices),
             "training_config": {
-                "global_batch_size": self.global_batch_size,
+                "batch_tokens": self.batch_tokens,
                 "micro_batch_size": self.micro_batch_size,
                 "learning_rate": self.learning_rate,
+                "decay_learning_rate": self.decay_learning_rate,
+                "lr_schedule": self.lr_schedule_name,
                 "block_size": self.block_size,
+                "phase1_checkpoint": self.phase1_checkpoint_path,
                 "device_type": self.device_type,
             },
         }
         if per_task_losses is not None:
             meta["per_task_losses"] = per_task_losses
+        if per_task_accuracies is not None:
+            meta["per_task_accuracies"] = per_task_accuracies
 
         with open(os.path.join(exp_dir, "meta.json"), "w") as f:
             json.dump(meta, f, indent=2)
@@ -276,12 +332,13 @@ class ProxyRunner:
         return ProxyResult(
             mixture_config=mixture_config,
             validation_loss=val_loss,
+            validation_accuracy=val_accuracy,
+            per_task_accuracies=per_task_accuracies,
             per_task_losses=per_task_losses,
             metadata=meta,
         )
 
-    def _run_validation(self, model, device):
-        """Run validation on downstream tasks."""
+    def _run_loss_validation(self, model, device):
         if self._val_token_ids is None:
             return 3.5, None
 
@@ -335,12 +392,41 @@ class ProxyRunner:
         model.train()
         return avg_val, per_task if per_task else None
 
-    def _lr_schedule(self, iter_ct, max_iters):
-        warmup_iters = int(self.warmup_fraction * max_iters)
-        if iter_ct < warmup_iters:
-            return self.learning_rate * iter_ct / warmup_iters
-        decay = 1.0 - (iter_ct - warmup_iters) / (max_iters - warmup_iters)
+    def _lr_schedule(self, step, total_steps):
+        if self.lr_schedule_name == "wsd":
+            return self._wsd_schedule(step, total_steps)
+        elif self.lr_schedule_name == "cosine":
+            return self._cosine_schedule(step, total_steps)
+        else:
+            return self._linear_schedule(step, total_steps)
+
+    def _wsd_schedule(self, step, total_steps):
+        warmup_steps = int(self.warmup_fraction * total_steps)
+        decay_steps = int(self.decay_fraction * total_steps)
+        stable_end = total_steps - decay_steps
+
+        if step < warmup_steps:
+            return self.learning_rate * step / max(1, warmup_steps)
+        elif step < stable_end:
+            return self.learning_rate
+        else:
+            progress = (step - stable_end) / max(1, decay_steps)
+            decay_lr = self.learning_rate * (1 - progress) + self.decay_learning_rate * progress
+            return max(decay_lr, self.decay_learning_rate)
+
+    def _cosine_schedule(self, step, total_steps):
+        warmup_steps = int(self.warmup_fraction * total_steps)
+        if step < warmup_steps:
+            return self.learning_rate * step / max(1, warmup_steps)
+        decay = 1.0 - (step - warmup_steps) / max(1, total_steps - warmup_steps)
         return self.learning_rate * max(decay, 0.01)
+
+    def _linear_schedule(self, step, total_steps):
+        warmup_steps = int(self.warmup_fraction * total_steps)
+        if step < warmup_steps:
+            return self.learning_rate * step / max(1, warmup_steps)
+        decay = 1.0 - (step - warmup_steps) / max(1, total_steps - warmup_steps)
+        return max(self.learning_rate * decay, self.decay_learning_rate)
 
     def run_batch(
         self,
@@ -348,7 +434,6 @@ class ProxyRunner:
         cluster_labels: Optional[np.ndarray] = None,
         cluster_token_counts: Optional[np.ndarray] = None,
     ) -> List[ProxyResult]:
-        """Run proxy experiments for a batch of mixture configs."""
         results = []
         for i, config in enumerate(configs):
             r = self.run_experiment(config, experiment_id=i)

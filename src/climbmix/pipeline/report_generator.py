@@ -71,12 +71,12 @@ def generate_markdown_report(
 
     lines.append("## Iteration Summary")
     lines.append("")
-    lines.append("| Iter | Configs | Trained | Best Loss | Predictor R² |")
+    lines.append("| Iter | Configs | Trained | Best Score | Predictor R\u00b2 |")
     lines.append("|---|---|---|---|---|")
     for r in iter_results:
-        loss_str = f"{r.best_loss:.4f}" if r.best_loss is not None else "N/A"
+        score_str = f"{r.best_score:.4f}" if r.best_score is not None else "N/A"
         r2_str = f"{r.predictor_r2:.4f}" if r.predictor_r2 is not None else "N/A"
-        lines.append(f"| {r.iteration} | {r.n_configs} | {r.n_trained} | {loss_str} | {r2_str} |")
+        lines.append(f"| {r.iteration} | {r.n_configs} | {r.n_trained} | {score_str} | {r2_str} |")
     lines.append("")
 
     lines.append("## Stage Timing")

@@ -76,8 +76,16 @@ class MixtureConfig:
 class ProxyResult:
     mixture_config: MixtureConfig
     validation_loss: float
+    validation_accuracy: float = 0.0
+    per_task_accuracies: Optional[Dict[str, float]] = None
     per_task_losses: Optional[Dict[str, float]] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def score(self) -> float:
+        if self.validation_accuracy > 0:
+            return self.validation_accuracy
+        return -self.validation_loss
 
 
 @dataclass
@@ -88,8 +96,10 @@ class IterationResult:
     predictor: Optional[Any] = None
     predictor_r2: Optional[float] = None
     best_config: Optional[MixtureConfig] = None
+    best_score: Optional[float] = None
     best_loss: Optional[float] = None
     all_configs: List[MixtureConfig] = field(default_factory=list)
+    all_scores: npt.NDArray[np.float64] = field(default_factory=lambda: np.array([], dtype=np.float64))
     all_losses: npt.NDArray[np.float64] = field(default_factory=lambda: np.array([], dtype=np.float64))
     selected_for_training: List[int] = field(default_factory=list)
 
@@ -112,7 +122,7 @@ class ClusterDiscoveryConfig:
 
 @dataclass
 class QualityFilterConfig:
-    method: str = "doc_and_cluster"
+    method: str = "none"
     doc_english_min: float = 0.3
     doc_composite_min: float = 0.5
     cluster_avg_threshold: float = 3.0
@@ -141,16 +151,42 @@ class SearchConfig:
 class ProxyConfig:
     model_size: str = "62M"
     training_steps: int = 1000
-    training_tokens: int = 1_000_000_000
-    batch_size: int = 64
+    training_tokens: int = 40_000_000_000
+    batch_tokens: int = 2_000_000
     micro_batch_size: int = 8
-    learning_rate: float = 4e-4
-    warmup_fraction: float = 0.04
+    learning_rate: float = 5e-5
+    decay_learning_rate: float = 1e-5
     weight_decay: float = 0.1
     grad_clip: float = 1.0
     block_size: int = 2048
+    lr_schedule: str = "wsd"
+    warmup_fraction: float = 0.04
+    stable_fraction: float = 0.76
+    decay_fraction: float = 0.20
+    phase1_checkpoint_path: Optional[str] = None
+    validation_metric: str = "accuracy"
 
     VALID_SIZES = ("1M", "5M", "20M", "62M", "132M", "350M")
+    VALID_LR_SCHEDULES = ("wsd", "cosine", "linear")
+    VALID_VALIDATION_METRICS = ("accuracy", "loss")
+
+    SIZE_PARAMS = {
+        "1M": {"batch_tokens": 500_000, "learning_rate": 1e-3, "decay_learning_rate": 1e-4, "training_tokens": 1_000_000_000},
+        "5M": {"batch_tokens": 1_000_000, "learning_rate": 5e-4, "decay_learning_rate": 5e-5, "training_tokens": 5_000_000_000},
+        "20M": {"batch_tokens": 1_000_000, "learning_rate": 2e-4, "decay_learning_rate": 2e-5, "training_tokens": 10_000_000_000},
+        "62M": {"batch_tokens": 1_000_000, "learning_rate": 1e-4, "decay_learning_rate": 1e-5, "training_tokens": 20_000_000_000},
+        "132M": {"batch_tokens": 2_000_000, "learning_rate": 8e-5, "decay_learning_rate": 8e-6, "training_tokens": 30_000_000_000},
+        "350M": {"batch_tokens": 2_000_000, "learning_rate": 5e-5, "decay_learning_rate": 1e-5, "training_tokens": 40_000_000_000},
+    }
+
+    def apply_size_defaults(self) -> "ProxyConfig":
+        if self.model_size in self.SIZE_PARAMS:
+            p = self.SIZE_PARAMS[self.model_size]
+            self.batch_tokens = p["batch_tokens"]
+            self.learning_rate = p["learning_rate"]
+            self.decay_learning_rate = p["decay_learning_rate"]
+            self.training_tokens = p["training_tokens"]
+        return self
 
 
 @dataclass
@@ -185,6 +221,12 @@ class CLIMBConfig:
     val_tasks: List[str] = field(default_factory=lambda: ["piqa", "arc_e", "hellaswag"])
     data_dir: str = "./data"
     output_dir: str = "./climbmix_output"
+
+    @property
+    def metric_direction(self) -> str:
+        if self.proxy.validation_metric == "accuracy":
+            return "maximize"
+        return "minimize"
 
     def get_dirichlet_concentration(self, cluster_token_counts: npt.NDArray[np.int64]) -> npt.NDArray[np.float64]:
         if self.search.dirichlet_alpha is not None:

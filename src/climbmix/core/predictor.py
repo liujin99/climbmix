@@ -21,6 +21,21 @@ class LightGBMPredictor:
         self._model = None
         self._is_fitted = False
 
+    def _compute_colsample(self) -> float:
+        """
+        Scale colsample_bytree with num_clusters (search parameter count).
+
+        Paper's K_enhanced=21 features. With more clusters (more features),
+        subsample features more aggressively to prevent overfitting.
+        With fewer clusters, use more features per tree.
+
+        Formula: min(1.0, max(0.3, 20 / num_clusters))
+        - 21 clusters → ~0.95 (nearly all features, as in paper)
+        - 50 clusters → 0.4
+        - 10 clusters → 1.0
+        """
+        return min(1.0, max(0.3, 20.0 / self.num_clusters))
+
     def fit(
         self,
         configs: List[MixtureConfig],
@@ -48,8 +63,8 @@ class LightGBMPredictor:
             "min_child_samples": self.config.min_samples_leaf,
             "reg_alpha": self.config.l1_reg,
             "reg_lambda": self.config.l2_reg,
-            "subsample": 0.8,
-            "colsample_bytree": 0.8,
+            "subsample": 1.0,
+            "colsample_bytree": self._compute_colsample(),
             "random_state": 42,
             "verbose": -1,
         }
