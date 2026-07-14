@@ -7,7 +7,9 @@ variables defined in runs/*.sh scripts.
 
 Usage:
   python scripts/run_climb.py --data-dir ./data --discovery-method fdc_labels
-  python scripts/run_climb.py --data-dir ./data --discovery-method embedding_cluster --proxy-size 62M
+  python scripts/run_climb.py --data-dir ./data --discovery-method embedding_cluster
+  python scripts/run_climb.py --dry-run  # no training, random scores
+  python scripts/run_climb.py --proxy-model-depth 10 --proxy-training-tokens 5e9
 """
 
 import argparse
@@ -46,7 +48,7 @@ def main():
                         help="Cluster merge distance threshold")
 
     # ── Filter ──
-    parser.add_argument("--filter-method", type=str, default="doc_and_cluster",
+    parser.add_argument("--filter-method", type=str, default="none",
                         choices=["none", "doc_level", "cluster_level", "doc_and_cluster"],
                         help="Quality filtering method")
     parser.add_argument("--doc-english-min", type=float, default=0.3,
@@ -57,20 +59,29 @@ def main():
                         help="Cluster avg quality threshold for cluster-level filter")
 
     # ── Proxy ──
-    parser.add_argument("--proxy-size", type=str, default="62M",
-                        choices=["1M", "5M", "20M", "62M", "132M", "350M"],
-                        help="Proxy model size")
-    parser.add_argument("--proxy-steps", type=int, default=1000,
-                        help="Proxy training steps per experiment")
-    parser.add_argument("--proxy-batch-size", type=int, default=64,
-                        help="Proxy global batch size")
-    parser.add_argument("--proxy-lr", type=float, default=4e-4,
-                        help="Proxy learning rate")
+    parser.add_argument("--proxy-model-depth", type=int, default=10,
+                        help="nanochat model depth (5=~59M, 10=~196M, 24=~1.38B)")
+    parser.add_argument("--proxy-training-tokens", type=int, default=5_000_000_000,
+                        help="Training tokens per proxy experiment")
+    parser.add_argument("--proxy-batch-tokens", type=int, default=500_000,
+                        help="Global batch size in tokens")
+    parser.add_argument("--proxy-lr", type=float, default=5e-5,
+                        help="Stable phase learning rate")
+    parser.add_argument("--proxy-decay-lr", type=float, default=1e-5,
+                        help="Decay phase learning rate")
+    parser.add_argument("--phase1-checkpoint-path", type=str, default=None,
+                        help="Phase-1 pretrained checkpoint path (nanochat format)")
+    parser.add_argument("--validation-metric", type=str, default="accuracy",
+                        choices=["accuracy", "loss"],
+                        help="Validation metric: accuracy (lm-eval) or loss")
+    parser.add_argument("--lr-schedule", type=str, default="wsd",
+                        choices=["wsd", "cosine", "linear"],
+                        help="LR schedule for proxy training")
 
     # ── Search ──
     parser.add_argument("--num-iterations", type=int, default=3,
                         help="Number of bootstrapping iterations")
-    parser.add_argument("--configs-per-iter", type=str, default="64,32,16",
+    parser.add_argument("--configs-per-iter", type=str, default="16,8,4",
                         help="Configs per iteration (comma-separated)")
     parser.add_argument("--dirichlet-alpha", type=float, default=None,
                         help="Dirichlet concentration (None=proportional)")
@@ -93,7 +104,7 @@ def main():
 
     # ── Dry run ──
     parser.add_argument("--dry-run", action="store_true",
-                        help="Skip proxy training (use random losses)")
+                        help="Skip proxy training (use random scores)")
 
     # ── Output ──
     parser.add_argument("--output-dir", type=str, default="./climbmix_output")
@@ -102,6 +113,15 @@ def main():
 
     configs_per_iter = [int(x) for x in args.configs_per_iter.split(",")]
     val_tasks = [x.strip() for x in args.val_tasks.split(",")]
+
+    DEPTH_PARAMS = {
+        5:  {"params_approx": "59M",  "lr": 1e-4,  "decay_lr": 1e-5},
+        10: {"params_approx": "196M", "lr": 5e-5,  "decay_lr": 1e-5},
+        24: {"params_approx": "1.38B", "lr": 5e-5,  "decay_lr": 1e-5},
+    }
+    dp = DEPTH_PARAMS.get(args.proxy_model_depth, DEPTH_PARAMS[10])
+
+    training_steps = max(1, args.proxy_training_tokens // args.proxy_batch_tokens)
 
     config = CLIMBConfig(
         discovery=ClusterDiscoveryConfig(
@@ -124,10 +144,15 @@ def main():
             dirichlet_alpha=args.dirichlet_alpha,
         ),
         proxy=ProxyConfig(
-            model_size=args.proxy_size,
-            training_steps=args.proxy_steps,
-            batch_size=args.proxy_batch_size,
-            learning_rate=args.proxy_lr,
+            model_size=f"depth{args.proxy_model_depth}",
+            training_steps=training_steps,
+            training_tokens=args.proxy_training_tokens,
+            batch_tokens=args.proxy_batch_tokens,
+            learning_rate=args.proxy_lr or dp["lr"],
+            decay_learning_rate=args.proxy_decay_lr or dp["decay_lr"],
+            lr_schedule=args.lr_schedule,
+            phase1_checkpoint_path=args.phase1_checkpoint_path,
+            validation_metric=args.validation_metric,
         ),
         predictor=PredictorConfig(
             method=args.predictor_method,
@@ -143,12 +168,16 @@ def main():
 
     print(f"\n{'=' * 70}")
     print("  CLIMB Configuration")
-    print(f"  Discovery: {config.discovery.method} (K_init={config.discovery.K_init}, K_enhanced={config.discovery.K_enhanced})")
-    print(f"  Filter:    {config.filtering.method} (english≥{config.filtering.doc_english_min}, composite≥{config.filtering.doc_composite_min}, cluster_avg≥{config.filtering.cluster_avg_threshold})")
-    print(f"  Proxy:     {config.proxy.model_size} ({config.proxy.training_steps} steps, bs={config.proxy.batch_size}, lr={config.proxy.learning_rate})")
-    print(f"  Search:    {config.search.num_iterations} iterations, {configs_per_iter}")
-    print(f"  Data:      {config.data_dir}")
-    print(f"  Device:    {config.device.device_type}")
+    print(f"  Discovery:  {config.discovery.method} (K_init={config.discovery.K_init}, K_enhanced={config.discovery.K_enhanced})")
+    print(f"  Filter:     {config.filtering.method}")
+    print(f"  Proxy:      depth={args.proxy_model_depth} (~{dp['params_approx']} params)")
+    print(f"              {args.proxy_training_tokens/1e9:.1f}B tokens, {training_steps} steps")
+    print(f"              batch={args.proxy_batch_tokens/1e6:.1f}M tokens, lr={config.proxy.learning_rate}, schedule={config.proxy.lr_schedule}")
+    print(f"              validation={config.proxy.validation_metric}, phase1={config.proxy.phase1_checkpoint_path or 'none'}")
+    print(f"  Search:     {config.search.num_iterations} iterations, {configs_per_iter} = {sum(configs_per_iter)} configs")
+    print(f"  Data:       {config.data_dir}")
+    print(f"  Device:     {config.device.device_type} ({config.device.npu_devices} devices)")
+    print(f"  Metric:     {config.metric_direction}")
     print(f"{'=' * 70}\n")
 
     proxy_runner = None
