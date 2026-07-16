@@ -12,106 +12,138 @@
 
 Automated framework that discovers, evaluates, and refines data mixtures
 for language model pre-training through embedding-driven clustering and
-iterative bootstrapping.
+iterative bootstrapping, using **nanochat-npu** (8×910B3 Ascend NPU) as the
+training backend via **method A** (subprocess calls).
 
 ## Algorithm Pipeline
 
 ```
-Raw Data → Text Embedding (stella_en_400M_v5)
+Raw Data → FDC domain labels (22 domains) or embedding clustering
   ↓
-FAISS K-means (K_init=1000)
+Iterative Bootstrapping Search:
+  Iteration 1: Dirichlet sample 8 configs → mid-train proxy → evaluate → fit predictor
+  Iteration 2: Predictor-guided 4 configs → mid-train → evaluate → update predictor
+  Iteration 3: Predictor-guided 2 configs → mid-train → evaluate → final predictor
   ↓
-Cluster Pruning (fasttext quality, threshold=3.0 → K_pruned=240)
+Predictor ranks candidates → optimal mixture α*
   ↓
-Cluster Merging (centroid distance<1.5 → K_enhanced≈21)
+Target validation: mid-train d24 with α* vs baseline
   ↓
-Iteration 1: Dirichlet sample 64 configs → train proxy → fit LightGBM predictor
-Iteration 2: Predictor-guided sample 32 configs → train → update predictor
-Iteration 3: Predictor-guided sample 16 configs → train → final predictor
-  ↓
-Search: predictor ranks 10K candidates → optimal α*
-  ↓
-Final selection: proportional sampling by α* per cluster
-  ↓
-Output: sampled_dataset.parquet + optimal_mixture_weights.json
+Output: report + distribution chart + sampled_dataset.parquet
 ```
 
-## Key Differences from QuaDMix
+## Staged Experiment Design
 
-| Aspect | QuaDMix | CLIMB |
-|--------|---------|-------|
-| Domain discovery | fastText predefined labels (22) | Embedding + K-means → merge (≈21) |
-| Data selection | Quality ranking + sigmoid sampling | Mixture weights + proportional sampling |
-| Search strategy | Single-shot (sample → regress → search) | Iterative bootstrapping (3 iterations) |
-| Predictor | LightGBM (single fit) | LightGBM (iterative update) |
-| Proxy model | 1M tinyllama | 350M (main) / 62M (ablation) |
-| Parameter space | (N+4)×M per domain | K mixture weights per cluster |
+| Stage | Proxy | Target | Purpose | Time |
+|-------|-------|--------|---------|------|
+| 0 (dry-run) | — | — | CPU logic verification | ~5min |
+| 1 | d10 (70M scaling) | d24 (730M scaling) | Quick: proxy→target transferability | ~5h |
+| 2 | d14/d18 | d24 | Formal search after Stage 1 gate | ~8-26h |
+
+**Stage 1 decision gate**: d24 accuracy with optimal mixture > baseline → proceed to Stage 2.
+
+## Key Design Choices
+
+- **method A**: ProxyRunner calls nanochat `mid_train.py` + `base_eval.py` as subprocesses
+- **Annealing semantics**: lr_scale=1.0, warmup=0.0, warmdown=0.9 (CLIMB = annealing, not re-warmup)
+- **Fixed training**: `--num-iterations` (500 steps proxy, 1000 steps target), not ratio-based
+- **Continual pre-training**: all stages anneal from base checkpoint, never from-scratch
+- **Metric**: high-signal 6-task subset (piqa, arc_easy, lambada, commonsense_qa, squad, coqa)
+- **Same metric for search AND validation** — no distortion from different benchmark sets
+
+## nanochat Model Sizes
+
+| depth | scaling(M) | total(M) | VE占比 | CLIMB对标 |
+|-------|-----------|---------|--------|----------|
+| 10 | 70.2 | 196.0 | 53.5% | ≈62M proxy |
+| 14 | 164.2 | 399.1 | 51.5% | ≈132M |
+| 18 | 324.4 | 701.9 | 48.4% | ≈350M proxy |
+| 24 | 729.8 | 1384.1 | 43.6% | target (56% of CLIMB 1.3B) |
+
+VE (Value Embeddings) 占 ~50% 参数但不参与核心计算。对标 CLIMB 时看 **scaling_params**。
 
 ## Project Structure
 
 ```
 climbmix/
-├── src/climbmix/                # Python package (pip install -e .)
-│   ├── core/
-│   │   ├── types.py                # Core types (MixtureWeights, ClusterInfo, etc.)
-│   │   ├── embedding_cluster.py    # Step 1: Embed + FAISS K-means
-│   │   ├── cluster_merge.py        # Step 2: Prune + merge clusters
-│   │   ├── dirichlet_sampler.py    # Dirichlet mixture weight sampling
-│   │   ├── iterative_bootstrapper.py # Step 3: Iterative search engine
-│   │   └── proxy_model.py          # Proxy model (1M/62M/350M/1B variants)
-│   ├── pipeline/
-│   │   ├── climb_pipeline.py       # Main pipeline orchestrator
-│   │   ├── proxy_runner.py         # Proxy training runner
-│   │   └── loss_utils.py           # Chunked loss computation
-│   ├── data/
-│   │   └── metadata_manager.py     # Shard metadata manager
-│   ├── sampling/
-│   │   └── data_selector.py        # Mixture-based data selection
-│   ├── npu/
-│   │   └── device.py               # Device manager (CPU/CUDA/NPU)
-│   └── utils/
-│       ├── normalization.py         # Normalization utilities
-│       └── perf_timer.py           # Performance timer
+├── docs/
+│   └── proxy_and_model_analysis.md     # 分析文档
+├── runs/                                # Shell scripts (staged)
+│   ├── dryrun.sh                        # CPU dry-run (~5min)
+│   ├── search_d10.sh                    # d10→d24 search (~5h, NPU)
+│   ├── search_d14.sh                    # d14/d18→d24 search (~8-26h, NPU)
+│   ├── midtrain_validate.sh             # CLIMB vs random validation (NPU)
+│   └── train_base_model.sh             # Generate base checkpoint (NPU)
 ├── scripts/
-│   ├── run_climb.py               # Main entry script
-│   ├── create_test_data.py        # Test data generator
-│   └── demo_run_cpu.sh            # Quick CPU demo (~1-2min)
-├── data/                          # Data directory
-├── temp/                          # Intermediate data
-└── docs/                          # Documentation
+│   ├── run_climb.py                     # CLI entry point
+│   └── prepare_random_baseline.py       # Random baseline data prep
+└── src/climbmix/
+    ├── core/
+    │   ├── types.py                     # Config (depth-based + annealing)
+    │   ├── iterative_bootstrapper.py    # Search engine
+    │   ├── dirichlet_sampler.py         # Dirichlet exploration
+    │   ├── predictor.py                 # LightGBM predictor
+    │   ├── discovery.py                 # Cluster discovery strategies
+    │   ├── embedding_cluster.py         # Embed + FAISS K-means
+    │   ├── cluster_merge.py             # Prune + merge
+    │   ├── quality_filter.py            # Quality filtering
+    │   └── protocols.py
+    ├── pipeline/
+    │   ├── climb_pipeline.py            # Main pipeline (injects cluster data)
+    │   ├── proxy_runner.py              # method A: subprocess nanochat
+    │   └── report_generator.py          # Markdown + matplotlib
+    ├── data/
+    │   ├── metadata_manager.py          # ShardMetadataManager (parquet)
+    │   └── column_schema.py             # Column name mapping
+    ├── sampling/
+    │   └── data_selector.py             # Mixture-weighted doc sampling
+    └── utils/
+        ├── token_estimate.py
+        ├── normalization.py
+        └── perf_timer.py
 ```
 
 ## Quick Start
 
 ```bash
-# Install
-pip install -e .
+# Step 0: CPU dry-run (no NPU needed)
+bash runs/dryrun.sh
 
-# Create test data & run CPU demo
-bash runs/demo_run_cpu.sh
+# Step 1: Generate base checkpoints (NPU)
+DEPTH=10  bash runs/train_base_model.sh   # d10, ~0.6h
+DEPTH=24  bash runs/train_base_model.sh   # d24, ~29h
 
-# Custom run
-python scripts/run_climb.py \
-    --data-dir data/my_data.parquet \
-    --output-dir result/my_run \
-    --K-init 1000 \
-    --K-enhanced 21 \
-    --num-iterations 3 \
-    --configs-per-iter "64,32,16" \
-    --proxy-size 350M \
-    --proxy-steps 5000 \
-    --device-type cuda
+# Step 2: Search for optimal mixture (NPU)
+bash runs/search_d10.sh             # d10→d24 (~5h)
+PROXY_DEPTH=14 bash runs/search_d14.sh  # d14→d24 (~8h)
+
+# Step 3: Validate CLIMB vs random (NPU)
+CLIMBMIX_RESULT=result/stage1_xxx bash runs/midtrain_validate.sh
 ```
 
-## Reusable Components from Quadmix
+Each script auto-checks dependencies and exits with instructions if anything is missing.
 
-The following components are adapted from the quadmix project:
+## CLI Options
 
-- **Proxy model architecture**: Same RegMix-style tinyllama (SwiGLU+RMSNorm+RoPE)
-- **Device manager**: CPU/CUDA/NPU abstraction
-- **Chunked loss utilities**: Memory-efficient CE loss computation
-- **Normalization utilities**: zscore, minmax, rank normalizers
-- **Shard metadata manager**: Multi-shard parquet loading with on-demand text
+```bash
+python scripts/run_climb.py --help
+
+# Key options:
+--proxy-depth 10          # nanochat model depth (10=70M scaling, 24=730M)
+--proxy-num-iterations 500 # Fixed training steps (not ratio-based)
+--proxy-lr-scale 1.0      # Annealing LR scale (1.0 = continue from base)
+--proxy-warmup 0.0        # No re-warmup (CLIMB annealing)
+--proxy-warmdown 0.9      # 90% warmdown for annealing
+--target-depth 24         # Target model depth
+--nanochat-dir /path      # nanochat-npu directory
+--val-tasks piqa,arc_easy,lambada_openai,commonsense_qa,squad,coqa
+--dry-run                 # Skip training (random scores, CPU only)
+```
+
+## Dependencies
+
+- **nanochat-npu** (external): training backend, must be at configured path
+- **Python**: numpy, lightgbm, scikit-learn, pandas, pyarrow, torch, matplotlib
 
 ## License
 

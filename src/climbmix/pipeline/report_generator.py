@@ -1,9 +1,15 @@
 """
 Pipeline output: Markdown report + matplotlib domain distribution comparison chart.
+
+Two report modes:
+  1. Pipeline report (called by climb_pipeline.py after search)
+  2. Midtrain validation report (called by midtrain_validate.sh)
 """
 
+import argparse
 import json
 import os
+import re
 import time
 from typing import Dict, List, Optional, Any
 
@@ -49,7 +55,7 @@ def generate_markdown_report(
     lines.append(f"|---|---|")
     lines.append(f"| Discovery method | `{config.discovery.method}` |")
     lines.append(f"| Quality filter | `{config.filtering.method}` |")
-    lines.append(f"| Proxy size | `{config.proxy.model_size}` |")
+    lines.append(f"| Proxy | d{config.proxy.depth} ({config.proxy.scaling_M:.1f}M scaling, {config.proxy.total_M:.0f}M total) |")
     lines.append(f"| K_enhanced | {config.discovery.K_enhanced} |")
     lines.append(f"| Num iterations | {config.search.num_iterations} |")
     lines.append(f"| Configs per iter | {config.search.configs_per_iter} |")
@@ -136,3 +142,107 @@ def generate_distribution_chart(
     plt.close(fig)
 
     return chart_path
+
+
+def parse_eval_log(path: str) -> dict:
+    info = {"core_metric": None, "tasks": {}}
+    if not path or not os.path.exists(path):
+        return info
+    task_pat = re.compile(
+        r"Evaluating:\s+(.+?)\s+\(.*?\)\.\.\.\s+accuracy:\s+([\d.]+)\s+\|\s+centered:\s+([\d.-]+)\s+\|\s+time:\s+([\d.]+)s"
+    )
+    core_pat = re.compile(r"CORE metric:\s+([\d.]+)")
+    for line in open(path):
+        m = task_pat.search(line)
+        if m:
+            info["tasks"][m.group(1)] = {
+                "accuracy": float(m.group(2)),
+                "centered": float(m.group(3)),
+                "time": float(m.group(4)),
+            }
+        m = core_pat.search(line)
+        if m:
+            info["core_metric"] = float(m.group(1))
+    return info
+
+
+def generate_midtrain_report(
+    result_dir: str,
+    climb_eval_log: str,
+    random_eval_log: str,
+    base_model_tag: str,
+    climb_model_tag: str,
+    random_model_tag: str,
+) -> str:
+    climb_eval = parse_eval_log(climb_eval_log)
+    random_eval = parse_eval_log(random_eval_log)
+
+    lines: List[str] = []
+    lines.append("# CLIMB Mid-Training Validation Report")
+    lines.append("")
+    lines.append(f"**Generated:** {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append(f"**Base model:** `{base_model_tag}`")
+    lines.append(f"**CLIMB model:** `{climb_model_tag}`")
+    lines.append(f"**Random model:** `{random_model_tag}`")
+    lines.append("")
+
+    lines.append("## CORE Metric Comparison")
+    lines.append("")
+    climb_core = climb_eval["core_metric"]
+    random_core = random_eval["core_metric"]
+    lines.append(f"| Method | CORE metric |")
+    lines.append(f"|---|---|")
+    lines.append(f"| CLIMB optimal | {climb_core:.4f} |" if climb_core else "| CLIMB optimal | N/A |")
+    lines.append(f"| Random baseline | {random_core:.4f} |" if random_core else "| Random baseline | N/A |")
+    if climb_core and random_core:
+        delta = climb_core - random_core
+        lines.append(f"| **Delta** | **{delta:+.4f}** |")
+    lines.append("")
+
+    all_tasks = sorted(set(climb_eval["tasks"].keys()) | set(random_eval["tasks"].keys()))
+    if all_tasks:
+        lines.append("## Per-Task Breakdown")
+        lines.append("")
+        lines.append("| Task | CLIMB accuracy | Random accuracy | Delta |")
+        lines.append("|---|---|---|---|")
+        for task in all_tasks:
+            ca = climb_eval["tasks"].get(task, {}).get("accuracy", None)
+            ra = random_eval["tasks"].get(task, {}).get("accuracy", None)
+            ca_str = f"{ca:.4f}" if ca else "N/A"
+            ra_str = f"{ra:.4f}" if ra else "N/A"
+            if ca and ra:
+                delta_str = f"{ca - ra:+.4f}"
+            else:
+                delta_str = "N/A"
+            lines.append(f"| {task} | {ca_str} | {ra_str} | {delta_str} |")
+        lines.append("")
+
+    report_text = "\n".join(lines)
+    report_path = os.path.join(result_dir, "validation_report.md")
+    with open(report_path, "w") as f:
+        f.write(report_text)
+
+    print(report_text)
+    return report_path
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Generate CLIMB validation report")
+    parser.add_argument("--result-dir", required=True)
+    parser.add_argument("--climb-train-log", default="")
+    parser.add_argument("--random-train-log", default="")
+    parser.add_argument("--climb-eval-log", required=True)
+    parser.add_argument("--random-eval-log", required=True)
+    parser.add_argument("--base-model-tag", required=True)
+    parser.add_argument("--climb-model-tag", required=True)
+    parser.add_argument("--random-model-tag", required=True)
+    args = parser.parse_args()
+
+    generate_midtrain_report(
+        result_dir=args.result_dir,
+        climb_eval_log=args.climb_eval_log,
+        random_eval_log=args.random_eval_log,
+        base_model_tag=args.base_model_tag,
+        climb_model_tag=args.climb_model_tag,
+        random_model_tag=args.random_model_tag,
+    )

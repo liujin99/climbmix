@@ -115,7 +115,6 @@ class ClusterDiscoveryConfig:
     embedding_truncate_len: int = 512
     prune_threshold: float = 3.0
     merge_distance: float = 1.5
-    fdc_num_domains: int = 22
 
     VALID_METHODS = ("fdc_labels", "embedding_cluster")
 
@@ -149,44 +148,68 @@ class SearchConfig:
 
 @dataclass
 class ProxyConfig:
-    model_size: str = "62M"
-    training_steps: int = 1000
-    training_tokens: int = 40_000_000_000
-    batch_tokens: int = 2_000_000
-    micro_batch_size: int = 8
-    learning_rate: float = 5e-5
-    decay_learning_rate: float = 1e-5
-    weight_decay: float = 0.1
-    grad_clip: float = 1.0
-    block_size: int = 2048
-    lr_schedule: str = "wsd"
-    warmup_fraction: float = 0.04
-    stable_fraction: float = 0.76
-    decay_fraction: float = 0.20
+    depth: int = 10
+    num_iterations: Optional[int] = None
+    ratio: Optional[float] = None
     phase1_checkpoint_path: Optional[str] = None
     validation_metric: str = "accuracy"
+    lr_scale: float = 1.0
+    warmup: float = 0.0
+    warmdown: float = 0.9
 
-    VALID_SIZES = ("1M", "5M", "20M", "62M", "132M", "350M")
-    VALID_LR_SCHEDULES = ("wsd", "cosine", "linear")
-    VALID_VALIDATION_METRICS = ("accuracy", "loss")
-
-    SIZE_PARAMS = {
-        "1M": {"batch_tokens": 500_000, "learning_rate": 1e-3, "decay_learning_rate": 1e-4, "training_tokens": 1_000_000_000},
-        "5M": {"batch_tokens": 1_000_000, "learning_rate": 5e-4, "decay_learning_rate": 5e-5, "training_tokens": 5_000_000_000},
-        "20M": {"batch_tokens": 1_000_000, "learning_rate": 2e-4, "decay_learning_rate": 2e-5, "training_tokens": 10_000_000_000},
-        "62M": {"batch_tokens": 1_000_000, "learning_rate": 1e-4, "decay_learning_rate": 1e-5, "training_tokens": 20_000_000_000},
-        "132M": {"batch_tokens": 2_000_000, "learning_rate": 8e-5, "decay_learning_rate": 8e-6, "training_tokens": 30_000_000_000},
-        "350M": {"batch_tokens": 2_000_000, "learning_rate": 5e-5, "decay_learning_rate": 1e-5, "training_tokens": 40_000_000_000},
+    DEPTH_INFO = {
+        4:  {"scaling_M": 3.2,   "total_M": 8.2,    "n_embd": 256,  "n_head": 2},
+        6:  {"scaling_M": 17.6,  "total_M": 41.5,   "n_embd": 384,  "n_head": 3},
+        8:  {"scaling_M": 40.4,  "total_M": 93.8,   "n_embd": 512,  "n_head": 4},
+        10: {"scaling_M": 70.2,  "total_M": 196.0,  "n_embd": 640,  "n_head": 5},
+        12: {"scaling_M": 110.1, "total_M": 286.3,  "n_embd": 768,  "n_head": 6},
+        14: {"scaling_M": 164.2, "total_M": 399.1,  "n_embd": 896,  "n_head": 7},
+        16: {"scaling_M": 234.9, "total_M": 536.9,  "n_embd": 1024, "n_head": 8},
+        18: {"scaling_M": 324.4, "total_M": 701.9,  "n_embd": 1152, "n_head": 9},
+        20: {"scaling_M": 435.2, "total_M": 896.5,  "n_embd": 1280, "n_head": 10},
+        22: {"scaling_M": 569.5, "total_M": 1123.2, "n_embd": 1408, "n_head": 11},
+        24: {"scaling_M": 729.8, "total_M": 1384.1, "n_embd": 1536, "n_head": 12},
     }
 
-    def apply_size_defaults(self) -> "ProxyConfig":
-        if self.model_size in self.SIZE_PARAMS:
-            p = self.SIZE_PARAMS[self.model_size]
-            self.batch_tokens = p["batch_tokens"]
-            self.learning_rate = p["learning_rate"]
-            self.decay_learning_rate = p["decay_learning_rate"]
-            self.training_tokens = p["training_tokens"]
-        return self
+    @property
+    def scaling_params(self) -> int:
+        info = self.DEPTH_INFO.get(self.depth)
+        if info is None:
+            raise ValueError(f"Unsupported depth={self.depth}. Valid: {sorted(self.DEPTH_INFO.keys())}")
+        return int(info["scaling_M"] * 1_000_000)
+
+    @property
+    def total_params(self) -> int:
+        info = self.DEPTH_INFO.get(self.depth)
+        if info is None:
+            raise ValueError(f"Unsupported depth={self.depth}. Valid: {sorted(self.DEPTH_INFO.keys())}")
+        return int(info["total_M"] * 1_000_000)
+
+    @property
+    def model_tag(self) -> str:
+        return f"d{self.depth}"
+
+    @property
+    def scaling_M(self) -> float:
+        info = self.DEPTH_INFO.get(self.depth)
+        if info is None:
+            raise ValueError(f"Unsupported depth={self.depth}. Valid: {sorted(self.DEPTH_INFO.keys())}")
+        return info["scaling_M"]
+
+    @property
+    def total_M(self) -> float:
+        info = self.DEPTH_INFO.get(self.depth)
+        if info is None:
+            raise ValueError(f"Unsupported depth={self.depth}. Valid: {sorted(self.DEPTH_INFO.keys())}")
+        return info["total_M"]
+
+    @property
+    def training_iterations(self) -> int:
+        if self.num_iterations is not None:
+            return self.num_iterations
+        if self.ratio is not None:
+            return max(1, int(self.ratio * self.scaling_params / 500_000))
+        return 500
 
 
 @dataclass
@@ -204,10 +227,39 @@ class PredictorConfig:
 
 
 @dataclass
+class TargetConfig:
+    depth: int = 24
+    num_iterations: Optional[int] = None
+    ratio: Optional[float] = None
+    phase1_checkpoint_path: Optional[str] = None
+    lr_scale: float = 1.0
+    warmup: float = 0.0
+    warmdown: float = 0.9
+
+    @property
+    def model_tag(self) -> str:
+        return f"d{self.depth}"
+
+    @property
+    def training_iterations(self) -> int:
+        if self.num_iterations is not None:
+            return self.num_iterations
+        if self.ratio is not None:
+            return max(1, int(self.ratio * ProxyConfig.DEPTH_INFO[self.depth]["scaling_M"] * 1_000_000 / 500_000))
+        return 1000
+
+
+@dataclass
 class DeviceConfig:
     device_type: str = "cpu"
     npu_device_id: int = 0
     npu_devices: int = 8
+
+
+HIGH_SIGNAL_TASKS = [
+    "piqa", "arc_easy", "lambada_openai",
+    "commonsense_qa", "squad", "coqa",
+]
 
 
 @dataclass
@@ -216,11 +268,13 @@ class CLIMBConfig:
     filtering: QualityFilterConfig = field(default_factory=QualityFilterConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
     proxy: ProxyConfig = field(default_factory=ProxyConfig)
+    target: TargetConfig = field(default_factory=TargetConfig)
     predictor: PredictorConfig = field(default_factory=PredictorConfig)
     device: DeviceConfig = field(default_factory=DeviceConfig)
-    val_tasks: List[str] = field(default_factory=lambda: ["piqa", "arc_e", "hellaswag"])
+    val_tasks: List[str] = field(default_factory=lambda: HIGH_SIGNAL_TASKS.copy())
     data_dir: str = "./data"
     output_dir: str = "./climbmix_output"
+    nanochat_dir: str = "/home/liujin99/nanochat-npu"
 
     @property
     def metric_direction(self) -> str:

@@ -116,7 +116,7 @@ class IterativeBootstrapper:
 
         if proxy_runner is not None:
             print(f"[Iter {iteration}] Training {len(new_configs)} proxy models")
-            results = proxy_runner.run_batch(new_configs, self.cluster_labels, self.cluster_token_counts)
+            results = proxy_runner.run_batch(new_configs)
             for r in results:
                 s = r.score
                 scores.append(s)

@@ -63,7 +63,7 @@ class CLIMBPipeline:
         print("  Nemotron-CLIMB Pipeline")
         print(f"  Discovery: {self.config.discovery.method}")
         print(f"  Filter: {self.config.filtering.method}")
-        print(f"  Proxy: {self.config.proxy.model_size}")
+        print(f"  Proxy: {self.config.proxy.model_tag} ({self.config.proxy.scaling_M:.1f}M scaling)")
         print(f"  Output: {output_dir}")
         print("=" * 70)
 
@@ -76,27 +76,27 @@ class CLIMBPipeline:
             )
         stage_times["stage0_load"] = time.time() - _t
 
-        # Stage 1: Quality filtering
-        _t = time.time()
-        quality_filter = get_filter(self.config.filtering.method)
-        filtered_labels, cluster_quality = quality_filter.filter(
-            cluster_labels, quality_scores, self.config.filtering,
-        )
-        stage_times["stage1_filter"] = time.time() - _t
-
-        # Stage 2: Cluster discovery
+        # Stage 1: Cluster discovery (must run before quality filter)
         _t = time.time()
         discovery = get_discovery(self.config.discovery.method, self.config.discovery)
         cluster_info, final_labels = discovery.discover(
             texts=texts_loaded,
-            cluster_labels=filtered_labels,
+            cluster_labels=cluster_labels,
             quality_scores=quality_scores,
             token_counts=token_counts,
             metadata_manager=mm,
         )
         num_clusters = len(cluster_info)
-        print(f"[Stage 2] {num_clusters} clusters, {len(final_labels):,} documents")
-        stage_times["stage2_discovery"] = time.time() - _t
+        print(f"[Stage 1] {num_clusters} clusters, {len(final_labels):,} documents")
+        stage_times["stage1_discovery"] = time.time() - _t
+
+        # Stage 2: Quality filtering (after clusters are known)
+        _t = time.time()
+        quality_filter = get_filter(self.config.filtering.method)
+        filtered_labels, cluster_quality = quality_filter.filter(
+            final_labels, quality_scores, self.config.filtering,
+        )
+        stage_times["stage2_filter"] = time.time() - _t
 
         # Get cluster token counts for Dirichlet
         cluster_token_counts = np.array(
@@ -108,8 +108,13 @@ class CLIMBPipeline:
         print("\n[Stage 3] Running iterative bootstrapping search")
 
         bootstrapper = IterativeBootstrapper(
-            self.config, cluster_token_counts, final_labels,
+            self.config, cluster_token_counts, filtered_labels,
         )
+
+        if proxy_runner is not None and hasattr(proxy_runner, '__init__'):
+            proxy_runner.cluster_labels = filtered_labels
+            proxy_runner.token_counts = token_counts
+            proxy_runner.metadata_manager = mm
 
         optimal_weights, iter_results = bootstrapper.search_optimal(proxy_runner)
         stage_times["stage3_search"] = time.time() - _t
@@ -119,13 +124,13 @@ class CLIMBPipeline:
         print("\n[Stage 4] Selecting data with optimal mixture weights")
 
         selected_indices, sampling_probs = select_data_by_mixture(
-            final_labels,
+            filtered_labels,
             optimal_weights.mixture_weights,
             token_counts,
         )
 
         stats = compute_mixture_dataset_stats(
-            final_labels, selected_indices, cluster_info,
+            filtered_labels, selected_indices, cluster_info,
             optimal_weights.mixture_weights,
         )
         stage_times["stage4_selection"] = time.time() - _t
@@ -216,7 +221,7 @@ class CLIMBPipeline:
             "config": {
                 "discovery_method": self.config.discovery.method,
                 "filter_method": self.config.filtering.method,
-                "proxy_size": self.config.proxy.model_size,
+                "proxy_size": self.config.proxy.model_tag,
                 "K_enhanced": self.config.discovery.K_enhanced,
                 "num_iterations": self.config.search.num_iterations,
                 "configs_per_iter": self.config.search.configs_per_iter,
