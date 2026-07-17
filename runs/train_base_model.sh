@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────────
-# Phase 1: Base checkpoint pretraining
+# Phase 1: Base checkpoint pretraining (CLIMB-aligned)
 # ──────────────────────────────────────────────────────────────
-# Produces a base checkpoint that CLIMB mid_train will anneal from.
+# Produces a base checkpoint with CONSTANT LR (no warmdown).
+# CLIMB annealing (LR decay) happens ONLY in mid_train.
+# This matches the 2024-2025 industry trend and the CLIMB paper.
 # Run this BEFORE Stage 1/2 to generate required checkpoints.
 #
 # Time: d10 ~0.6h, d14 ~4h, d18 ~15h, d24 ~29h
 #
 # Usage:
-#   DEPTH=10  bash runs/pretrain.sh
-#   DEPTH=24  bash runs/pretrain.sh
-#   DEPTH=14  bash runs/pretrain.sh
+#   DEPTH=10  bash runs/train_base_model.sh
+#   DEPTH=24  bash runs/train_base_model.sh
 # ──────────────────────────────────────────────────────────────
 
 set -euo pipefail
@@ -41,6 +42,8 @@ source /usr/local/Ascend/ascend-toolkit/set_env.sh 2>/dev/null || true
 
 echo ""
 echo "Training d${DEPTH} (ratio=$RATIO, tag=$MODEL_TAG)..."
+echo "  LR schedule: warmup + constant (no warmdown)"
+echo "  CLIMB annealing will happen in mid_train, not here"
 echo "  Estimated time: see header comments"
 
 cd "$NANOCHAT_DIR"
@@ -48,6 +51,7 @@ torchrun --standalone --nproc_per_node=8 -m scripts.base_train \
     -- --depth="$DEPTH" \
     --target-param-data-ratio="$RATIO" \
     --device-batch-size=8 \
+    --warmdown-ratio=0.0 \
     --run=dummy \
     --model-tag="$MODEL_TAG"
 
