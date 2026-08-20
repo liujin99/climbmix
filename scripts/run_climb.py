@@ -47,7 +47,7 @@ def main():
     # ── Discovery ──
     parser.add_argument("--discovery-method", type=str, default="embedding_cluster",
                         choices=["embedding_cluster"])
-    parser.add_argument("--K-enhanced", type=int, default=21)
+    parser.add_argument("--K-enhanced", type=int, default=10)
     parser.add_argument("--embedding-model", type=str, default="NovaSearch/stella_en_400M_v5")
     parser.add_argument("--prune-threshold", type=float, default=3.0)
     parser.add_argument("--merge-distance", type=float, default=1.5)
@@ -57,7 +57,7 @@ def main():
                         choices=["none", "doc_level", "cluster_level", "doc_and_cluster"])
 
     # ── Proxy ──
-    parser.add_argument("--proxy-depth", type=int, default=14)
+    parser.add_argument("--proxy-depth", type=int, default=20)
     parser.add_argument("--proxy-num-iterations", type=int, default=None)
     parser.add_argument("--proxy-ratio", type=float, default=None)
     parser.add_argument("--proxy-lr-scale", type=float, default=1.0)
@@ -80,7 +80,7 @@ def main():
 
     # ── Search ──
     parser.add_argument("--num-iterations", type=int, default=3)
-    parser.add_argument("--configs-per-iter", type=str, default="8,4,2")
+    parser.add_argument("--configs-per-iter", type=str, default="15,8,4")
     parser.add_argument("--dirichlet-alpha", type=float, default=None)
 
     # ── Predictor ──

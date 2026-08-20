@@ -222,14 +222,9 @@ class ProxyResult:
     per_task_losses: Optional[Dict[str, float]] = None
     per_task_nlls: Optional[Dict[str, float]] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
-    score_alpha: float = 0.5
 
     @property
     def score(self) -> float:
-        if self.validation_nll > 0:
-            import math
-            pseudo_acc = math.exp(-self.validation_nll)
-            return self.score_alpha * self.validation_accuracy + (1.0 - self.score_alpha) * pseudo_acc
         return self.validation_accuracy
 
 
@@ -255,7 +250,7 @@ class IterationResult:
 class ClusterDiscoveryConfig:
     method: str = "embedding_cluster"
     K_init: int = 1000
-    K_enhanced: int = 21
+    K_enhanced: int = 10
     embedding_model: str = "NovaSearch/stella_en_400M_v5"
     embedding_truncate_len: int = 512
     prune_threshold: float = 3.0
@@ -281,10 +276,11 @@ class QualityFilterConfig:
 @dataclass
 class SearchConfig:
     num_iterations: int = 3
-    configs_per_iter: List[int] = field(default_factory=lambda: [64, 32, 16])
+    configs_per_iter: List[int] = field(default_factory=lambda: [15, 8, 4])
     dirichlet_alpha: Optional[float] = None
     predict_top_n_ratio: float = 0.5
     sample_from_top_m: int = 32
+    w_floor: float = 0.0
 
     @property
     def total_configs(self) -> int:
@@ -293,7 +289,7 @@ class SearchConfig:
 
 @dataclass
 class ProxyConfig:
-    depth: int = 14
+    depth: int = 20
     num_iterations: Optional[int] = None
     ratio: Optional[float] = None
     phase1_checkpoint_path: Optional[str] = None
@@ -361,8 +357,8 @@ class PredictorConfig:
     method: str = "lightgbm"
     l1_reg: float = 1.0
     l2_reg: float = 1.0
-    max_depth: int = 4
-    min_samples_leaf: int = 5
+    max_depth: int = 3
+    min_samples_leaf: int = 3
     n_estimators: int = 500
     early_stopping_rounds: int = 20
     learning_rate: float = 0.02
@@ -445,6 +441,15 @@ STEM_BENCHMARK_LABELS = [
     "arc_easy", "arc_challenge", "mmlu_stem",
     "gpqa_diamond", "gsm8k_cot", "math_cot_500",
 ]
+
+BENCHMARK_SIZES = {
+    "arc_easy": 2376,
+    "arc_challenge": 1172,
+    "mmlu_stem": 3545,
+    "gpqa_diamond": 198,
+    "gsm8k_cot": 1319,
+    "math_cot_500": 500,
+}
 
 
 @dataclass

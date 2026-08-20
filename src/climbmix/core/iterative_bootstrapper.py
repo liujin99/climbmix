@@ -18,6 +18,7 @@ from climbmix.core.types import (
     ProxyResult,
     IterationResult,
     CLIMBConfig,
+    BENCHMARK_SIZES,
 )
 from climbmix.core.dirichlet_sampler import DirichletSampler
 from climbmix.core.predictor import get_predictor
@@ -51,8 +52,10 @@ class IterativeBootstrapper:
 
         self._accumulated_configs: List[MixtureConfig] = []
         self._accumulated_scores: List[float] = []
+        self._accumulated_per_benchmark: List[Tuple[Optional[Dict[str, float]], Optional[Dict[str, float]]]] = []
         self._iteration_results: List[IterationResult] = []
         self._predictor: Optional[Any] = None
+        self.w_floor = config.search.w_floor
 
     def _is_better(self, score_a: float, score_b: float) -> bool:
         if self.metric_direction == "maximize":
@@ -63,6 +66,45 @@ class IterativeBootstrapper:
         if self.metric_direction == "maximize":
             return int(np.argmax(scores))
         return int(np.argmin(scores))
+
+    def _compute_scores(self) -> npt.NDArray[np.float64]:
+        """Compute SNR-weighted scores for all accumulated configs.
+
+        Per-benchmark: z-score accuracy and NLL, combine with SNR weight.
+        sigma2_noise = 0.25 / K (worst-case binomial variance).
+        f = 1 - noise/between (can be negative when noise > between).
+        w = max(w_floor, min(1, max(0, (1+f)/2))) — clamped to [w_floor, 1].
+        """
+        N = len(self._accumulated_per_benchmark)
+        if N == 0:
+            return np.array([], dtype=np.float64)
+
+        benchmarks = self.config.val_tasks
+        per_config_scores = np.zeros(N, dtype=np.float64)
+
+        for b in benchmarks:
+            accs = np.array([
+                (d[0] or {}).get(b, 0.0) for d in self._accumulated_per_benchmark
+            ])
+            nlls = np.array([
+                (d[1] or {}).get(b, 0.0) for d in self._accumulated_per_benchmark
+            ])
+
+            acc_z = (accs - accs.mean()) / (accs.std() + 1e-12)
+            nll_z = -(nlls - nlls.mean()) / (nlls.std() + 1e-12)
+
+            K = BENCHMARK_SIZES.get(b, 1000)
+            sigma2_noise = 0.25 / K
+            sigma2_between = float(accs.var()) + 1e-12
+            f = 1.0 - sigma2_noise / sigma2_between
+            w = max(self.w_floor, min(1.0, max(0.0, (1.0 + f) / 2.0)))
+
+            per_config_scores += w * acc_z + (1.0 - w) * nll_z
+
+            print(f"    {b}: w={w:.3f} (f={f:.3f}, noise={sigma2_noise:.6f}, between={sigma2_between:.6f})")
+
+        per_config_scores /= len(benchmarks)
+        return per_config_scores
 
     def run_iteration(
         self,
@@ -109,36 +151,35 @@ class IterativeBootstrapper:
         for i, c in enumerate(new_configs):
             c.config_id = len(self._accumulated_configs) + i
 
-        scores: List[float] = []
         trained_configs: List[MixtureConfig] = []
 
         if proxy_runner is not None:
             print(f"[Iter {iteration}] Training {len(new_configs)} proxy models")
             results = proxy_runner.run_batch(new_configs)
             for r in results:
-                s = r.score
-                scores.append(s)
                 trained_configs.append(r.mixture_config)
                 self._accumulated_configs.append(r.mixture_config)
-                self._accumulated_scores.append(s)
+                self._accumulated_per_benchmark.append(
+                    (r.per_task_accuracies, r.per_task_nlls)
+                )
         else:
             print(f"[Iter {iteration}] No proxy runner, using random scores (for testing)")
             rng = np.random.default_rng(iteration * 1000)
             for c in new_configs:
-                if self.metric_direction == "maximize":
-                    s = rng.uniform(0.2, 0.6)
-                else:
-                    s = rng.uniform(2.5, 4.5)
-                scores.append(s)
                 trained_configs.append(c)
                 self._accumulated_configs.append(c)
-                self._accumulated_scores.append(s)
+                fake_acc = {b: float(rng.uniform(0.0, 0.1)) for b in self.config.val_tasks}
+                fake_nll = {b: float(rng.uniform(2.0, 4.0)) for b in self.config.val_tasks}
+                self._accumulated_per_benchmark.append((fake_acc, fake_nll))
 
-        scores_arr = np.array(scores, dtype=np.float64)
+        print(f"[Iter {iteration}] Computing SNR-weighted scores on {len(self._accumulated_per_benchmark)} accumulated configs")
+        all_scores = self._compute_scores()
+        self._accumulated_scores = all_scores.tolist()
+
+        n_new = len(trained_configs)
+        scores_arr = all_scores[-n_new:] if n_new > 0 else np.array([], dtype=np.float64)
 
         print(f"[Iter {iteration}] Training predictor on {len(self._accumulated_configs)} accumulated configs")
-
-        all_scores = np.array(self._accumulated_scores, dtype=np.float64)
 
         if self.metric_direction == "minimize":
             predictor_targets = all_scores
