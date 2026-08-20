@@ -33,9 +33,6 @@ class ColumnSchema:
         "qs_advertisement",
     )
 
-    fdc_domain_col: str = "domain"
-    fdc_prefix_col: str = "eai_taxonomy"
-
     preprocessed_pattern: str = "preprocessed_*.parquet"
 
     def resolve_cluster_col(self, available_columns: List[str]) -> str:

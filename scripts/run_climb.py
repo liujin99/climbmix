@@ -3,9 +3,9 @@
 CLIMB CLI entry point — method A (subprocess nanochat).
 
 Usage:
-  python scripts/run_climb.py --data-dir /path/to/data --proxy-depth 10 --dry-run
-  python scripts/run_climb.py --data-dir /path/to/data --proxy-depth 10 --target-depth 24
-  python scripts/run_climb.py --proxy-depth 10 --num-iterations 500 --phase1-checkpoint-path /path/to/ckpt
+  python scripts/run_climb.py --data-dir /path/to/stem_data --dry-run
+  python scripts/run_climb.py --data-dir /path/to/stem_data --proxy-depth 14 --target-depth 28
+  python scripts/run_climb.py --proxy-depth 14 --phase1-checkpoint-path /path/to/d14_ckpt
 """
 
 import argparse
@@ -16,7 +16,7 @@ try:
     from climbmix.core.types import (
         CLIMBConfig, ClusterDiscoveryConfig, QualityFilterConfig,
         SearchConfig, ProxyConfig, TargetConfig, PredictorConfig,
-        DeviceConfig, HIGH_SIGNAL_TASKS,
+        DeviceConfig, STEM_BENCHMARK_LABELS, DEFAULT_NANOCHAT_BASE_DIR,
     )
     from climbmix.pipeline.climb_pipeline import CLIMBPipeline
 except ImportError:
@@ -24,7 +24,7 @@ except ImportError:
     from climbmix.core.types import (
         CLIMBConfig, ClusterDiscoveryConfig, QualityFilterConfig,
         SearchConfig, ProxyConfig, TargetConfig, PredictorConfig,
-        DeviceConfig, HIGH_SIGNAL_TASKS,
+        DeviceConfig, STEM_BENCHMARK_LABELS, DEFAULT_NANOCHAT_BASE_DIR,
     )
     from climbmix.pipeline.climb_pipeline import CLIMBPipeline
 
@@ -35,10 +35,18 @@ def main():
     # ── Data ──
     parser.add_argument("--data-dir", type=str, default="./data")
     parser.add_argument("--nanochat-dir", type=str, default="/home/liujin99/nanochat-npu")
+    parser.add_argument("--nanochat-base-dir", type=str, default=DEFAULT_NANOCHAT_BASE_DIR,
+                        help=f"Base directory for nanochat checkpoints (default: {DEFAULT_NANOCHAT_BASE_DIR})")
+    parser.add_argument("--general-data-dir", type=str, default="",
+                        help="Directory for cached ClimbMix general data shards (adaptive 3-50)")
+    parser.add_argument("--stem-ratio", type=float, default=0.7,
+                        help="STEM data ratio (default 0.7 = 70%% STEM + 30%% general)")
+    parser.add_argument("--eval-benchmarks", type=str, default="stem",
+                        help="Evaluation benchmarks: all, core, stem, or comma-separated labels")
 
     # ── Discovery ──
-    parser.add_argument("--discovery-method", type=str, default="fdc_labels",
-                        choices=["fdc_labels", "embedding_cluster"])
+    parser.add_argument("--discovery-method", type=str, default="embedding_cluster",
+                        choices=["embedding_cluster"])
     parser.add_argument("--K-enhanced", type=int, default=21)
     parser.add_argument("--embedding-model", type=str, default="NovaSearch/stella_en_400M_v5")
     parser.add_argument("--prune-threshold", type=float, default=3.0)
@@ -49,7 +57,7 @@ def main():
                         choices=["none", "doc_level", "cluster_level", "doc_and_cluster"])
 
     # ── Proxy ──
-    parser.add_argument("--proxy-depth", type=int, default=10)
+    parser.add_argument("--proxy-depth", type=int, default=14)
     parser.add_argument("--proxy-num-iterations", type=int, default=None)
     parser.add_argument("--proxy-ratio", type=float, default=None)
     parser.add_argument("--proxy-lr-scale", type=float, default=1.0)
@@ -60,13 +68,15 @@ def main():
                         choices=["accuracy", "loss"])
 
     # ── Target ──
-    parser.add_argument("--target-depth", type=int, default=24)
+    parser.add_argument("--target-depth", type=int, default=28)
     parser.add_argument("--target-num-iterations", type=int, default=None)
     parser.add_argument("--target-ratio", type=float, default=None)
     parser.add_argument("--target-lr-scale", type=float, default=1.0)
     parser.add_argument("--target-warmup", type=float, default=0.0)
     parser.add_argument("--target-warmdown", type=float, default=0.9)
     parser.add_argument("--target-phase1-checkpoint-path", type=str, default=None)
+    parser.add_argument("--skip-target", action="store_true",
+                        help="Skip target training (only run proxy search)")
 
     # ── Search ──
     parser.add_argument("--num-iterations", type=int, default=3)
@@ -77,7 +87,7 @@ def main():
     parser.add_argument("--predictor-method", type=str, default="lightgbm")
 
     # ── Device ──
-    parser.add_argument("--device-type", type=str, default="cpu",
+    parser.add_argument("--device-type", type=str, default="npu",
                         choices=["cpu", "cuda", "npu"])
     parser.add_argument("--npu-devices", type=int, default=8)
 
@@ -93,7 +103,7 @@ def main():
     args = parser.parse_args()
 
     configs_per_iter = [int(x) for x in args.configs_per_iter.split(",")]
-    val_tasks = HIGH_SIGNAL_TASKS.copy() if args.val_tasks is None else [x.strip() for x in args.val_tasks.split(",")]
+    val_tasks = STEM_BENCHMARK_LABELS.copy() if args.val_tasks is None else [x.strip() for x in args.val_tasks.split(",")]
 
     proxy_config = ProxyConfig(
         depth=args.proxy_depth,
@@ -141,6 +151,10 @@ def main():
         data_dir=args.data_dir,
         output_dir=args.output_dir,
         nanochat_dir=args.nanochat_dir,
+        nanochat_base_dir=args.nanochat_base_dir,
+        general_data_dir=args.general_data_dir,
+        stem_ratio=args.stem_ratio,
+        eval_benchmarks=args.eval_benchmarks,
     )
 
     print(f"\n{'=' * 70}")
@@ -152,17 +166,25 @@ def main():
     print(f"  Discovery:  {config.discovery.method} (K_enhanced={config.discovery.K_enhanced})")
     print(f"  Search:     {config.search.num_iterations} iterations, {configs_per_iter} = {sum(configs_per_iter)} configs")
     print(f"  Metric:     {config.val_tasks} ({config.metric_direction})")
+    print(f"  Eval:       benchmarks={config.eval_benchmarks}")
+    print(f"  Data mix:   {config.stem_ratio*100:.0f}% STEM + {(1-config.stem_ratio)*100:.0f}% general")
     print(f"  Device:     {config.device.device_type} ({config.device.npu_devices} devices)")
     print(f"  nanochat:   {config.nanochat_dir}")
+    print(f"  base_dir:   {config.nanochat_base_dir}")
     print(f"{'=' * 70}\n")
 
     proxy_runner = None
+    target_runner = None
     if not args.dry_run:
         from climbmix.pipeline.proxy_runner import ProxyRunner
         proxy_runner = ProxyRunner(config)
 
+        if not args.skip_target:
+            from climbmix.pipeline.target_runner import TargetRunner
+            target_runner = TargetRunner(config)
+
     pipeline = CLIMBPipeline(config)
-    results = pipeline.run(proxy_runner=proxy_runner)
+    results = pipeline.run(proxy_runner=proxy_runner, target_runner=target_runner)
 
     print(f"\nDone! Results in: {args.output_dir}/")
 

@@ -98,8 +98,6 @@ class IterativeBootstrapper:
                 novel_configs = pool_configs
 
             ranked_indices = self._predictor.predict_and_rank(novel_configs)
-            if self.metric_direction == "maximize":
-                ranked_indices = ranked_indices[::-1]
 
             top_n = min(self.config.search.sample_from_top_m * 3, len(novel_configs))
             top_configs = [novel_configs[i] for i in ranked_indices[:top_n]]
@@ -284,8 +282,6 @@ class IterativeBootstrapper:
             all_candidates.extend(batch)
 
         predictions = self._predictor.predict(all_candidates)
-        if self.metric_direction == "maximize":
-            predictions = -predictions
 
         best_pool_idx = int(np.argmin(predictions))
         best_from_pool = all_candidates[best_pool_idx]
@@ -304,8 +300,6 @@ class IterativeBootstrapper:
         )
 
         refinement_predictions = self._predictor.predict(refinement_candidates)
-        if self.metric_direction == "maximize":
-            refinement_predictions = -refinement_predictions
 
         best_refine_idx = int(np.argmin(refinement_predictions))
         optimal = refinement_candidates[best_refine_idx]

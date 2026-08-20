@@ -19,9 +19,13 @@ dependencies = [
     "pyarrow>=10.0",
     "torch>=2.0",
     "matplotlib>=3.7",
+    "tqdm>=4.0",
     "sentence-transformers>=2.0",
     "faiss-cpu>=1.7",
 ]
+# Note: sentence-transformers on Ascend NPU may require torch_npu;
+# embedding_cluster.py falls back to CPU (all available threads) if NPU inference fails.
+# torch_npu is optional — install separately for Ascend NPU support.
 
 [project.urls]
 Homepage = "https://github.com/liujin99/climbmix"

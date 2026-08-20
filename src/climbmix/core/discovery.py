@@ -3,54 +3,15 @@ Cluster discovery strategies.
 
 Provides a registry to select between different cluster discovery
 methods via config:
-  - "fdc_labels": use predefined FDC domain labels as clusters
   - "embedding_cluster": embed + K-means + prune + merge
 """
 
-from typing import Dict, List, Optional, Tuple, Type
+from typing import Dict, Optional, Tuple
 import numpy as np
 import numpy.typing as npt
 
 from climbmix.core.types import ClusterInfo, ClusterDiscoveryConfig
 from climbmix.core.protocols import ClusterDiscovery
-
-
-class FDCLabelDiscovery:
-    def discover(
-        self,
-        texts: Optional[List[str]],
-        cluster_labels: Optional[npt.NDArray[np.int64]],
-        quality_scores: Optional[npt.NDArray[np.float64]],
-        token_counts: Optional[npt.NDArray[np.int64]],
-        metadata_manager: Optional[object],
-    ) -> Tuple[List[ClusterInfo], npt.NDArray[np.int64]]:
-        if metadata_manager is not None:
-            labels = metadata_manager.cluster_labels
-            tc = metadata_manager.estimate_token_counts()
-        elif cluster_labels is not None:
-            labels = cluster_labels
-            tc = token_counts if token_counts is not None else np.ones(len(labels), dtype=np.int64)
-        else:
-            raise ValueError("FDC discovery requires metadata_manager or cluster_labels")
-
-        valid_mask = labels >= 0
-        unique_ids = np.unique(labels[valid_mask])
-        clusters: List[ClusterInfo] = []
-
-        for cid in sorted(unique_ids):
-            mask = labels == cid
-            n_docs = int(mask.sum())
-            n_tokens = int(tc[mask].sum())
-            clusters.append(ClusterInfo(
-                cluster_id=int(cid),
-                centroid=np.zeros(1, dtype=np.float64),
-                num_docs=n_docs,
-                num_tokens=n_tokens,
-                label=f"D{int(cid)}",
-            ))
-
-        print(f"[FDC Discovery] {len(clusters)} domains, {len(labels):,} docs")
-        return clusters, labels
 
 
 class EmbeddingClusterDiscovery:
@@ -59,12 +20,12 @@ class EmbeddingClusterDiscovery:
 
     def discover(
         self,
-        texts: Optional[List[str]],
+        texts: Optional[list],
         cluster_labels: Optional[npt.NDArray[np.int64]],
         quality_scores: Optional[npt.NDArray[np.float64]],
         token_counts: Optional[npt.NDArray[np.int64]],
         metadata_manager: Optional[object],
-    ) -> Tuple[List[ClusterInfo], npt.NDArray[np.int64]]:
+    ) -> Tuple[list, npt.NDArray[np.int64]]:
         from climbmix.core.cluster_merge import preprocess_pipeline
 
         config = self._config
@@ -100,7 +61,6 @@ class EmbeddingClusterDiscovery:
 
 
 DISCOVERY_REGISTRY: Dict[str, ClusterDiscovery] = {
-    "fdc_labels": FDCLabelDiscovery(),
     "embedding_cluster": EmbeddingClusterDiscovery(),
 }
 

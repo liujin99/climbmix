@@ -1,22 +1,19 @@
 """
-Proxy runner for CLIMB — subprocess calls nanochat mid_train.py + base_eval.py.
+Target runner for CLIMB — trains the final target model (e.g. d28) using
+the optimal mixture weights found during proxy search.
 
-Each proxy experiment:
-  1. Prepare mixture-weighted data: 70% STEM (by cluster weights) + 30% ClimbMix
-     (adaptive 3-50 shards, reverse download from shard 6542, not full 400B)
-  2. Call nanochat mid_train.py (annealing from base checkpoint, unique model-tag)
-  3. Call nanochat base_eval.py (STEM benchmark evaluation)
-  4. Parse evaluation results → ProxyResult
+Steps:
+  1. Select STEM docs by optimal mixture weights
+  2. Mix 70% STEM + 30% ClimbMix general data (adaptive 3-50 shards, reverse download)
+  3. Call nanochat mid_train.py (d28 annealing from base checkpoint)
+  4. Call nanochat base_eval.py (STEM benchmark evaluation)
+  5. Parse evaluation results
 
 Key design:
-  - Each experiment gets a unique model-tag (e.g. "climbmix_exp_0000")
-  - Each experiment gets a unique data-dir with mixture-weighted parquet shard
-  - Annealing semantics: lr_scale=1.0, warmup=0.0, warmdown=0.9
-  - Fixed training via --num-iterations (not ratio-based)
-  - Validation: STEM benchmarks → stem_metric (centered accuracy)
-  - General data: ClimbMix shards (adaptive 3-50, reverse order from 6542)
-    to avoid overlap with pretrain data (shards 0-999); count auto-calculated
-    from STEM doc count, not full 400B dataset
+  - Uses optimal mixture weights from pipeline Stage 4
+  - Same 70/30 STEM + ClimbMix mixing as proxy experiments
+  - General data cached and reused from proxy phase
+  - Evaluation: --eval-benchmarks=stem → stem_metric
 """
 
 import os
@@ -28,13 +25,13 @@ import subprocess
 import time
 import numpy as np
 import numpy.typing as npt
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 
-from climbmix.core.types import MixtureConfig, MixtureWeights, ProxyResult, CLIMBConfig
+from climbmix.core.types import CLIMBConfig, MixtureWeights
 from climbmix.sampling.data_selector import select_data_by_mixture
 
 
-class ProxyRunner:
+class TargetRunner:
 
     def __init__(
         self,
@@ -46,14 +43,12 @@ class ProxyRunner:
         self.config = config
         self.nanochat_dir = config.nanochat_dir
         self.nanochat_base_dir = config.nanochat_base_dir
-        self._validate_nanochat()
-        self.proxy_depth = config.proxy.depth
-        self.proxy_num_iterations = config.proxy.training_iterations
-        self.proxy_lr_scale = config.proxy.lr_scale
-        self.proxy_warmup = config.proxy.warmup
-        self.proxy_warmdown = config.proxy.warmdown
-        self.proxy_phase1_ckpt = config.proxy.phase1_checkpoint_path
-        self.validation_metric = config.proxy.validation_metric
+        self.target_depth = config.target.depth
+        self.target_num_iterations = config.target.training_iterations
+        self.target_lr_scale = config.target.lr_scale
+        self.target_warmup = config.target.warmup
+        self.target_warmdown = config.target.warmdown
+        self.target_phase1_ckpt = config.target.phase1_checkpoint_path
         self.val_tasks = config.val_tasks
         self.device_type = config.device.device_type
         self.npu_devices = config.device.npu_devices
@@ -65,71 +60,59 @@ class ProxyRunner:
         self.token_counts = token_counts
         self.metadata_manager = metadata_manager
 
-    def _validate_nanochat(self):
-        nc_dir = self.nanochat_dir
-        if not os.path.isdir(nc_dir):
-            raise FileNotFoundError(f"nanochat-npu not found at: {nc_dir}")
-        required_scripts = ["scripts/mid_train.py", "scripts/base_eval.py"]
-        for script in required_scripts:
-            path = os.path.join(nc_dir, script)
-            if not os.path.isfile(path):
-                raise FileNotFoundError(f"nanochat script missing: {path}")
-        required_modules = ["nanochat/gpt.py", "nanochat/checkpoint_manager.py", "nanochat/dataloader.py"]
-        for module in required_modules:
-            path = os.path.join(nc_dir, module)
-            if not os.path.isfile(path):
-                raise FileNotFoundError(f"nanochat module missing: {path}")
-        print(f"  [ProxyRunner] nanochat-npu validated at {nc_dir}")
-
-    def run_experiment(
+    def run(
         self,
-        mixture_config: MixtureConfig,
-        experiment_id: int = 0,
-        data_dir: Optional[str] = None,
-        output_dir: Optional[str] = None,
-    ) -> ProxyResult:
-        output_dir = output_dir or self.config.output_dir
-        exp_dir = os.path.join(output_dir, f"exp_{experiment_id:04d}")
-        os.makedirs(exp_dir, exist_ok=True)
+        optimal_weights: MixtureWeights,
+        selected_indices: npt.NDArray[np.int64],
+        output_dir: str,
+    ) -> Dict[str, Any]:
+        """Run target training with optimal mixture.
 
-        model_tag = f"climbmix_{experiment_id:04d}"
+        Args:
+            optimal_weights: Optimal mixture weights from pipeline.
+            selected_indices: Pre-selected doc indices from pipeline Stage 4.
+            output_dir: Output directory for this run.
+
+        Returns:
+            Dict with training and evaluation results.
+        """
+        target_dir = os.path.join(output_dir, "target_run")
+        os.makedirs(target_dir, exist_ok=True)
+
+        model_tag = f"climbmix_target_d{self.target_depth}"
 
         self._symlink_base_checkpoint(model_tag)
 
-        mixture_data_dir = os.path.join(exp_dir, "mixture_data")
+        mixture_data_dir = os.path.join(target_dir, "mixture_data")
 
         t_start = time.time()
-        print(f"\n  [Exp {experiment_id}] Starting proxy experiment (d{self.proxy_depth}, tag={model_tag})")
+        print(f"\n  [Target] Starting target training (d{self.target_depth}, tag={model_tag})")
 
-        print(f"  [Exp {experiment_id}] Preparing mixture-weighted data "
+        print(f"  [Target] Preparing mixture data "
               f"({self.stem_ratio*100:.0f}% STEM + {(1-self.stem_ratio)*100:.0f}% general)...")
-        self._prepare_mixture_data(mixture_config, experiment_id, mixture_data_dir)
+        self._prepare_mixture_data(selected_indices, mixture_data_dir)
 
         mid_cmd = self._build_mid_train_cmd(model_tag, mixture_data_dir)
-        print(f"  [Exp {experiment_id}] mid_train: {' '.join(mid_cmd)}")
-        mid_rc = self._run_subprocess(mid_cmd, exp_dir, "mid_train")
+        print(f"  [Target] mid_train: {' '.join(mid_cmd)}")
+        mid_rc = self._run_subprocess(mid_cmd, target_dir, "mid_train")
 
         eval_cmd = self._build_eval_cmd(model_tag)
-        print(f"  [Exp {experiment_id}] base_eval: {' '.join(eval_cmd)}")
-        eval_rc = self._run_subprocess(eval_cmd, exp_dir, "eval")
+        print(f"  [Target] base_eval: {' '.join(eval_cmd)}")
+        eval_rc = self._run_subprocess(eval_cmd, target_dir, "eval")
 
-        self._copy_mid_checkpoint(model_tag, exp_dir)
-        per_task, val_accuracy, stem_metric, per_task_nlls, stem_nll = self._parse_eval_results(model_tag, exp_dir)
+        self._copy_mid_checkpoint(model_tag, target_dir)
+        per_task, stem_metric, per_task_nlls, stem_nll = self._parse_eval_results(model_tag, target_dir)
 
         elapsed = time.time() - t_start
 
-        meta = {
-            "experiment_id": experiment_id,
+        result = {
             "model_tag": model_tag,
-            "proxy_depth": self.proxy_depth,
-            "proxy_scaling_M": self.config.proxy.scaling_M,
-            "proxy_num_iterations": self.proxy_num_iterations,
-            "lr_scale": self.proxy_lr_scale,
-            "warmup": self.proxy_warmup,
-            "warmdown": self.proxy_warmdown,
-            "mixture_weights": mixture_config.mixture_weights.to_dict(),
-            "validation_metric": self.validation_metric,
-            "val_tasks": self.val_tasks,
+            "target_depth": self.target_depth,
+            "target_scaling_M": self.config.target.scaling_M,
+            "target_num_iterations": self.target_num_iterations,
+            "lr_scale": self.target_lr_scale,
+            "warmup": self.target_warmup,
+            "warmdown": self.target_warmdown,
             "stem_ratio": self.stem_ratio,
             "eval_benchmarks": self.eval_benchmarks,
             "elapsed_seconds": elapsed,
@@ -137,45 +120,24 @@ class ProxyRunner:
             "eval_rc": eval_rc,
         }
         if per_task is not None:
-            meta["per_task_accuracies"] = per_task
-            meta["val_accuracy"] = val_accuracy
+            result["per_task_accuracies"] = per_task
         if stem_metric is not None:
-            meta["stem_metric"] = stem_metric
+            result["stem_metric"] = stem_metric
         if per_task_nlls is not None:
-            meta["per_task_nlls"] = per_task_nlls
-            meta["stem_nll"] = stem_nll
+            result["per_task_nlls"] = per_task_nlls
+            result["stem_nll"] = stem_nll
 
-        meta_path = os.path.join(exp_dir, "meta.json")
-        with open(meta_path, "w") as f:
-            json.dump(meta, f, indent=2)
+        result_path = os.path.join(target_dir, "target_result.json")
+        with open(result_path, "w") as f:
+            json.dump(result, f, indent=2)
 
-        print(f"  [Exp {experiment_id}] Done in {elapsed:.1f}s, stem_metric={val_accuracy:.4f}, stem_nll={stem_nll:.4f}\n")
+        print(f"  [Target] Done in {elapsed:.1f}s, stem_metric={stem_metric}\n")
 
-        return ProxyResult(
-            mixture_config=mixture_config,
-            validation_loss=0.0,
-            validation_accuracy=val_accuracy,
-            validation_nll=stem_nll,
-            per_task_accuracies=per_task,
-            per_task_nlls=per_task_nlls,
-            metadata=meta,
-        )
-
-    def run_batch(
-        self,
-        configs: List[MixtureConfig],
-        data_dir: Optional[str] = None,
-        output_dir: Optional[str] = None,
-    ) -> List[ProxyResult]:
-        results = []
-        for i, config in enumerate(configs):
-            r = self.run_experiment(config, experiment_id=i, data_dir=data_dir, output_dir=output_dir)
-            results.append(r)
-        return results
+        return result
 
     def _symlink_base_checkpoint(self, model_tag: str):
         base_dir = self.nanochat_base_dir
-        base_src = self.proxy_phase1_ckpt or os.path.join(base_dir, "base_checkpoints", f"d{self.proxy_depth}")
+        base_src = self.target_phase1_ckpt or os.path.join(base_dir, "base_checkpoints", f"d{self.target_depth}")
         base_dst = os.path.join(base_dir, "base_checkpoints", model_tag)
 
         if not os.path.exists(base_dst):
@@ -185,12 +147,11 @@ class ProxyRunner:
             else:
                 print(f"  [WARNING] Base checkpoint not found: {base_src}")
 
-    def _copy_mid_checkpoint(self, model_tag: str, exp_dir: str):
+    def _copy_mid_checkpoint(self, model_tag: str, target_dir: str):
         mid_src_dir = os.path.join(self.nanochat_base_dir, "mid_checkpoints", model_tag)
-        mid_dst_dir = os.path.join(exp_dir, "mid_checkpoint")
+        mid_dst_dir = os.path.join(target_dir, "mid_checkpoint")
 
         if os.path.isdir(mid_src_dir):
-            import shutil
             if os.path.exists(mid_dst_dir):
                 shutil.rmtree(mid_dst_dir)
             shutil.copytree(mid_src_dir, mid_dst_dir)
@@ -213,26 +174,17 @@ class ProxyRunner:
 
     def _prepare_mixture_data(
         self,
-        mixture_config: MixtureConfig,
-        experiment_id: int,
+        selected_indices: npt.NDArray[np.int64],
         mixture_data_dir: str,
     ):
-        if self.cluster_labels is None or self.metadata_manager is None:
-            print(f"  [Exp {experiment_id}] WARNING: No cluster labels or metadata_manager, "
-                  f"using raw data_dir directly")
+        if self.metadata_manager is None:
+            print("  [Target] WARNING: No metadata_manager, cannot prepare mixture data")
             return
 
         os.makedirs(mixture_data_dir, exist_ok=True)
 
-        selected_indices, _ = select_data_by_mixture(
-            self.cluster_labels,
-            mixture_config.mixture_weights,
-            self.token_counts,
-            seed=experiment_id + 42,
-        )
-        print(f"  [Exp {experiment_id}] Selected {len(selected_indices)} STEM docs by mixture weights")
-
         stem_texts = self.metadata_manager.read_texts(selected_indices)
+        print(f"  [Target] Selected {len(stem_texts)} STEM docs by optimal weights")
 
         # Write STEM texts to temp parquet shards (mix_general_data expects shard_*.parquet)
         stem_temp_dir = os.path.join(mixture_data_dir, "_stem_temp")
@@ -256,14 +208,14 @@ class ProxyRunner:
         val_path = os.path.join(stem_temp_dir, f"shard_{n_shards:05d}.parquet")
         pq.write_table(val_table, val_path, row_group_size=1)
 
-        print(f"  [Exp {experiment_id}] Wrote {n_stem} STEM docs to {n_shards} temp shards")
+        print(f"  [Target] Wrote {n_stem} STEM docs to {n_shards} temp shards")
 
         # Mix with ClimbMix general data via mix_general_data.py module
         if self.stem_ratio < 1.0 and self.general_data_dir:
             try:
                 mix_mod = self._load_mix_module()
             except FileNotFoundError as e:
-                print(f"  [Exp {experiment_id}] WARNING: {e}, using STEM only")
+                print(f"  [Target] WARNING: {e}, using STEM only")
                 self._copy_stem_only(stem_temp_dir, mixture_data_dir)
                 shutil.rmtree(stem_temp_dir, ignore_errors=True)
                 return
@@ -277,7 +229,7 @@ class ProxyRunner:
             stem_docs = mix_mod.count_stem_docs(stem_train_files)
             needed_shards = mix_mod.calc_climbmix_count(stem_docs, self.stem_ratio)
 
-            print(f"  [Exp {experiment_id}] STEM: {stem_docs:,} docs -> need {needed_shards} ClimbMix shards "
+            print(f"  [Target] STEM: {stem_docs:,} docs -> need {needed_shards} ClimbMix shards "
                   f"({self.stem_ratio*100:.0f}% STEM + {(1-self.stem_ratio)*100:.0f}% general)")
 
             climb_files = mix_mod.download_climbmix(
@@ -285,7 +237,7 @@ class ProxyRunner:
             )
 
             if not climb_files:
-                print(f"  [Exp {experiment_id}] WARNING: No ClimbMix data available, using STEM only")
+                print(f"  [Target] WARNING: No ClimbMix data available, using STEM only")
                 self._copy_stem_only(stem_temp_dir, mixture_data_dir)
             else:
                 detected_batch = mix_mod.detect_shard_size(stem_train_files)
@@ -294,14 +246,14 @@ class ProxyRunner:
                     stem_temp_dir, climb_files, mixture_data_dir,
                     num_output_files, detected_batch,
                 )
-                print(f"  [Exp {experiment_id}] Mixed {stem_docs:,} STEM + "
+                print(f"  [Target] Mixed {stem_docs:,} STEM + "
                       f"~{int(stem_docs * (1-self.stem_ratio) / self.stem_ratio):,} general")
         else:
             self._copy_stem_only(stem_temp_dir, mixture_data_dir)
-            print(f"  [Exp {experiment_id}] No general data, using {n_stem} STEM docs only")
+            print(f"  [Target] No general data, using {n_stem} STEM docs only")
 
         shutil.rmtree(stem_temp_dir, ignore_errors=True)
-        print(f"  [Exp {experiment_id}] Data ready at {mixture_data_dir}")
+        print(f"  [Target] Data ready at {mixture_data_dir}")
 
     @staticmethod
     def _copy_stem_only(stem_temp_dir: str, mixture_data_dir: str):
@@ -323,10 +275,10 @@ class ProxyRunner:
             "--run", model_tag,
             "--device-type", self.device_type,
             "--model-tag", model_tag,
-            "--num-iterations", str(self.proxy_num_iterations),
-            "--lr-scale", str(self.proxy_lr_scale),
-            "--warmup-ratio", str(self.proxy_warmup),
-            "--warmdown-ratio", str(self.proxy_warmdown),
+            "--num-iterations", str(self.target_num_iterations),
+            "--lr-scale", str(self.target_lr_scale),
+            "--warmup-ratio", str(self.target_warmup),
+            "--warmdown-ratio", str(self.target_warmdown),
             "--data-dir", mixture_data_dir,
         ]
         return cmd
@@ -343,7 +295,6 @@ class ProxyRunner:
             "--eval-benchmarks", self.eval_benchmarks,
             "--model-tag", model_tag,
             "--model-type", "mid",
-            "--max-per-task", "500",
             "--device-type", self.device_type,
         ]
         return cmd
@@ -351,10 +302,10 @@ class ProxyRunner:
     def _run_subprocess(
         self,
         cmd: List[str],
-        exp_dir: str,
+        run_dir: str,
         stage_name: str,
     ) -> int:
-        log_path = os.path.join(exp_dir, f"{stage_name}.log")
+        log_path = os.path.join(run_dir, f"{stage_name}.log")
         env = os.environ.copy()
         env["PYTHONPATH"] = self.nanochat_dir + ":" + env.get("PYTHONPATH", "")
         env["NANOCHAT_BASE_DIR"] = self.nanochat_base_dir
@@ -379,12 +330,11 @@ class ProxyRunner:
     def _parse_eval_results(
         self,
         model_tag: str,
-        exp_dir: str,
-    ) -> tuple:
+        run_dir: str,
+    ) -> Tuple[Optional[Dict[str, float]], Optional[float], Optional[Dict[str, float]], float]:
         per_task: Optional[Dict[str, float]] = None
-        per_task_nlls: Optional[Dict[str, float]] = None
-        val_accuracy: float = 0.0
         stem_metric: Optional[float] = None
+        per_task_nlls: Optional[Dict[str, float]] = None
         stem_nll: float = 0.0
 
         csv_dir = os.path.join(self.nanochat_base_dir, "base_eval")
@@ -399,9 +349,8 @@ class ProxyRunner:
                 tagged_csv = f"{model_tag}.csv"
                 tagged_path = os.path.join(csv_dir, tagged_csv)
                 if os.path.exists(latest_csv_path):
-                    import shutil
                     shutil.copy2(latest_csv_path, tagged_path)
-                    local_copy = os.path.join(exp_dir, f"eval_{tagged_csv}")
+                    local_copy = os.path.join(run_dir, f"eval_{tagged_csv}")
                     shutil.copy2(latest_csv_path, local_copy)
 
                 per_task = {}
@@ -434,17 +383,5 @@ class ProxyRunner:
                             except ValueError:
                                 per_task_nlls[task_name] = 0.0
 
-        if stem_metric is not None:
-            val_accuracy = stem_metric
-        elif per_task:
-            task_subset = [per_task[t] for t in self.val_tasks if t in per_task]
-            if task_subset:
-                val_accuracy = sum(task_subset) / len(task_subset)
-
-        if stem_nll == 0.0 and per_task_nlls:
-            nll_subset = [per_task_nlls[t] for t in self.val_tasks if t in per_task_nlls]
-            if nll_subset:
-                stem_nll = sum(nll_subset) / len(nll_subset)
-
-        print(f"  [Eval] stem_metric={stem_metric}, val_accuracy={val_accuracy:.4f}, stem_nll={stem_nll:.4f}")
-        return per_task, val_accuracy, stem_metric, per_task_nlls, stem_nll
+        print(f"  [Target Eval] stem_metric={stem_metric}, stem_nll={stem_nll:.4f}")
+        return per_task, stem_metric, per_task_nlls, stem_nll

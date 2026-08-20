@@ -33,6 +33,8 @@ def embed_documents(
         batch_size: Batch size for encoding.
         cache_path: Path to cache embeddings (npz file). If exists, loads from cache.
         device: Device for encoding ('cpu', 'cuda', 'npu').
+            If 'npu', attempts to use Ascend NPU via torch_npu.
+            Falls back to CPU if sentence-transformers doesn't support NPU.
 
     Returns:
         Embeddings array of shape (num_docs, embedding_dim).
@@ -44,12 +46,51 @@ def embed_documents(
         print(f"[Embed] Loaded {embeddings.shape[0]} embeddings, dim={embeddings.shape[1]}")
         return embeddings
 
-    from sentence_transformers import SentenceTransformer
+    actual_device = device
 
-    print(f"[Embed] Loading model: {model_name}")
-    t0 = time.time()
-    model = SentenceTransformer(model_name, device=device)
-    print(f"[Embed] Model loaded in {time.time() - t0:.1f}s")
+    if device == "npu":
+        try:
+            import torch
+            import torch_npu
+            if torch.npu.is_available():
+                print("[Embed] NPU available, attempting to use Ascend NPU for embedding")
+            else:
+                print("[Embed] torch_npu imported but NPU not available, falling back to CPU")
+                actual_device = "cpu"
+        except ImportError:
+            print("[Embed] torch_npu not available, falling back to CPU")
+            actual_device = "cpu"
+
+        if actual_device == "npu":
+            try:
+                from sentence_transformers import SentenceTransformer
+                print(f"[Embed] Loading model: {model_name} (device=npu)")
+                t0 = time.time()
+                model = SentenceTransformer(model_name, device="npu")
+                print(f"[Embed] Model loaded in {time.time() - t0:.1f}s")
+            except Exception as e:
+                print(f"[Embed] NPU embedding failed ({e}), falling back to CPU")
+                actual_device = "cpu"
+
+    if actual_device != "npu":
+        if actual_device == "cpu":
+            import os
+            num_threads = os.environ.get("OMP_NUM_THREADS", "")
+            if not num_threads:
+                import multiprocessing
+                num_cpus = multiprocessing.cpu_count()
+                print(f"[Embed] Using CPU with {num_cpus} threads")
+                try:
+                    import torch
+                    torch.set_num_threads(num_cpus)
+                except ImportError:
+                    pass
+
+        from sentence_transformers import SentenceTransformer
+        print(f"[Embed] Loading model: {model_name} (device={actual_device})")
+        t0 = time.time()
+        model = SentenceTransformer(model_name, device=actual_device)
+        print(f"[Embed] Model loaded in {time.time() - t0:.1f}s")
 
     print(f"[Embed] Encoding {len(texts)} documents (batch_size={batch_size})...")
     t1 = time.time()

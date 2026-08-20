@@ -2,7 +2,7 @@
 CLIMB pipeline — main entry point.
 
 Refactored for strategy injection:
-  - Discovery strategy: fdc_labels or embedding_cluster (via config)
+  - Discovery strategy: embedding_cluster (via config)
   - Quality filter strategy: none/doc_level/cluster_level/doc_and_cluster (via config)
   - Predictor strategy: lightgbm (via config)
 
@@ -49,6 +49,7 @@ class CLIMBPipeline:
         quality_scores: Optional[np.ndarray] = None,
         metadata_manager: Optional[Any] = None,
         proxy_runner: Optional[Any] = None,
+        target_runner: Optional[Any] = None,
         val_data_path: Optional[str] = None,
         output_dir: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -146,6 +147,24 @@ class CLIMBPipeline:
         )
         stage_times["stage5_save"] = time.time() - _t
 
+        # Stage 6: Target training (d28) with optimal mixture
+        target_result = None
+        if target_runner is not None:
+            _t = time.time()
+            print("\n[Stage 6] Target training with optimal mixture")
+
+            if hasattr(target_runner, 'cluster_labels'):
+                target_runner.cluster_labels = filtered_labels
+                target_runner.token_counts = token_counts
+                target_runner.metadata_manager = mm
+
+            target_result = target_runner.run(
+                optimal_weights.mixture_weights,
+                selected_indices,
+                output_dir,
+            )
+            stage_times["stage6_target"] = time.time() - _t
+
         elapsed = time.time() - t_start
         print(f"\n{'=' * 70}")
         print(f"  Pipeline Complete! ({elapsed:.1f}s)")
@@ -154,6 +173,8 @@ class CLIMBPipeline:
             label = cluster_info[i].label if i < len(cluster_info) else f"C{i}"
             print(f"    {label}: {w:.4f}")
         print(f"  Selected: {len(selected_indices):,} documents")
+        if target_result:
+            print(f"  Target stem_metric: {target_result.get('stem_metric', 'N/A')}")
         print(f"  Output: {output_dir}/")
         print(f"{'=' * 70}")
 
@@ -163,6 +184,7 @@ class CLIMBPipeline:
             "cluster_info": cluster_info,
             "selected_indices": selected_indices,
             "stats": stats,
+            "target_result": target_result,
             "elapsed_seconds": elapsed,
             "stage_times": stage_times,
         }

@@ -7,9 +7,149 @@ Layered config: ClusterDiscoveryConfig, QualityFilterConfig, SearchConfig,
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
+import glob
+import json
+import os
 import numpy as np
 import numpy.typing as npt
+
+
+# ── Auto-detect model info from checkpoint meta_*.json ─────────
+
+DEFAULT_NANOCHAT_BASE_DIR = "/home/ma-user/work/nanochat_model_dir"
+
+
+def _approx_scaling_params(model_config: dict) -> Optional[int]:
+    """Approximate scaling params from model config dimensions.
+
+    Ported from quadmix/nanochat_mid_compare/get_model_info.py.
+    """
+    n_embd = model_config.get("n_embd")
+    n_layer = model_config.get("n_layer", 24)
+    n_head = model_config.get("n_head")
+    vocab_size = model_config.get("vocab_size", 32768)
+    head_dim = model_config.get("head_dim", 128)
+    aspect_ratio = model_config.get("aspect_ratio", 64)
+
+    if n_embd is None:
+        base_dim = n_layer * aspect_ratio
+        n_embd = ((base_dim + head_dim - 1) // head_dim) * head_dim
+        if n_head is None:
+            n_head = n_embd // head_dim
+    else:
+        if n_head is None:
+            n_head = n_embd // head_dim
+
+    n_kv_head = model_config.get("n_kv_head", n_head)
+    pad_vocab_size_to = model_config.get("pad_vocab_size_to", 64)
+    padded_vocab_size = ((vocab_size + pad_vocab_size_to - 1) // pad_vocab_size_to) * pad_vocab_size_to
+
+    ve_gate_channels = model_config.get("ve_gate_channels", 12)
+    has_ve_count = 0
+    for layer_idx in range(n_layer):
+        if layer_idx % 2 == (n_layer - 1) % 2:
+            has_ve_count += 1
+
+    transformer_matrices = 0
+    for _ in range(n_layer):
+        transformer_matrices += (
+            n_embd * n_head * head_dim +
+            n_embd * n_kv_head * head_dim +
+            n_embd * n_kv_head * head_dim +
+            n_embd * n_embd +
+            n_embd * 4 * n_embd +
+            4 * n_embd * n_embd
+        )
+    transformer_matrices += has_ve_count * ve_gate_channels * n_kv_head
+
+    lm_head = padded_vocab_size * n_embd
+    return transformer_matrices + lm_head
+
+
+def auto_detect_depth_info(checkpoint_dir: Optional[str], depth: int) -> Optional[dict]:
+    """Auto-detect model info from checkpoint meta_*.json.
+
+    Three-tier fallback:
+      1. meta_*.json -> GPTConfig -> num_scaling_params() (exact, needs nanochat)
+      2. meta_*.json -> _approx_scaling_params() (approximate, no nanochat needed)
+      3. DEPTH_INFO table lookup (fallback)
+
+    Returns dict with keys: scaling_M, total_M, n_embd, n_head, n_layer
+    or None if all methods fail.
+    """
+    if checkpoint_dir:
+        meta_files = sorted(glob.glob(os.path.join(checkpoint_dir, "meta_*.json")))
+        if meta_files:
+            try:
+                with open(meta_files[-1]) as f:
+                    meta = json.load(f)
+                model_config = meta.get("model_config", {})
+                total_batch_size = meta.get("total_batch_size")
+
+                n_layer = model_config.get("n_layer", depth)
+                n_embd = model_config.get("n_embd")
+                n_head = model_config.get("n_head")
+
+                if n_embd is None:
+                    aspect_ratio = model_config.get("aspect_ratio", 64)
+                    head_dim = model_config.get("head_dim", 128)
+                    base_dim = n_layer * aspect_ratio
+                    n_embd = ((base_dim + head_dim - 1) // head_dim) * head_dim
+                if n_head is None:
+                    head_dim = model_config.get("head_dim", 128)
+                    n_head = n_embd // head_dim
+
+                # Tier 1: exact via nanochat GPTConfig
+                try:
+                    import torch
+                    from nanochat.gpt import GPT, GPTConfig
+                    config = GPTConfig(**model_config)
+                    with torch.device("meta"):
+                        model = GPT(config)
+                    params_counts = model.num_scaling_params()
+                    num_scaling = params_counts["transformer_matrices"] + params_counts["lm_head"]
+                    total = sum(params_counts.values())
+                    return {
+                        "scaling_M": num_scaling / 1_000_000,
+                        "total_M": total / 1_000_000,
+                        "n_embd": n_embd,
+                        "n_head": n_head,
+                        "n_layer": n_layer,
+                    }
+                except Exception:
+                    pass
+
+                # Tier 2: approximate formula
+                num_scaling = _approx_scaling_params(model_config)
+                if num_scaling is not None:
+                    return {
+                        "scaling_M": num_scaling / 1_000_000,
+                        "total_M": num_scaling / 1_000_000,
+                        "n_embd": n_embd,
+                        "n_head": n_head,
+                        "n_layer": n_layer,
+                    }
+            except Exception:
+                pass
+
+    # Tier 3: DEPTH_INFO fallback
+    return _DEPTH_INFO.get(depth)
+
+
+_DEPTH_INFO = {
+    4:  {"scaling_M": 3.2,   "total_M": 8.2,    "n_embd": 256,  "n_head": 2},
+    6:  {"scaling_M": 17.6,  "total_M": 41.5,   "n_embd": 384,  "n_head": 3},
+    8:  {"scaling_M": 40.4,  "total_M": 93.8,   "n_embd": 512,  "n_head": 4},
+    10: {"scaling_M": 70.2,  "total_M": 196.0,  "n_embd": 640,  "n_head": 5},
+    12: {"scaling_M": 110.1, "total_M": 286.3,  "n_embd": 768,  "n_head": 6},
+    14: {"scaling_M": 164.2, "total_M": 399.1,  "n_embd": 896,  "n_head": 7},
+    16: {"scaling_M": 234.9, "total_M": 536.9,  "n_embd": 1024, "n_head": 8},
+    18: {"scaling_M": 324.4, "total_M": 701.9,  "n_embd": 1152, "n_head": 9},
+    20: {"scaling_M": 435.2, "total_M": 896.5,  "n_embd": 1280, "n_head": 10},
+    22: {"scaling_M": 569.5, "total_M": 1123.2, "n_embd": 1408, "n_head": 11},
+    24: {"scaling_M": 729.8, "total_M": 1384.1, "n_embd": 1536, "n_head": 12},
+}
 
 
 @dataclass
@@ -77,15 +217,20 @@ class ProxyResult:
     mixture_config: MixtureConfig
     validation_loss: float
     validation_accuracy: float = 0.0
+    validation_nll: float = 0.0
     per_task_accuracies: Optional[Dict[str, float]] = None
     per_task_losses: Optional[Dict[str, float]] = None
+    per_task_nlls: Optional[Dict[str, float]] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    score_alpha: float = 0.5
 
     @property
     def score(self) -> float:
-        if self.validation_accuracy > 0:
-            return self.validation_accuracy
-        return -self.validation_loss
+        if self.validation_nll > 0:
+            import math
+            pseudo_acc = math.exp(-self.validation_nll)
+            return self.score_alpha * self.validation_accuracy + (1.0 - self.score_alpha) * pseudo_acc
+        return self.validation_accuracy
 
 
 @dataclass
@@ -108,7 +253,7 @@ class IterationResult:
 
 @dataclass
 class ClusterDiscoveryConfig:
-    method: str = "fdc_labels"
+    method: str = "embedding_cluster"
     K_init: int = 1000
     K_enhanced: int = 21
     embedding_model: str = "NovaSearch/stella_en_400M_v5"
@@ -116,7 +261,7 @@ class ClusterDiscoveryConfig:
     prune_threshold: float = 3.0
     merge_distance: float = 1.5
 
-    VALID_METHODS = ("fdc_labels", "embedding_cluster")
+    VALID_METHODS = ("embedding_cluster",)
 
 
 @dataclass
@@ -148,7 +293,7 @@ class SearchConfig:
 
 @dataclass
 class ProxyConfig:
-    depth: int = 10
+    depth: int = 14
     num_iterations: Optional[int] = None
     ratio: Optional[float] = None
     phase1_checkpoint_path: Optional[str] = None
@@ -157,32 +302,29 @@ class ProxyConfig:
     warmup: float = 0.0
     warmdown: float = 0.9
 
-    DEPTH_INFO = {
-        4:  {"scaling_M": 3.2,   "total_M": 8.2,    "n_embd": 256,  "n_head": 2},
-        6:  {"scaling_M": 17.6,  "total_M": 41.5,   "n_embd": 384,  "n_head": 3},
-        8:  {"scaling_M": 40.4,  "total_M": 93.8,   "n_embd": 512,  "n_head": 4},
-        10: {"scaling_M": 70.2,  "total_M": 196.0,  "n_embd": 640,  "n_head": 5},
-        12: {"scaling_M": 110.1, "total_M": 286.3,  "n_embd": 768,  "n_head": 6},
-        14: {"scaling_M": 164.2, "total_M": 399.1,  "n_embd": 896,  "n_head": 7},
-        16: {"scaling_M": 234.9, "total_M": 536.9,  "n_embd": 1024, "n_head": 8},
-        18: {"scaling_M": 324.4, "total_M": 701.9,  "n_embd": 1152, "n_head": 9},
-        20: {"scaling_M": 435.2, "total_M": 896.5,  "n_embd": 1280, "n_head": 10},
-        22: {"scaling_M": 569.5, "total_M": 1123.2, "n_embd": 1408, "n_head": 11},
-        24: {"scaling_M": 729.8, "total_M": 1384.1, "n_embd": 1536, "n_head": 12},
-    }
+    DEPTH_INFO = _DEPTH_INFO
+
+    def _get_info(self) -> Optional[dict]:
+        """Try auto_detect from checkpoint, fallback to DEPTH_INFO table."""
+        info = auto_detect_depth_info(self.phase1_checkpoint_path, self.depth)
+        if info is not None:
+            return info
+        return self.DEPTH_INFO.get(self.depth)
 
     @property
     def scaling_params(self) -> int:
-        info = self.DEPTH_INFO.get(self.depth)
+        info = self._get_info()
         if info is None:
-            raise ValueError(f"Unsupported depth={self.depth}. Valid: {sorted(self.DEPTH_INFO.keys())}")
+            raise ValueError(f"Cannot determine model info for depth={self.depth}. "
+                             f"Set phase1_checkpoint_path or use a supported depth.")
         return int(info["scaling_M"] * 1_000_000)
 
     @property
     def total_params(self) -> int:
-        info = self.DEPTH_INFO.get(self.depth)
+        info = self._get_info()
         if info is None:
-            raise ValueError(f"Unsupported depth={self.depth}. Valid: {sorted(self.DEPTH_INFO.keys())}")
+            raise ValueError(f"Cannot determine model info for depth={self.depth}. "
+                             f"Set phase1_checkpoint_path or use a supported depth.")
         return int(info["total_M"] * 1_000_000)
 
     @property
@@ -191,16 +333,18 @@ class ProxyConfig:
 
     @property
     def scaling_M(self) -> float:
-        info = self.DEPTH_INFO.get(self.depth)
+        info = self._get_info()
         if info is None:
-            raise ValueError(f"Unsupported depth={self.depth}. Valid: {sorted(self.DEPTH_INFO.keys())}")
+            raise ValueError(f"Cannot determine model info for depth={self.depth}. "
+                             f"Set phase1_checkpoint_path or use a supported depth.")
         return info["scaling_M"]
 
     @property
     def total_M(self) -> float:
-        info = self.DEPTH_INFO.get(self.depth)
+        info = self._get_info()
         if info is None:
-            raise ValueError(f"Unsupported depth={self.depth}. Valid: {sorted(self.DEPTH_INFO.keys())}")
+            raise ValueError(f"Cannot determine model info for depth={self.depth}. "
+                             f"Set phase1_checkpoint_path or use a supported depth.")
         return info["total_M"]
 
     @property
@@ -228,7 +372,7 @@ class PredictorConfig:
 
 @dataclass
 class TargetConfig:
-    depth: int = 24
+    depth: int = 28
     num_iterations: Optional[int] = None
     ratio: Optional[float] = None
     phase1_checkpoint_path: Optional[str] = None
@@ -236,29 +380,70 @@ class TargetConfig:
     warmup: float = 0.0
     warmdown: float = 0.9
 
+    DEPTH_INFO = _DEPTH_INFO
+
+    def _get_info(self) -> Optional[dict]:
+        """Try auto_detect from checkpoint, fallback to DEPTH_INFO table."""
+        info = auto_detect_depth_info(self.phase1_checkpoint_path, self.depth)
+        if info is not None:
+            return info
+        return self.DEPTH_INFO.get(self.depth)
+
     @property
     def model_tag(self) -> str:
         return f"d{self.depth}"
+
+    @property
+    def scaling_params(self) -> int:
+        info = self._get_info()
+        if info is None:
+            raise ValueError(f"Cannot determine model info for depth={self.depth}. "
+                             f"Set phase1_checkpoint_path or use a supported depth.")
+        return int(info["scaling_M"] * 1_000_000)
+
+    @property
+    def total_params(self) -> int:
+        info = self._get_info()
+        if info is None:
+            raise ValueError(f"Cannot determine model info for depth={self.depth}. "
+                             f"Set phase1_checkpoint_path or use a supported depth.")
+        return int(info["total_M"] * 1_000_000)
+
+    @property
+    def scaling_M(self) -> float:
+        info = self._get_info()
+        if info is None:
+            raise ValueError(f"Cannot determine model info for depth={self.depth}. "
+                             f"Set phase1_checkpoint_path or use a supported depth.")
+        return info["scaling_M"]
+
+    @property
+    def total_M(self) -> float:
+        info = self._get_info()
+        if info is None:
+            raise ValueError(f"Cannot determine model info for depth={self.depth}. "
+                             f"Set phase1_checkpoint_path or use a supported depth.")
+        return info["total_M"]
 
     @property
     def training_iterations(self) -> int:
         if self.num_iterations is not None:
             return self.num_iterations
         if self.ratio is not None:
-            return max(1, int(self.ratio * ProxyConfig.DEPTH_INFO[self.depth]["scaling_M"] * 1_000_000 / 500_000))
+            return max(1, int(self.ratio * self.scaling_params / 500_000))
         return 1000
 
 
 @dataclass
 class DeviceConfig:
-    device_type: str = "cpu"
+    device_type: str = "npu"
     npu_device_id: int = 0
     npu_devices: int = 8
 
 
-HIGH_SIGNAL_TASKS = [
-    "piqa", "arc_easy", "lambada_openai",
-    "commonsense_qa", "squad", "coqa",
+STEM_BENCHMARK_LABELS = [
+    "arc_easy", "arc_challenge", "mmlu_stem",
+    "gpqa_diamond", "gsm8k_cot", "math_cot_500",
 ]
 
 
@@ -271,10 +456,14 @@ class CLIMBConfig:
     target: TargetConfig = field(default_factory=TargetConfig)
     predictor: PredictorConfig = field(default_factory=PredictorConfig)
     device: DeviceConfig = field(default_factory=DeviceConfig)
-    val_tasks: List[str] = field(default_factory=lambda: HIGH_SIGNAL_TASKS.copy())
+    val_tasks: List[str] = field(default_factory=lambda: STEM_BENCHMARK_LABELS.copy())
     data_dir: str = "./data"
     output_dir: str = "./climbmix_output"
     nanochat_dir: str = "/home/liujin99/nanochat-npu"
+    nanochat_base_dir: str = DEFAULT_NANOCHAT_BASE_DIR
+    general_data_dir: str = ""
+    stem_ratio: float = 0.7
+    eval_benchmarks: str = "stem"
 
     @property
     def metric_direction(self) -> str:
