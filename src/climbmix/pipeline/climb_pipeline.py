@@ -52,9 +52,12 @@ class CLIMBPipeline:
         target_runner: Optional[Any] = None,
         val_data_path: Optional[str] = None,
         output_dir: Optional[str] = None,
+        cluster_cache_dir: Optional[str] = None,
+        resume_search: bool = False,
     ) -> Dict[str, Any]:
         data_dir = data_dir or self.config.data_dir
         output_dir = output_dir or self.config.output_dir
+        cluster_cache_dir = cluster_cache_dir or output_dir
         os.makedirs(output_dir, exist_ok=True)
 
         t_start = time.time()
@@ -77,19 +80,33 @@ class CLIMBPipeline:
             )
         stage_times["stage0_load"] = time.time() - _t
 
-        # Stage 1: Cluster discovery (must run before quality filter)
-        _t = time.time()
-        discovery = get_discovery(self.config.discovery.method, self.config.discovery)
-        cluster_info, final_labels = discovery.discover(
-            texts=texts_loaded,
-            cluster_labels=cluster_labels,
-            quality_scores=quality_scores,
-            token_counts=token_counts,
-            metadata_manager=mm,
-        )
-        num_clusters = len(cluster_info)
-        print(f"[Stage 1] {num_clusters} clusters, {len(final_labels):,} documents")
-        stage_times["stage1_discovery"] = time.time() - _t
+        # Stage 1: Cluster discovery (cacheable)
+        cluster_cache_npz = os.path.join(cluster_cache_dir, "cluster_cache.npz")
+        cluster_cache_json = os.path.join(cluster_cache_dir, "cluster_info_cache.json")
+        if os.path.exists(cluster_cache_npz) and os.path.exists(cluster_cache_json):
+            _t = time.time()
+            print("[Stage 1] Loading cached clusters...")
+            cache = np.load(cluster_cache_npz, allow_pickle=False)
+            final_labels = cache["final_labels"]
+            cluster_info = self._load_cluster_cache(cluster_cache_json)
+            num_clusters = len(cluster_info)
+            print(f"[Stage 1] {num_clusters} clusters (from cache), {len(final_labels):,} documents")
+            stage_times["stage1_discovery"] = time.time() - _t
+        else:
+            _t = time.time()
+            discovery = get_discovery(self.config.discovery.method, self.config.discovery)
+            cluster_info, final_labels = discovery.discover(
+                texts=texts_loaded,
+                cluster_labels=cluster_labels,
+                quality_scores=quality_scores,
+                token_counts=token_counts,
+                metadata_manager=mm,
+            )
+            num_clusters = len(cluster_info)
+            print(f"[Stage 1] {num_clusters} clusters, {len(final_labels):,} documents")
+            stage_times["stage1_discovery"] = time.time() - _t
+            self._save_cluster_cache(cluster_cache_npz, cluster_cache_json, final_labels, cluster_info)
+            print(f"[Stage 1] Cached → {cluster_cache_npz}")
 
         # Stage 2: Quality filtering (after clusters are known)
         _t = time.time()
@@ -108,8 +125,10 @@ class CLIMBPipeline:
         _t = time.time()
         print("\n[Stage 3] Running iterative bootstrapping search")
 
+        state_path = os.path.join(output_dir, "search_state.json") if resume_search else None
         bootstrapper = IterativeBootstrapper(
             self.config, cluster_token_counts, filtered_labels,
+            state_path=state_path,
         )
 
         if proxy_runner is not None and hasattr(proxy_runner, '__init__'):
@@ -222,6 +241,40 @@ class CLIMBPipeline:
             return texts, cluster_labels, quality_scores, token_counts, mm
 
         raise ValueError("Must provide data_dir, texts, or metadata_manager")
+
+    @staticmethod
+    def _save_cluster_cache(npz_path: str, json_path: str, labels: np.ndarray, cluster_info):
+        np.savez(npz_path, final_labels=labels)
+        data = [
+            {
+                "cluster_id": c.cluster_id,
+                "centroid": c.centroid.tolist(),
+                "num_docs": c.num_docs,
+                "num_tokens": c.num_tokens,
+                "label": c.label,
+                "quality_score": c.quality_score,
+            }
+            for c in cluster_info
+        ]
+        with open(json_path, "w") as f:
+            json.dump(data, f)
+
+    @staticmethod
+    def _load_cluster_cache(json_path: str):
+        from climbmix.core.types import ClusterInfo
+        with open(json_path) as f:
+            data = json.load(f)
+        return [
+            ClusterInfo(
+                cluster_id=d["cluster_id"],
+                centroid=np.array(d["centroid"], dtype=np.float64),
+                num_docs=d["num_docs"],
+                num_tokens=d["num_tokens"],
+                label=d["label"],
+                quality_score=d["quality_score"],
+            )
+            for d in data
+        ]
 
     def _save_outputs(
         self,

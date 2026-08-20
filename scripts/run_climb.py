@@ -97,6 +97,12 @@ def main():
     # ── Dry run ──
     parser.add_argument("--dry-run", action="store_true")
 
+    # ── Cache / Resume ──
+    parser.add_argument("--cluster-cache-dir", type=str, default=None,
+                        help="Directory with cached cluster info (skip embedding clustering if exists)")
+    parser.add_argument("--resume-search", action="store_true",
+                        help="Resume proxy search from saved state (search_state.json)")
+
     # ── Output ──
     parser.add_argument("--output-dir", type=str, default="./climbmix_output")
 
@@ -184,7 +190,12 @@ def main():
             target_runner = TargetRunner(config)
 
     pipeline = CLIMBPipeline(config)
-    results = pipeline.run(proxy_runner=proxy_runner, target_runner=target_runner)
+    results = pipeline.run(
+        proxy_runner=proxy_runner,
+        target_runner=target_runner,
+        cluster_cache_dir=args.cluster_cache_dir,
+        resume_search=args.resume_search,
+    )
 
     print(f"\nDone! Results in: {args.output_dir}/")
 

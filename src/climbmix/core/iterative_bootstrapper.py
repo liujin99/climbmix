@@ -8,6 +8,8 @@ Paper-aligned changes:
 """
 
 import time
+import json
+import os
 import numpy as np
 import numpy.typing as npt
 from typing import Dict, List, Optional, Any, Tuple
@@ -30,6 +32,7 @@ class IterativeBootstrapper:
         config: CLIMBConfig,
         cluster_token_counts: npt.NDArray[np.int64],
         cluster_labels: npt.NDArray[np.int64],
+        state_path: Optional[str] = None,
     ):
         self.config = config
         self.cluster_labels = cluster_labels
@@ -56,6 +59,8 @@ class IterativeBootstrapper:
         self._iteration_results: List[IterationResult] = []
         self._predictor: Optional[Any] = None
         self.w_floor = config.search.w_floor
+        self.state_path = state_path
+        self._last_completed_iter = 0
 
     def _is_better(self, score_a: float, score_b: float) -> bool:
         if self.metric_direction == "maximize":
@@ -66,6 +71,45 @@ class IterativeBootstrapper:
         if self.metric_direction == "maximize":
             return int(np.argmax(scores))
         return int(np.argmin(scores))
+
+    def _save_state(self):
+        if not self.state_path:
+            return
+        state = {
+            "last_completed_iter": self._last_completed_iter,
+            "accumulated_scores": self._accumulated_scores,
+            "accumulated_configs": [
+                {"weights": c.mixture_weights.weights.tolist(), "config_id": c.config_id}
+                for c in self._accumulated_configs
+            ],
+            "accumulated_per_benchmark": [
+                {"acc": d[0], "nll": d[1]}
+                for d in self._accumulated_per_benchmark
+            ],
+        }
+        with open(self.state_path, "w") as f:
+            json.dump(state, f)
+        print(f"[Search] State saved → {self.state_path} (iter {self._last_completed_iter}, {len(self._accumulated_configs)} configs)")
+
+    def _load_state(self) -> int:
+        if not self.state_path or not os.path.exists(self.state_path):
+            return 0
+        with open(self.state_path) as f:
+            state = json.load(f)
+        self._accumulated_scores = state["accumulated_scores"]
+        self._accumulated_configs = [
+            MixtureConfig(
+                mixture_weights=MixtureWeights(weights=np.array(c["weights"], dtype=np.float64)),
+                config_id=c["config_id"],
+            )
+            for c in state["accumulated_configs"]
+        ]
+        self._accumulated_per_benchmark = [
+            (d["acc"], d["nll"]) for d in state["accumulated_per_benchmark"]
+        ]
+        self._last_completed_iter = state["last_completed_iter"]
+        print(f"[Search] State loaded ← {self.state_path} (iter {self._last_completed_iter}, {len(self._accumulated_configs)} configs)")
+        return self._last_completed_iter
 
     def _compute_scores(self) -> npt.NDArray[np.float64]:
         """Compute SNR-weighted scores for all accumulated configs.
@@ -272,9 +316,18 @@ class IterativeBootstrapper:
 
         t0 = time.time()
 
-        for k in range(self.config.search.num_iterations):
+        start_iter = 1
+        if self.state_path:
+            loaded_iter = self._load_state()
+            if loaded_iter > 0:
+                start_iter = loaded_iter + 1
+                print(f"[Search] Resuming from iteration {start_iter}")
+
+        for k in range(start_iter - 1, self.config.search.num_iterations):
             n_configs = self.config.search.configs_per_iter[k]
             self.run_iteration(k + 1, n_configs, proxy_runner)
+            self._last_completed_iter = k + 1
+            self._save_state()
 
         if self._predictor is None:
             best_idx = self._best_index(np.array(self._accumulated_scores))
