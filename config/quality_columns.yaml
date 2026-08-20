@@ -1,0 +1,21 @@
+# Quality columns for 100B STEM parquet data.
+# All scores are 1-5 discrete, higher = better (including noise_level).
+#
+# To use a different set of quality labels:
+#   1. Edit this file with the correct column names
+#   2. Pass quality_config_path to ColumnSchema
+#
+# To disable quality-based pruning, leave quality_columns empty:
+#   quality_columns: []
+
+quality_columns:
+  - stem_relevance
+  - knowledge_value
+  - notation_fidelity
+  - rigor_coherence
+  - noise_level
+
+# Prune threshold: clusters with average quality below this are removed.
+# Range: 1-5 (since all scores are 1-5 discrete).
+# Paper uses 3.0 (loose threshold, 60% of max).
+prune_threshold: 3.0

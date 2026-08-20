@@ -349,7 +349,7 @@ class ProxyConfig:
             return self.num_iterations
         if self.ratio is not None:
             return max(1, int(self.ratio * self.scaling_params / 500_000))
-        return 500
+        return 1000
 
 
 @dataclass
@@ -362,8 +362,31 @@ class PredictorConfig:
     n_estimators: int = 500
     early_stopping_rounds: int = 20
     learning_rate: float = 0.02
+    auto_adjust: bool = True
 
     VALID_METHODS = ("lightgbm",)
+
+    def get_adjusted_params(self, n_samples: int, n_features: int) -> dict:
+        """
+        Auto-adjust max_depth and min_samples_leaf based on N and feature count.
+
+        Formula:
+          max_depth = min(4, max(2, int(log2(N / n_features)) + 2))
+          min_samples_leaf = max(3, min(5, N // 20))
+
+        Reference:
+          N=27,  k=10 → max_depth=3, min_samples_leaf=3
+          N=35,  k=10 → max_depth=3, min_samples_leaf=3
+          N=112, k=21 → max_depth=4, min_samples_leaf=5 (matches paper)
+        """
+        if not self.auto_adjust:
+            return {"max_depth": self.max_depth, "min_samples_leaf": self.min_samples_leaf}
+
+        import math
+        ratio = max(n_samples / max(n_features, 1), 2.0)
+        adj_max_depth = min(4, max(2, int(math.log2(ratio)) + 2))
+        adj_min_samples = max(3, min(5, n_samples // 20))
+        return {"max_depth": adj_max_depth, "min_samples_leaf": adj_min_samples}
 
 
 @dataclass
@@ -469,6 +492,7 @@ class CLIMBConfig:
     general_data_dir: str = ""
     stem_ratio: float = 0.7
     eval_benchmarks: str = "stem"
+    quality_config_path: str = ""
 
     @property
     def metric_direction(self) -> str:

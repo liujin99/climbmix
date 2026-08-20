@@ -55,12 +55,22 @@ class LightGBMPredictor:
             X = X[valid_mask]
             y = y[valid_mask]
 
+        n_samples, n_features = X.shape
+        adj = self.config.get_adjusted_params(n_samples, n_features)
+        max_depth = adj["max_depth"]
+        min_samples_leaf = adj["min_samples_leaf"]
+
+        if self.config.auto_adjust:
+            print(f"[Predictor] Auto-adjusted: max_depth={max_depth}, "
+                  f"min_samples_leaf={min_samples_leaf} "
+                  f"(N={n_samples}, k={n_features})")
+
         lgb_params = {
             "n_estimators": self.config.n_estimators,
             "learning_rate": self.config.learning_rate,
-            "max_depth": self.config.max_depth,
-            "num_leaves": min(15, 2 ** self.config.max_depth - 1),
-            "min_child_samples": self.config.min_samples_leaf,
+            "max_depth": max_depth,
+            "num_leaves": min(15, 2 ** max_depth - 1),
+            "min_child_samples": min_samples_leaf,
             "reg_alpha": self.config.l1_reg,
             "reg_lambda": self.config.l2_reg,
             "subsample": 1.0,

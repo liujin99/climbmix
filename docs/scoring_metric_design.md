@@ -547,3 +547,98 @@ predictor_targets = -all_scores  # maximize score → minimize -score
 | annealing | 退火, 从 base checkpoint 的 final LR 开始衰减 |
 | VE | Value Embeddings, nanochat 特有, 占 ~50% 参数但不参与 FLOPs |
 | scaling_params | transformer matrices + lm_head, 用于对标计算量 |
+
+---
+
+## 12. Proxy 训练量对比分析
+
+> 记录时间: 2026-08-20
+> 目的: 对比论文与我们的 proxy/target 训练量，记录参数选择理由
+
+### 12.1 论文设置 (arXiv:2504.13161)
+
+论文 Section 3.1 + Appendix C.4 明确记载：
+
+| 参数 | 值 |
+|------|-----|
+| Phase-1 预训练 | 10T tokens (DCLM + TxT360), 256 H100 |
+| Batch size | 2M tokens (全程) |
+| 优化器 | AdamW, LR=5e-5 (stable) → 1e-5 (anneal) |
+| LR schedule | WSD (Warmup-Stable-Decay) |
+| Proxy 模型 | 350M (scaling), 62M (ablation) |
+| Target 模型 | 1B, 40B tokens |
+| Proxy 训练时间 | 45 GPU hours (per proxy model) |
+| Target 训练时间 | 6,400 GPU hours |
+
+### 12.2 推算论文 proxy token 量
+
+用 target model 反推 step time，再推算 proxy：
+
+```
+Target: 1B 模型, 40B tokens, 6,400 GPU hours, 256 H100
+  wall clock = 6400/256 = 25h
+  steps = 40B / 2M = 20,000 steps
+  step time = 25*3600/20000 = 4.5 sec/step (256 H100, 1B 模型)
+
+Proxy: 350M 模型, 45 GPU hours
+  step time ≈ 4.5 * (350M/1B) ≈ 1.6 sec/step
+  wall clock = 45/256 = 10.5 min
+  steps = 10.5*60/1.6 ≈ 394 steps
+  tokens = 394 * 2M ≈ 788M tokens
+```
+
+**论文 proxy ≈ 800M tokens（~400 steps at 2M batch）**
+
+### 12.3 我们的设置
+
+| 参数 | 论文 | 我们 |
+|------|------|------|
+| Proxy 模型 | 350M (scaling) | d20 (435M scaling, 896M total) |
+| Batch size | 2M tokens | ~524K tokens (512 × 1024) |
+| Proxy 步数 | ~400 | **1000** |
+| Proxy token 量 | ~800M | **524M** |
+| Token 比例 | 1.0× | **0.65×** (论文的 65%) |
+| 每 config 时间 | 10.5 min (256 H100) | ~4h (8×910B NPU) |
+| 27 configs 总时间 | 4.7h | ~108h (4.5 天) |
+| Target 模型 | 1B | d28 (1138M scaling) |
+| Target 步数 | 20,000 | 1000 |
+| Target token 量 | 40B | 524M |
+
+### 12.4 为什么选 1000 步
+
+| 方案 | 步数 | Token 量 | 论文比例 | 总时间 | 评估 |
+|------|------|---------|---------|--------|------|
+| 原 500 步 | 500 | 262M | 33% | 2.25 天 | 太少，信号可能被噪声淹没 |
+| **1000 步** | **1000** | **524M** | **65%** | **4.5 天** | **合理折中** |
+| 2000 步 | 2000 | 1B | 125% | 9 天 | 匹配论文但时间过长 |
+
+选择 1000 步的理由：
+1. **Token 量 524M，为论文的 65%**——大部分信号应该能显现
+2. **4.5 天可行**——8×910B NPU 上 ~4h/config × 27 configs
+3. **2000 步 (1B tokens) 匹配论文但 9 天太长**——其他步骤（聚类、评测）也需要时间
+4. **论文的 base 预训练 10T tokens，我们的 base ~2-3B tokens**——base 差距大，proxy 差距可接受
+
+### 12.5 H100 vs 910B NPU 换算说明
+
+论文用 256 H100 GPU，我们用 8×910B NPU：
+
+| | H100 | 910B |
+|--|------|------|
+| BF16 FLOPS | ~989 TFLOPS | ~310-376 TFLOPS |
+| 相对算力 | 1.0× | ~0.32× |
+| 数量 | 256 | 8 |
+| 总算力比 | 256 | 2.6 (相对) |
+
+总算力差距 ~100×，但我们不需要匹配 wall clock——关键是匹配 **token 量**（训练数据量），而非计算速度。1000 步 × 524K tokens = 524M tokens 已接近论文的 800M。
+
+### 12.6 Target 训练 1000 步的风险
+
+Target 524M tokens vs 论文 40B tokens（76× 差距）。但场景不同：
+- 论文: 1B 模型从 10T 预训练 base 上 mid-train 40B
+- 我们: d28 (1138M) 从 ~2-3B 预训练 base 上 mid-train 524M
+
+**如果 target 差异不显著，proxy 搜索可能无法迁移。** 需要在第一轮后检查：
+- 不同 config 间的 score 差异是否大于噪声
+- proxy 最优 config 在 target 上是否也最优
+
+如果差异不显著，考虑增加 target 步数到 2000（1B tokens, ~8h × 2 模型 = 16h）。

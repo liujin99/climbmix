@@ -59,6 +59,9 @@ class ShardMetadataManager:
                     quality_list.append(np.zeros((n, max(len(quality_cols), 1)), dtype=np.float64))
             else:
                 quality_list.append(np.zeros((n, 1), dtype=np.float64))
+                if sf == self._shard_files[0]:
+                    print(f"[ShardMetadataManager] No quality columns found, "
+                          f"available: {available_cols}")
 
             if self._schema.char_count_col in df_meta.columns:
                 char_count_list.append(df_meta[self._schema.char_count_col].to_numpy(dtype=np.int64))

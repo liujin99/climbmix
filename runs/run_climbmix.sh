@@ -18,7 +18,7 @@ GENERAL_DATA_DIR="${GENERAL_DATA_DIR:-$NANOCHAT_BASE_DIR/climbmix_shards}"
 
 PROXY_DEPTH="${PROXY_DEPTH:-20}"
 TARGET_DEPTH="${TARGET_DEPTH:-28}"
-PROXY_NUM_ITERATIONS="${PROXY_NUM_ITERATIONS:-500}"
+PROXY_NUM_ITERATIONS="${PROXY_NUM_ITERATIONS:-1000}"
 TARGET_STEPS="${TARGET_STEPS:-1000}"
 CONFIGS_PER_ITER="${CONFIGS_PER_ITER:-15,8,4}"
 K_ENHANCED="${K_ENHANCED:-10}"
@@ -86,6 +86,7 @@ python3 "$CLIMBMIX_DIR/scripts/run_climb.py" \
     --output-dir "$OUTPUT_DIR" \
     --cluster-cache-dir "$OUTPUT_DIR" \
     --resume-search \
+    --quality-config-path "$CLIMBMIX_DIR/config/quality_columns.yaml" \
     --skip-target
 
 [ ! -f "$OUTPUT_DIR/sampled_dataset.parquet" ] && { echo "✗ No sampled_dataset.parquet"; exit 1; }

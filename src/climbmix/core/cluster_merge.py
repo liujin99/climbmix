@@ -2,10 +2,19 @@
 CLIMB Step 2: Cluster pruning and merging.
 
 Paper details (Section 2.1, "Cluster merging"):
-  1. Cluster-level pruning: remove low-quality clusters based on fasttext scores
+  1. Cluster-level pruning: remove low-quality clusters based on quality scores
      (threshold=3.0), retaining K_pruned clusters
   2. Merge clusters by centroid Euclidean distance (threshold=1.5)
      into K_enhanced < K_pruned < K_init clusters
+
+Quality labels (configurable via config/quality_columns.yaml):
+  STEM: stem_relevance, knowledge_value, notation_fidelity,
+        rigor_coherence, noise_level (all 1-5, higher = better)
+  FineWeb: qs_dclm, qs_fineweb_edu_approx, qs_english, ...
+  Nemotron: qs_quality, qs_educational, qs_informational, qs_advertisement
+
+If no quality labels are found, pruning is skipped and clusters are
+merged directly to K_enhanced.
 
 This produces the final cluster set D = {D_1, ..., D_K_enhanced}
 that defines the data mixture search space.
@@ -29,14 +38,16 @@ def compute_cluster_quality(
     """
     Compute per-cluster quality score for pruning.
 
-    Paper: train fasttext models on 4 dimensions (quality, educational,
-    informational, advertisement) scored 1-5 by Nemotron-340B.
-    Prune clusters with average quality < threshold (default 3.0).
+    Quality scores are 1-5 discrete, higher = better (all dimensions
+    including noise_level). Prune clusters with average quality < threshold.
+
+    If quality_scores is None or all-zero, skip pruning (assign 5.0 to all).
+    This handles data without quality labels gracefully.
 
     Args:
         cluster_labels: Per-document cluster labels.
         quality_scores: Per-document quality scores (num_docs, N).
-                        If None, no pruning is done.
+                        If None or all-zero, no pruning is done.
         quality_columns: Names of quality criteria.
         prune_threshold: Quality threshold for cluster pruning.
 
@@ -45,10 +56,12 @@ def compute_cluster_quality(
     """
     cluster_quality: Dict[int, float] = {}
 
-    if quality_scores is None:
+    if quality_scores is None or np.all(quality_scores == 0):
         unique_clusters = np.unique(cluster_labels)
         for c in unique_clusters:
-            cluster_quality[int(c)] = 5.0  # assume high quality if no scores
+            cluster_quality[int(c)] = 5.0
+        if quality_scores is not None and np.all(quality_scores == 0):
+            print("[ClusterQuality] All-zero scores detected, skipping pruning")
         return cluster_quality
 
     unique_clusters = np.unique(cluster_labels)

@@ -103,6 +103,10 @@ def main():
     parser.add_argument("--resume-search", action="store_true",
                         help="Resume proxy search from saved state (search_state.json)")
 
+    # ── Quality config ──
+    parser.add_argument("--quality-config-path", type=str, default="",
+                        help="YAML file with quality column names and prune_threshold")
+
     # ── Output ──
     parser.add_argument("--output-dir", type=str, default="./climbmix_output")
 
@@ -161,6 +165,7 @@ def main():
         general_data_dir=args.general_data_dir,
         stem_ratio=args.stem_ratio,
         eval_benchmarks=args.eval_benchmarks,
+        quality_config_path=args.quality_config_path,
     )
 
     print(f"\n{'=' * 70}")

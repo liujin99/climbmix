@@ -60,6 +60,15 @@ class CLIMBPipeline:
         cluster_cache_dir = cluster_cache_dir or output_dir
         os.makedirs(output_dir, exist_ok=True)
 
+        if self.config.quality_config_path:
+            from climbmix.data.column_schema import ColumnSchema
+            tmp_schema = ColumnSchema(quality_config_path=self.config.quality_config_path)
+            adj_threshold = tmp_schema.load_prune_threshold(self.config.discovery.prune_threshold)
+            if adj_threshold != self.config.discovery.prune_threshold:
+                print(f"[Pipeline] Override prune_threshold: "
+                      f"{self.config.discovery.prune_threshold} → {adj_threshold}")
+                self.config.discovery.prune_threshold = adj_threshold
+
         t_start = time.time()
         stage_times: Dict[str, float] = {}
 
@@ -232,7 +241,11 @@ class CLIMBPipeline:
 
         if data_dir is not None:
             from climbmix.data.metadata_manager import ShardMetadataManager
-            mm = ShardMetadataManager(data_dir)
+            from climbmix.data.column_schema import ColumnSchema
+            schema = ColumnSchema()
+            if self.config.quality_config_path:
+                schema = ColumnSchema(quality_config_path=self.config.quality_config_path)
+            mm = ShardMetadataManager(data_dir, schema=schema)
             cluster_labels = mm.cluster_labels
             quality_scores = mm.quality_scores
             token_counts = mm.estimate_token_counts()
