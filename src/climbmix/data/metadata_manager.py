@@ -221,7 +221,11 @@ class ShardMetadataManager:
         total_shards = len(self._shard_files)
         load_t0 = time.time()
 
-        n_workers = self._max_workers if self._max_workers is not None else min(8, total_shards)
+        if self._max_workers is not None:
+            n_workers = min(self._max_workers, total_shards)
+        else:
+            from climbmix.utils.concurrency import ConcurrencyConfig
+            n_workers = min(ConcurrencyConfig().max_io_workers, total_shards)
         print(f"[ShardMetadataManager] Discovered {total_shards} shards, "
               f"loading metadata with {n_workers} workers")
 
@@ -453,7 +457,11 @@ class ShardMetadataManager:
         is_row_col_sequential = self._is_row_col_sequential
 
         n_shards = len(shard_groups)
-        n_workers = min(8, n_shards)
+        if self._max_workers is not None:
+            n_workers = min(self._max_workers, n_shards)
+        else:
+            from climbmix.utils.concurrency import ConcurrencyConfig
+            n_workers = min(ConcurrencyConfig().max_io_workers, n_shards)
         if n_shards <= 1:
             n_workers = 1
 

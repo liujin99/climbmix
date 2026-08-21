@@ -29,6 +29,7 @@ K_ENHANCED="${K_ENHANCED:-10}"
 STEM_RATIO="${STEM_RATIO:-0.7}"
 EVAL_BENCHMARKS="${EVAL_BENCHMARKS:-stem}"
 NUM_NPU="${NUM_NPU:-8}"
+N_PARALLEL="${N_PARALLEL:-2}"
 OUTPUT_DIR="${OUTPUT_DIR:-$CLIMBMIX_DIR/result/run_$(date +%Y%m%d_%H%M%S)}"
 TS=$(date +%Y%m%d_%H%M%S)
 
@@ -52,6 +53,7 @@ export NANOCHAT_DTYPE=bfloat16 PYTHONWARNINGS="ignore::UserWarning:torch_npu"
 # ── Pre-flight ──
 echo -e "\n════════════════════════════════════════════════════════════"
 echo "  ClimbMix: d${PROXY_DEPTH} proxy → d${TARGET_DEPTH} target  |  $OUTPUT_DIR"
+echo "  NPU: ${NUM_NPU}×910B4, parallel=${N_PARALLEL} ($((NUM_NPU / N_PARALLEL)) NPU/group)"
 echo "════════════════════════════════════════════════════════════"
 
 python3 -c "import torch_npu; import torch; assert torch.npu.is_available(), 'NPU not available'" || { echo "✗ NPU not available"; exit 1; }
@@ -85,7 +87,7 @@ python3 "$CLIMBMIX_DIR/scripts/run_climb.py" \
     --target-phase1-checkpoint-path "$NANOCHAT_BASE_DIR/base_checkpoints/d${TARGET_DEPTH}" \
     --K-enhanced "$K_ENHANCED" \
     --configs-per-iter "$CONFIGS_PER_ITER" \
-    --device-type npu --npu-devices "$NUM_NPU" \
+    --device-type npu --npu-devices "$NUM_NPU" --n-parallel "$N_PARALLEL" \
     --output-dir "$OUTPUT_DIR" \
     --cluster-cache-dir "$OUTPUT_DIR" \
     --resume-search \

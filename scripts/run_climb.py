@@ -90,6 +90,8 @@ def main():
     parser.add_argument("--device-type", type=str, default="npu",
                         choices=["cpu", "cuda", "npu"])
     parser.add_argument("--npu-devices", type=int, default=8)
+    parser.add_argument("--n-parallel", type=int, default=1,
+                        help="Number of concurrent proxy experiments (partitions NPUs into groups)")
 
     # ── Validation tasks ──
     parser.add_argument("--val-tasks", type=str, default=None)
@@ -169,6 +171,7 @@ def main():
         eval_benchmarks=args.eval_benchmarks,
         quality_config_path=args.quality_config_path,
         schema_path=args.schema,
+        n_parallel=args.n_parallel,
     )
 
     print(f"\n{'=' * 70}")

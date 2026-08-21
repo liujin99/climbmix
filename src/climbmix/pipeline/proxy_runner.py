@@ -29,6 +29,7 @@ import time
 import numpy as np
 import numpy.typing as npt
 from typing import Dict, List, Optional, Any
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from climbmix.core.types import MixtureConfig, MixtureWeights, ProxyResult, CLIMBConfig
 from climbmix.sampling.data_selector import select_data_by_mixture
@@ -60,6 +61,7 @@ class ProxyRunner:
         self.general_data_dir = config.general_data_dir
         self.stem_ratio = config.stem_ratio
         self.eval_benchmarks = config.eval_benchmarks
+        self.n_parallel = getattr(config, 'n_parallel', 1)
 
         self.cluster_labels = cluster_labels
         self.token_counts = token_counts
@@ -87,6 +89,9 @@ class ProxyRunner:
         experiment_id: int = 0,
         data_dir: Optional[str] = None,
         output_dir: Optional[str] = None,
+        device_ids: Optional[List[int]] = None,
+        master_port: Optional[int] = None,
+        nproc_per_node: Optional[int] = None,
     ) -> ProxyResult:
         output_dir = output_dir or self.config.output_dir
         exp_dir = os.path.join(output_dir, f"exp_{experiment_id:04d}")
@@ -99,19 +104,26 @@ class ProxyRunner:
         mixture_data_dir = os.path.join(exp_dir, "mixture_data")
 
         t_start = time.time()
-        print(f"\n  [Exp {experiment_id}] Starting proxy experiment (d{self.proxy_depth}, tag={model_tag})")
+        group_tag = f"d{device_ids[0]}-{device_ids[-1]}" if device_ids else "all"
+        print(f"\n  [Exp {experiment_id}] Starting proxy experiment (d{self.proxy_depth}, tag={model_tag}, npu={group_tag})")
 
         print(f"  [Exp {experiment_id}] Preparing mixture-weighted data "
               f"({self.stem_ratio*100:.0f}% STEM + {(1-self.stem_ratio)*100:.0f}% general)...")
         self._prepare_mixture_data(mixture_config, experiment_id, mixture_data_dir)
 
-        mid_cmd = self._build_mid_train_cmd(model_tag, mixture_data_dir)
+        mid_cmd = self._build_mid_train_cmd(model_tag, mixture_data_dir,
+                                            nproc_per_node=nproc_per_node,
+                                            master_port=master_port)
         print(f"  [Exp {experiment_id}] mid_train: {' '.join(mid_cmd)}")
-        mid_rc = self._run_subprocess(mid_cmd, exp_dir, "mid_train")
+        mid_rc = self._run_subprocess(mid_cmd, exp_dir, "mid_train",
+                                      device_ids=device_ids, master_port=master_port)
 
-        eval_cmd = self._build_eval_cmd(model_tag)
+        eval_cmd = self._build_eval_cmd(model_tag,
+                                        nproc_per_node=nproc_per_node,
+                                        master_port=master_port)
         print(f"  [Exp {experiment_id}] base_eval: {' '.join(eval_cmd)}")
-        eval_rc = self._run_subprocess(eval_cmd, exp_dir, "eval")
+        eval_rc = self._run_subprocess(eval_cmd, exp_dir, "eval",
+                                       device_ids=device_ids, master_port=master_port)
 
         self._copy_mid_checkpoint(model_tag, exp_dir)
         per_task, val_accuracy, stem_metric, per_task_nlls, stem_nll = self._parse_eval_results(model_tag, exp_dir)
@@ -167,10 +179,66 @@ class ProxyRunner:
         data_dir: Optional[str] = None,
         output_dir: Optional[str] = None,
     ) -> List[ProxyResult]:
-        results = []
-        for i, config in enumerate(configs):
-            r = self.run_experiment(config, experiment_id=i, data_dir=data_dir, output_dir=output_dir)
-            results.append(r)
+        if self.n_parallel <= 1:
+            results = []
+            for i, config in enumerate(configs):
+                r = self.run_experiment(config, experiment_id=i, data_dir=data_dir, output_dir=output_dir)
+                results.append(r)
+            return results
+
+        n_par = self.n_parallel
+        devices_per_group = self.npu_devices // n_par
+        assert self.npu_devices % n_par == 0, (
+            f"npu_devices ({self.npu_devices}) must be divisible by n_parallel ({n_par})"
+        )
+
+        print(f"\n  [ProxyRunner] Parallel mode: {n_par} groups x {devices_per_group} NPUs = {self.npu_devices} total")
+
+        results: List[Optional[ProxyResult]] = [None] * len(configs)
+
+        for batch_start in range(0, len(configs), n_par):
+            batch_end = min(batch_start + n_par, len(configs))
+            batch_size = batch_end - batch_start
+            print(f"\n  [ProxyRunner] Batch {batch_start // n_par + 1}: "
+                  f"experiments {batch_start}..{batch_end - 1} ({batch_size} parallel)")
+
+            with ThreadPoolExecutor(max_workers=batch_size) as pool:
+                futures = {}
+                for i in range(batch_size):
+                    exp_id = batch_start + i
+                    group_id = i
+                    dev_start = group_id * devices_per_group
+                    devices = list(range(dev_start, dev_start + devices_per_group))
+                    port = 29500 + group_id
+
+                    future = pool.submit(
+                        self.run_experiment,
+                        configs[exp_id],
+                        experiment_id=exp_id,
+                        data_dir=data_dir,
+                        output_dir=output_dir,
+                        device_ids=devices,
+                        master_port=port,
+                        nproc_per_node=devices_per_group,
+                    )
+                    futures[future] = exp_id
+
+                for future in as_completed(futures):
+                    exp_id = futures[future]
+                    try:
+                        results[exp_id] = future.result()
+                    except Exception as e:
+                        print(f"  [Exp {exp_id}] FAILED: {e}")
+                        results[exp_id] = ProxyResult(
+                            mixture_config=configs[exp_id],
+                            validation_loss=float("inf"),
+                            validation_accuracy=0.0,
+                            validation_nll=float("inf"),
+                            per_task_accuracies={},
+                            per_task_nlls={},
+                            metadata={"experiment_id": exp_id, "error": str(e)},
+                        )
+
         return results
 
     def _symlink_base_checkpoint(self, model_tag: str):
@@ -315,10 +383,17 @@ class ProxyRunner:
         self,
         model_tag: str,
         mixture_data_dir: str,
+        nproc_per_node: Optional[int] = None,
+        master_port: Optional[int] = None,
     ) -> List[str]:
+        nproc = nproc_per_node or self.npu_devices
         cmd = [
             "torchrun", "--standalone",
-            f"--nproc_per_node={self.npu_devices}",
+            f"--nproc_per_node={nproc}",
+        ]
+        if master_port is not None:
+            cmd += ["--master_port", str(master_port)]
+        cmd += [
             "-m", "scripts.mid_train",
             "--run", model_tag,
             "--device-type", self.device_type,
@@ -334,10 +409,17 @@ class ProxyRunner:
     def _build_eval_cmd(
         self,
         model_tag: str,
+        nproc_per_node: Optional[int] = None,
+        master_port: Optional[int] = None,
     ) -> List[str]:
+        nproc = nproc_per_node or self.npu_devices
         cmd = [
             "torchrun", "--standalone",
-            f"--nproc_per_node={self.npu_devices}",
+            f"--nproc_per_node={nproc}",
+        ]
+        if master_port is not None:
+            cmd += ["--master_port", str(master_port)]
+        cmd += [
             "-m", "scripts.base_eval",
             "--eval", "core",
             "--eval-benchmarks", self.eval_benchmarks,
@@ -353,11 +435,19 @@ class ProxyRunner:
         cmd: List[str],
         exp_dir: str,
         stage_name: str,
+        device_ids: Optional[List[int]] = None,
+        master_port: Optional[int] = None,
     ) -> int:
         log_path = os.path.join(exp_dir, f"{stage_name}.log")
         env = os.environ.copy()
         env["PYTHONPATH"] = self.nanochat_dir + ":" + env.get("PYTHONPATH", "")
         env["NANOCHAT_BASE_DIR"] = self.nanochat_base_dir
+
+        if device_ids is not None:
+            env["ASCEND_VISIBLE_DEVICES"] = ",".join(str(d) for d in device_ids)
+            env["RANK_SIZE"] = str(len(device_ids))
+        if master_port is not None:
+            env["MASTER_PORT"] = str(master_port)
 
         with open(log_path, "w") as log_f:
             proc = subprocess.Popen(
