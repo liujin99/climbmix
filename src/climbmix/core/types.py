@@ -253,10 +253,12 @@ class ClusterDiscoveryConfig:
     K_enhanced: int = 10
     embedding_model: str = "NovaSearch/stella_en_400M_v5"
     embedding_truncate_len: int = 512
+    embedding_device: str = "cpu"
+    embedding_sample_size: int = 0
     prune_threshold: float = 3.0
     merge_distance: float = 1.5
 
-    VALID_METHODS = ("embedding_cluster",)
+    VALID_METHODS = ("embedding_cluster", "quality_cluster")
 
 
 @dataclass

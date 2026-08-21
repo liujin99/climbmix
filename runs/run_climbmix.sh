@@ -26,6 +26,9 @@ PROXY_NUM_ITERATIONS="${PROXY_NUM_ITERATIONS:-1000}"
 TARGET_STEPS="${TARGET_STEPS:-1000}"
 CONFIGS_PER_ITER="${CONFIGS_PER_ITER:-20,10,5}"
 K_ENHANCED="${K_ENHANCED:-10}"
+DISCOVERY_METHOD="${DISCOVERY_METHOD:-quality_cluster}"
+EMBEDDING_DEVICE="${EMBEDDING_DEVICE:-npu}"
+EMBEDDING_SAMPLE_SIZE="${EMBEDDING_SAMPLE_SIZE:-500000}"
 STEM_RATIO="${STEM_RATIO:-0.7}"
 EVAL_BENCHMARKS="${EVAL_BENCHMARKS:-stem}"
 NUM_NPU="${NUM_NPU:-8}"
@@ -86,6 +89,9 @@ python3 "$CLIMBMIX_DIR/scripts/run_climb.py" \
     --target-depth "$TARGET_DEPTH" \
     --target-phase1-checkpoint-path "$NANOCHAT_BASE_DIR/base_checkpoints/d${TARGET_DEPTH}" \
     --K-enhanced "$K_ENHANCED" \
+    --discovery-method "$DISCOVERY_METHOD" \
+    --embedding-device "$EMBEDDING_DEVICE" \
+    --embedding-sample-size "$EMBEDDING_SAMPLE_SIZE" \
     --configs-per-iter "$CONFIGS_PER_ITER" \
     --device-type npu --npu-devices "$NUM_NPU" --n-parallel "$N_PARALLEL" \
     --output-dir "$OUTPUT_DIR" \

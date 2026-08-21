@@ -46,9 +46,13 @@ def main():
 
     # ── Discovery ──
     parser.add_argument("--discovery-method", type=str, default="embedding_cluster",
-                        choices=["embedding_cluster"])
+                        choices=["embedding_cluster", "quality_cluster"])
     parser.add_argument("--K-enhanced", type=int, default=10)
     parser.add_argument("--embedding-model", type=str, default="NovaSearch/stella_en_400M_v5")
+    parser.add_argument("--embedding-device", type=str, default="cpu",
+                        help="Device for embedding: cpu, npu")
+    parser.add_argument("--embedding-sample-size", type=int, default=0,
+                        help="Subsample N docs for embedding (0 = all). Speeds up embedding_cluster on large datasets.")
     parser.add_argument("--prune-threshold", type=float, default=3.0)
     parser.add_argument("--merge-distance", type=float, default=1.5)
 
@@ -145,6 +149,8 @@ def main():
             method=args.discovery_method,
             K_enhanced=args.K_enhanced,
             embedding_model=args.embedding_model,
+            embedding_device=args.embedding_device,
+            embedding_sample_size=args.embedding_sample_size,
             prune_threshold=args.prune_threshold,
             merge_distance=args.merge_distance,
         ),

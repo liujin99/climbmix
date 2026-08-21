@@ -183,10 +183,6 @@ def merge_clusters_by_distance(
         absorbed_id = max(id_i, id_j)
 
         cluster_groups[merged_id] = cluster_groups.pop(id_i) + cluster_groups.pop(id_j)
-        if id_j in cluster_groups:
-            cluster_groups.pop(id_j)
-        if id_i in cluster_groups and id_i != merged_id:
-            cluster_groups.pop(id_i)
 
         current_centroids[merged_id] = new_centroid
         for old_id in cluster_groups[merged_id]:
