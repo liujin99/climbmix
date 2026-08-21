@@ -53,7 +53,7 @@ class ColumnSchema:
         "noise_level",
     )
 
-    preprocessed_pattern: str = "preprocessed_*.parquet"
+    preprocessed_pattern: str = "*.parquet"
     quality_config_path: Optional[str] = None
 
     def resolve_cluster_col(self, available_columns: List[str]) -> str:
