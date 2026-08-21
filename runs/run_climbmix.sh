@@ -5,6 +5,10 @@
 #  跳过步骤: 注释掉对应的行
 #  恢复搜索/跳过聚类: 自动 (检测 search_state.json / cluster_cache.npz)
 # ═══════════════════════════════════════════════════════════════════════
+# Source CANN env BEFORE set -euo pipefail (set_env.sh may have commands
+# that fail under strict mode, causing incomplete env setup)
+source /usr/local/Ascend/ascend-toolkit/set_env.sh 2>/dev/null || true
+
 set -euo pipefail
 
 # ── Configuration ──
@@ -31,7 +35,6 @@ TS=$(date +%Y%m%d_%H%M%S)
 # ── NPU Environment ──
 export OMP_NUM_THREADS=1 WANDB_MODE=offline NANOCHAT_BASE_DIR="$NANOCHAT_BASE_DIR"
 mkdir -p "$NANOCHAT_BASE_DIR"
-source /usr/local/Ascend/ascend-toolkit/set_env.sh 2>/dev/null || true
 export ASCEND_HCCL_PATH=/usr/local/Ascend/ascend-toolkit/latest/hccl
 export LD_LIBRARY_PATH=${ASCEND_HCCL_PATH}/lib64:${LD_LIBRARY_PATH:-}
 export HCCL_CONNECT_TIMEOUT=1200 HCCL_WHITELIST_DISABLE=1

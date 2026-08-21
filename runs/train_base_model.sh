@@ -14,6 +14,10 @@
 #   DEPTH=24  bash runs/train_base_model.sh
 # ──────────────────────────────────────────────────────────────
 
+# Source CANN env BEFORE set -euo pipefail (set_env.sh may have commands
+# that fail under strict mode, causing incomplete env setup)
+source /usr/local/Ascend/ascend-toolkit/set_env.sh 2>/dev/null || true
+
 set -euo pipefail
 
 NANOCHAT_DIR="${NANOCHAT_DIR:-/home/ma-user/work/nanochat-npu}"
@@ -37,8 +41,6 @@ ok "nanochat-npu ($NANOCHAT_BRANCH)"
 
 python3 -c "import torch_npu; assert torch.npu.is_available()" 2>/dev/null || die "NPU not available — needs 8×910B3"
 ok "NPU"
-
-source /usr/local/Ascend/ascend-toolkit/set_env.sh 2>/dev/null || true
 
 echo ""
 echo "Training d${DEPTH} (ratio=$RATIO, tag=$MODEL_TAG)..."
