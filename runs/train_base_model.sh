@@ -39,7 +39,7 @@ branch=$(cd "$NANOCHAT_DIR" && git rev-parse --abbrev-ref HEAD)
 [ "$branch" = "$NANOCHAT_BRANCH" ] || die "nanochat-npu on '$branch', need '$NANOCHAT_BRANCH'"
 ok "nanochat-npu ($NANOCHAT_BRANCH)"
 
-python3 -c "import torch_npu; assert torch.npu.is_available()" 2>/dev/null || die "NPU not available — needs 8×910B3"
+python3 -c "import torch_npu; import torch; assert torch.npu.is_available(), 'NPU not available'" || die "NPU not available — needs 8×910B3"
 ok "NPU"
 
 echo ""

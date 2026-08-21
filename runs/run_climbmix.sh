@@ -54,7 +54,7 @@ echo -e "\n═══════════════════════
 echo "  ClimbMix: d${PROXY_DEPTH} proxy → d${TARGET_DEPTH} target  |  $OUTPUT_DIR"
 echo "════════════════════════════════════════════════════════════"
 
-python3 -c "import torch_npu; assert torch.npu.is_available()" 2>/dev/null || { echo "✗ NPU not available"; exit 1; }
+python3 -c "import torch_npu; import torch; assert torch.npu.is_available(), 'NPU not available'" || { echo "✗ NPU not available"; exit 1; }
 [ -d "$NANOCHAT_DIR" ] || { echo "✗ nanochat-npu not found at $NANOCHAT_DIR"; exit 1; }
 for d in "$PROXY_DEPTH" "$TARGET_DEPTH"; do
     ckpt="$NANOCHAT_BASE_DIR/base_checkpoints/d${d}"
