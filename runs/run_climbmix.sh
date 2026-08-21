@@ -54,7 +54,24 @@ echo -e "\n═══════════════════════
 echo "  ClimbMix: d${PROXY_DEPTH} proxy → d${TARGET_DEPTH} target  |  $OUTPUT_DIR"
 echo "════════════════════════════════════════════════════════════"
 
-python3 -c "import torch_npu; assert torch.npu.is_available()" 2>/dev/null || { echo "✗ NPU not available"; exit 1; }
+echo "--- DEBUG: NPU diagnostics ---"
+echo "python3: $(which python3)"
+echo "LD_LIBRARY_PATH (first 200): ${LD_LIBRARY_PATH:0:200}"
+echo "ASCEND_OPP_PATH: ${ASCEND_OPP_PATH:-NOT_SET}"
+echo "ASCEND_TOOLKIT_HOME: ${ASCEND_TOOLKIT_HOME:-NOT_SET}"
+echo "PYTHONPATH: ${PYTHONPATH:-NOT_SET}"
+echo "PYTHONPRELOAD: ${PYTHONPRELOAD:-NOT_SET}"
+python3 -c "
+import sys
+print('Python:', sys.executable)
+print('sys.path:', sys.path[:5])
+import torch
+print('torch:', torch.__version__, 'path:', torch.__file__)
+import torch_npu
+print('torch_npu:', torch_npu.__version__, 'path:', torch_npu.__file__)
+print('is_available:', torch.npu.is_available())
+print('device_count:', torch.npu.device_count())
+" || { echo "✗ NPU not available"; exit 1; }
 [ -d "$NANOCHAT_DIR" ] || { echo "✗ nanochat-npu not found at $NANOCHAT_DIR"; exit 1; }
 for d in "$PROXY_DEPTH" "$TARGET_DEPTH"; do
     ckpt="$NANOCHAT_BASE_DIR/base_checkpoints/d${d}"
