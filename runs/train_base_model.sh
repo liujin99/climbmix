@@ -16,7 +16,7 @@
 
 set -euo pipefail
 
-NANOCHAT_DIR="${NANOCHAT_DIR:-/home/liujin99/nanochat-npu}"
+NANOCHAT_DIR="${NANOCHAT_DIR:-/home/ma-user/work/nanochat-npu}"
 NANOCHAT_BRANCH="dev-data-mix"
 DEPTH="${DEPTH:-10}"
 RATIO="${RATIO:-9.5}"

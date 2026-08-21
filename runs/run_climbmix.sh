@@ -12,7 +12,7 @@ CLIMBMIX_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 export PYTHONPATH="${CLIMBMIX_DIR}/src:${PYTHONPATH:-}"
 
 DATA_DIR="${DATA_DIR:-/home/ma-user/work/100B_stem_parquet_filtered}"
-NANOCHAT_DIR="${NANOCHAT_DIR:-/home/liujin99/nanochat-npu}"
+NANOCHAT_DIR="${NANOCHAT_DIR:-/home/ma-user/work/nanochat-npu}"
 NANOCHAT_BASE_DIR="${NANOCHAT_BASE_DIR:-/home/ma-user/work/nanochat_model_dir}"
 GENERAL_DATA_DIR="${GENERAL_DATA_DIR:-$NANOCHAT_BASE_DIR/climbmix_shards}"
 
