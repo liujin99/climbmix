@@ -496,7 +496,7 @@ class CLIMBConfig:
     eval_benchmarks: str = "stem"
     quality_config_path: str = ""
     schema_path: str = ""
-    n_parallel: int = 1
+    npu_per_exp: int = 0
 
     @property
     def metric_direction(self) -> str:

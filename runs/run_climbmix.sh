@@ -32,7 +32,7 @@ EMBEDDING_SAMPLE_SIZE="${EMBEDDING_SAMPLE_SIZE:-500000}"
 STEM_RATIO="${STEM_RATIO:-0.7}"
 EVAL_BENCHMARKS="${EVAL_BENCHMARKS:-stem}"
 NUM_NPU="${NUM_NPU:-8}"
-N_PARALLEL="${N_PARALLEL:-2}"
+NPU_PER_EXP="${NPU_PER_EXP:-4}"
 OUTPUT_DIR="${OUTPUT_DIR:-$CLIMBMIX_DIR/result/run_$(date +%Y%m%d_%H%M%S)}"
 TS=$(date +%Y%m%d_%H%M%S)
 
@@ -56,7 +56,7 @@ export NANOCHAT_DTYPE=bfloat16 PYTHONWARNINGS="ignore::UserWarning:torch_npu"
 # ── Pre-flight ──
 echo -e "\n════════════════════════════════════════════════════════════"
 echo "  ClimbMix: d${PROXY_DEPTH} proxy → d${TARGET_DEPTH} target  |  $OUTPUT_DIR"
-echo "  NPU: ${NUM_NPU}×910B4, parallel=${N_PARALLEL} ($((NUM_NPU / N_PARALLEL)) NPU/group)"
+echo "  NPU: ${NUM_NPU}x910B4, npu_per_exp=${NPU_PER_EXP} ($((NUM_NPU / NPU_PER_EXP)) parallel)"
 echo "════════════════════════════════════════════════════════════"
 
 python3 -c "import torch_npu; import torch; assert torch.npu.is_available(), 'NPU not available'" || { echo "✗ NPU not available"; exit 1; }
@@ -93,7 +93,7 @@ python3 "$CLIMBMIX_DIR/scripts/run_climb.py" \
     --embedding-device "$EMBEDDING_DEVICE" \
     --embedding-sample-size "$EMBEDDING_SAMPLE_SIZE" \
     --configs-per-iter "$CONFIGS_PER_ITER" \
-    --device-type npu --npu-devices "$NUM_NPU" --n-parallel "$N_PARALLEL" \
+    --device-type npu --npu-devices "$NUM_NPU" --npu-per-exp "$NPU_PER_EXP" \
     --output-dir "$OUTPUT_DIR" \
     --cluster-cache-dir "$OUTPUT_DIR" \
     --resume-search \

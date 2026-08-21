@@ -61,7 +61,7 @@ class ProxyRunner:
         self.general_data_dir = config.general_data_dir
         self.stem_ratio = config.stem_ratio
         self.eval_benchmarks = config.eval_benchmarks
-        self.n_parallel = getattr(config, 'n_parallel', 1)
+        self.npu_per_exp = getattr(config, 'npu_per_exp', 0)
 
         self.cluster_labels = cluster_labels
         self.token_counts = token_counts
@@ -179,27 +179,27 @@ class ProxyRunner:
         data_dir: Optional[str] = None,
         output_dir: Optional[str] = None,
     ) -> List[ProxyResult]:
-        if self.n_parallel <= 1:
+        if self.npu_per_exp == 0 or self.npu_per_exp >= self.npu_devices:
             results = []
             for i, config in enumerate(configs):
                 r = self.run_experiment(config, experiment_id=i, data_dir=data_dir, output_dir=output_dir)
                 results.append(r)
             return results
 
-        n_par = self.n_parallel
-        devices_per_group = self.npu_devices // n_par
-        assert self.npu_devices % n_par == 0, (
-            f"npu_devices ({self.npu_devices}) must be divisible by n_parallel ({n_par})"
+        devices_per_exp = self.npu_per_exp
+        n_parallel = self.npu_devices // devices_per_exp
+        assert self.npu_devices % devices_per_exp == 0, (
+            f"npu_devices ({self.npu_devices}) must be divisible by npu_per_exp ({devices_per_exp})"
         )
 
-        print(f"\n  [ProxyRunner] Parallel mode: {n_par} groups x {devices_per_group} NPUs = {self.npu_devices} total")
+        print(f"\n  [ProxyRunner] Parallel mode: {n_parallel} experiments x {devices_per_exp} NPUs = {self.npu_devices} total")
 
         results: List[Optional[ProxyResult]] = [None] * len(configs)
 
-        for batch_start in range(0, len(configs), n_par):
-            batch_end = min(batch_start + n_par, len(configs))
+        for batch_start in range(0, len(configs), n_parallel):
+            batch_end = min(batch_start + n_parallel, len(configs))
             batch_size = batch_end - batch_start
-            print(f"\n  [ProxyRunner] Batch {batch_start // n_par + 1}: "
+            print(f"\n  [ProxyRunner] Batch {batch_start // n_parallel + 1}: "
                   f"experiments {batch_start}..{batch_end - 1} ({batch_size} parallel)")
 
             with ThreadPoolExecutor(max_workers=batch_size) as pool:
@@ -207,8 +207,8 @@ class ProxyRunner:
                 for i in range(batch_size):
                     exp_id = batch_start + i
                     group_id = i
-                    dev_start = group_id * devices_per_group
-                    devices = list(range(dev_start, dev_start + devices_per_group))
+                    dev_start = group_id * devices_per_exp
+                    devices = list(range(dev_start, dev_start + devices_per_exp))
                     port = 29500 + group_id
 
                     future = pool.submit(
@@ -219,7 +219,7 @@ class ProxyRunner:
                         output_dir=output_dir,
                         device_ids=devices,
                         master_port=port,
-                        nproc_per_node=devices_per_group,
+                        nproc_per_node=devices_per_exp,
                     )
                     futures[future] = exp_id
 
