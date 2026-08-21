@@ -51,10 +51,10 @@ def _read_shard_metadata(shard_path: str, schema_dict: dict) -> dict:
     # Domain/cluster column — convert string to int if needed
     domain_col = schema_dict["domain_col"]
     domain_data = pf[domain_col]
-    if domain_data.dtype == object:
-        domain_arr = pd.Categorical(domain_data).codes.astype(np.int64)
-    else:
+    if pd.api.types.is_numeric_dtype(domain_data):
         domain_arr = domain_data.to_numpy(dtype=np.int64)
+    else:
+        domain_arr = pd.Categorical(domain_data).codes.astype(np.int64)
 
     # Quality columns
     quality_cols = schema_dict["quality_cols"]
