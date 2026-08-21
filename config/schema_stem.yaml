@@ -1,0 +1,41 @@
+# STEM dataset schema — 100B STEM parquet data
+#
+# Usage:
+#   --schema config/schema_stem.yaml
+#
+# domain_names 顺序决定 string→int 映射: 数学=0, 化学=1, 生物学=2, 物理=3
+# quality_cols 全部 higher_better=true (noise_level=5 表示噪声少/质量好)
+# char_count_col: char_count_col → 数据已预计算
+# row_in_shard_col: source_record_idx → 指定行号的文本读取
+# prune_threshold: clusters with average quality below this are removed (1-5 scale)
+
+domain_col: category_name
+domain_names:
+  - 数学
+  - 化学
+  - 生物学
+  - 物理
+
+quality_cols:
+  - stem_relevance
+  - knowledge_value
+  - notation_fidelity
+  - rigor_coherence
+  - noise_level
+
+quality_names:
+  - stem_relevance
+  - knowledge_value
+  - notation_fidelity
+  - rigor_coherence
+  - noise_level
+
+text_col: text
+char_count_col: char_count_col
+row_in_shard_col: source_record_idx
+
+# Prune threshold: clusters with average quality below this are removed.
+# Range: 1-5 (all scores are 1-5 discrete, higher = better).
+# Paper uses 3.0 (loose threshold, 60% of max).
+# Set to 0.0 to disable pruning entirely.
+prune_threshold: 3.0

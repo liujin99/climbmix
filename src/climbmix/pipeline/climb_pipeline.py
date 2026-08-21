@@ -60,10 +60,19 @@ class CLIMBPipeline:
         cluster_cache_dir = cluster_cache_dir or output_dir
         os.makedirs(output_dir, exist_ok=True)
 
-        if self.config.quality_config_path:
-            from climbmix.data.column_schema import ColumnSchema
-            tmp_schema = ColumnSchema(quality_config_path=self.config.quality_config_path)
-            adj_threshold = tmp_schema.load_prune_threshold(self.config.discovery.prune_threshold)
+        if self.config.schema_path:
+            from climbmix.data.column_schema import DatasetSchema
+            schema = DatasetSchema.from_yaml(self.config.schema_path)
+            adj_threshold = schema.prune_threshold
+            if adj_threshold != self.config.discovery.prune_threshold:
+                print(f"[Pipeline] Override prune_threshold: "
+                      f"{self.config.discovery.prune_threshold} → {adj_threshold}")
+                self.config.discovery.prune_threshold = adj_threshold
+        elif self.config.quality_config_path:
+            import yaml
+            with open(self.config.quality_config_path) as f:
+                qc = yaml.safe_load(f)
+            adj_threshold = float(qc.get("prune_threshold", self.config.discovery.prune_threshold))
             if adj_threshold != self.config.discovery.prune_threshold:
                 print(f"[Pipeline] Override prune_threshold: "
                       f"{self.config.discovery.prune_threshold} → {adj_threshold}")
@@ -241,10 +250,11 @@ class CLIMBPipeline:
 
         if data_dir is not None:
             from climbmix.data.metadata_manager import ShardMetadataManager
-            from climbmix.data.column_schema import ColumnSchema
-            schema = ColumnSchema()
-            if self.config.quality_config_path:
-                schema = ColumnSchema(quality_config_path=self.config.quality_config_path)
+            from climbmix.data.column_schema import DatasetSchema
+            if self.config.schema_path:
+                schema = DatasetSchema.from_yaml(self.config.schema_path)
+            else:
+                schema = DatasetSchema.from_yaml("config/schema_stem.yaml")
             mm = ShardMetadataManager(data_dir, schema=schema)
             cluster_labels = mm.cluster_labels
             quality_scores = mm.quality_scores

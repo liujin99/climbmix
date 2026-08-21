@@ -89,7 +89,7 @@ python3 "$CLIMBMIX_DIR/scripts/run_climb.py" \
     --output-dir "$OUTPUT_DIR" \
     --cluster-cache-dir "$OUTPUT_DIR" \
     --resume-search \
-    --quality-config-path "$CLIMBMIX_DIR/config/quality_columns.yaml" \
+    --schema "$CLIMBMIX_DIR/config/schema_stem.yaml" \
     --skip-target
 
 [ ! -f "$OUTPUT_DIR/sampled_dataset.parquet" ] && { echo "✗ No sampled_dataset.parquet"; exit 1; }

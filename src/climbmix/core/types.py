@@ -493,6 +493,7 @@ class CLIMBConfig:
     stem_ratio: float = 0.7
     eval_benchmarks: str = "stem"
     quality_config_path: str = ""
+    schema_path: str = ""
 
     @property
     def metric_direction(self) -> str:

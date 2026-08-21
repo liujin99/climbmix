@@ -105,7 +105,9 @@ def main():
 
     # ── Quality config ──
     parser.add_argument("--quality-config-path", type=str, default="",
-                        help="YAML file with quality column names and prune_threshold")
+                        help="(deprecated) YAML file with quality column names and prune_threshold")
+    parser.add_argument("--schema", type=str, default="",
+                        help="YAML schema file with column mappings (domain_col, quality_cols, text_col, etc.)")
 
     # ── Output ──
     parser.add_argument("--output-dir", type=str, default="./climbmix_output")
@@ -166,6 +168,7 @@ def main():
         stem_ratio=args.stem_ratio,
         eval_benchmarks=args.eval_benchmarks,
         quality_config_path=args.quality_config_path,
+        schema_path=args.schema,
     )
 
     print(f"\n{'=' * 70}")
