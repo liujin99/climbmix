@@ -81,20 +81,22 @@ class EmbeddingClusterDiscovery:
         if texts is not None:
             loaded_texts = texts
         elif metadata_manager is not None:
-            print("[EmbeddingCluster] Loading texts from metadata_manager (full dataset)")
-            all_indices = np.arange(metadata_manager.num_docs)
-            loaded_texts = metadata_manager.read_texts(all_indices)
+            print("[EmbeddingCluster] Full dataset mode: streaming embedding (no text pre-load)")
         else:
             raise ValueError("EmbeddingCluster discovery requires texts or metadata_manager")
 
         if token_counts is None:
-            from climbmix.utils.token_estimate import estimate_tokens_from_text
-            token_counts = np.array(
-                [estimate_tokens_from_text(t) for t in loaded_texts], dtype=np.int64
-            )
+            if metadata_manager is not None:
+                token_counts = metadata_manager.estimate_token_counts()
+            elif texts is not None:
+                from climbmix.utils.token_estimate import estimate_tokens_from_text
+                token_counts = np.array(
+                    [estimate_tokens_from_text(t) for t in loaded_texts], dtype=np.int64
+                )
 
         cluster_info, final_labels = preprocess_pipeline(
-            loaded_texts,
+            texts=loaded_texts if texts is not None or metadata_manager is None else None,
+            metadata_manager=metadata_manager if texts is None else None,
             quality_scores=quality_scores,
             token_counts=token_counts,
             embedding_model=config.embedding_model,

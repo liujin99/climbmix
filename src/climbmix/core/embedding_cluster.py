@@ -132,6 +132,136 @@ def embed_documents(
     return embeddings
 
 
+def embed_texts_streaming(
+    metadata_manager,
+    model_name: str = "NovaSearch/stella_en_400M_v5",
+    batch_size: int = 256,
+    cache_path: Optional[str] = None,
+    device: str = "cpu",
+) -> npt.NDArray[np.float32]:
+    """
+    Stream-embed texts shard by shard, avoiding loading all texts into memory.
+
+    Reads one shard's text column at a time, embeds it, stores embeddings
+    in a preallocated array, then frees the text memory.
+    """
+    if cache_path and os.path.exists(cache_path):
+        print(f"[Embed-Stream] Loading cached embeddings from: {cache_path}")
+        data = np.load(cache_path)
+        embeddings = data["embeddings"]
+        print(f"[Embed-Stream] Loaded {embeddings.shape[0]} embeddings, dim={embeddings.shape[1]}")
+        return embeddings
+
+    actual_device = device
+
+    def _load_model(model_name, dev):
+        from sentence_transformers import SentenceTransformer
+        try:
+            import xformers  # noqa: F401
+            has_xformers = True
+        except ImportError:
+            has_xformers = False
+
+        if has_xformers:
+            return SentenceTransformer(model_name, device=dev, trust_remote_code=True)
+
+        for impl in ["sdpa", "eager"]:
+            try:
+                print(f"[Embed-Stream] xformers not available, trying attn_implementation={impl}")
+                return SentenceTransformer(
+                    model_name, device=dev, trust_remote_code=True,
+                    model_kwargs={"attn_implementation": impl},
+                )
+            except (KeyError, AssertionError) as e:
+                print(f"[Embed-Stream] attn_implementation={impl} failed: {e}")
+        raise RuntimeError("Failed to load model: no compatible attention implementation")
+
+    if device == "npu":
+        try:
+            import torch
+            import torch_npu
+            if torch.npu.is_available():
+                print("[Embed-Stream] NPU available, using Ascend NPU")
+            else:
+                print("[Embed-Stream] NPU not available, falling back to CPU")
+                actual_device = "cpu"
+        except ImportError:
+            print("[Embed-Stream] torch_npu not available, falling back to CPU")
+            actual_device = "cpu"
+
+    if actual_device == "cpu":
+        import os
+        num_threads = os.environ.get("OMP_NUM_THREADS", "")
+        if not num_threads:
+            import multiprocessing
+            num_cpus = multiprocessing.cpu_count()
+            print(f"[Embed-Stream] Using CPU with {num_cpus} threads")
+            try:
+                import torch
+                torch.set_num_threads(num_cpus)
+            except ImportError:
+                pass
+
+    print(f"[Embed-Stream] Loading model: {model_name} (device={actual_device})")
+    t0 = time.time()
+    model = _load_model(model_name, actual_device)
+    print(f"[Embed-Stream] Model loaded in {time.time() - t0:.1f}s")
+
+    import pyarrow.parquet as pq
+
+    text_col = metadata_manager.schema.text_col
+    shard_infos = metadata_manager.shard_info
+    total_docs = metadata_manager.num_docs
+    n_shards = len(shard_infos)
+
+    dummy_emb = model.encode(["test"], show_progress_bar=False, normalize_embeddings=True)
+    emb_dim = dummy_emb.shape[1]
+
+    all_embeddings = np.empty((total_docs, emb_dim), dtype=np.float32)
+    print(f"[Embed-Stream] Preallocated ({total_docs:,}, {emb_dim}) embeddings array "
+          f"({total_docs * emb_dim * 4 / (1024**3):.1f} GB)")
+    print(f"[Embed-Stream] Streaming {n_shards} shards, batch_size={batch_size}")
+
+    t1 = time.time()
+    docs_done = 0
+    for si, sinfo in enumerate(shard_infos):
+        shard_path = sinfo["path"]
+        start_idx = sinfo["start_idx"]
+        num_docs = sinfo["num_docs"]
+
+        table = pq.read_table(shard_path, columns=[text_col], use_threads=True)
+        col = table.column(text_col)
+        shard_texts = [str(v) if v is not None else "" for v in col.to_pylist()]
+        del table, col
+
+        for j in range(0, len(shard_texts), batch_size):
+            batch = shard_texts[j:j + batch_size]
+            emb = model.encode(batch, show_progress_bar=False, normalize_embeddings=True)
+            all_embeddings[start_idx + j:start_idx + j + len(batch)] = emb
+
+        docs_done += num_docs
+        del shard_texts
+        elapsed = time.time() - t1
+        speed = docs_done / elapsed if elapsed > 0 else 0
+        eta = (total_docs - docs_done) / speed if speed > 0 else 0
+        if si % 10 == 0 or si == n_shards - 1:
+            print(f"[Embed-Stream] Shard {si + 1}/{n_shards}: {docs_done:,}/{total_docs:,} docs "
+                  f"({docs_done / total_docs * 100:.1f}%), {speed:.0f} docs/s, "
+                  f"elapsed {elapsed:.0f}s, ETA {eta:.0f}s")
+
+    elapsed = time.time() - t1
+    print(f"[Embed-Stream] Encoded {total_docs:,} docs in {elapsed:.1f}s "
+          f"({total_docs / elapsed:.0f} docs/s), dim={emb_dim}")
+
+    if cache_path:
+        cache_dir = os.path.dirname(cache_path) or "."
+        os.makedirs(cache_dir, exist_ok=True)
+        np.savez(cache_path, embeddings=all_embeddings)
+        print(f"[Embed-Stream] Cached embeddings to: {cache_path}")
+
+    return all_embeddings
+
+
 def cluster_embeddings_faiss(
     embeddings: npt.NDArray[np.float32],
     K_init: int = 1000,

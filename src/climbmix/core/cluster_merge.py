@@ -249,7 +249,7 @@ def build_cluster_info(
 
 
 def preprocess_pipeline(
-    texts: List[str],
+    texts: Optional[List[str]] = None,
     quality_scores: Optional[npt.NDArray[np.float64]] = None,
     token_counts: Optional[npt.NDArray[np.int64]] = None,
     embedding_model: str = "NovaSearch/stella_en_400M_v5",
@@ -260,12 +260,15 @@ def preprocess_pipeline(
     embedding_cache: Optional[str] = None,
     cluster_cache: Optional[str] = None,
     device: str = "cpu",
+    metadata_manager: Optional[object] = None,
 ) -> Tuple[List[ClusterInfo], npt.NDArray[np.int64]]:
     """
     Full CLIMB preprocessing pipeline: embed → cluster → prune → merge → build info.
 
     Args:
-        texts: Raw document texts.
+        texts: Raw document texts (for subsampled mode).
+        metadata_manager: If provided (and texts is None), stream-embeds
+            all texts shard-by-shard without loading everything into memory.
         quality_scores: Per-document quality scores for pruning.
         token_counts: Per-document token counts.
         embedding_model: Sentence-transformer model name.
@@ -280,7 +283,7 @@ def preprocess_pipeline(
     Returns:
         Tuple of (cluster_info_list, final_cluster_labels).
     """
-    from climbmix.core.embedding_cluster import embed_documents, cluster_embeddings
+    from climbmix.core.embedding_cluster import embed_documents, embed_texts_streaming, cluster_embeddings
 
     print("\n" + "=" * 70)
     print("  CLIMB Preprocessing Pipeline")
@@ -288,10 +291,19 @@ def preprocess_pipeline(
 
     t0 = time.time()
 
-    embeddings = embed_documents(
-        texts, model_name=embedding_model,
-        cache_path=embedding_cache, device=device,
-    )
+    if texts is not None:
+        embeddings = embed_documents(
+            texts, model_name=embedding_model,
+            cache_path=embedding_cache, device=device,
+        )
+    elif metadata_manager is not None:
+        print("[Preprocess] Streaming mode: embedding shard-by-shard (no full text load)")
+        embeddings = embed_texts_streaming(
+            metadata_manager, model_name=embedding_model,
+            cache_path=embedding_cache, device=device,
+        )
+    else:
+        raise ValueError("Either texts or metadata_manager must be provided")
 
     cluster_labels, centroids = cluster_embeddings(
         embeddings, K_init=K_init, cache_path=cluster_cache,
@@ -316,7 +328,12 @@ def preprocess_pipeline(
 
     valid_mask = merged_labels >= 0
     if token_counts is None:
-        token_counts_full = np.array([max(1, len(t) // 4) for t in texts], dtype=np.int64)
+        if metadata_manager is not None:
+            token_counts_full = metadata_manager.estimate_token_counts()
+        elif texts is not None:
+            token_counts_full = np.array([max(1, len(t) // 4) for t in texts], dtype=np.int64)
+        else:
+            token_counts_full = np.ones(len(merged_labels), dtype=np.int64)
     else:
         token_counts_full = token_counts
 

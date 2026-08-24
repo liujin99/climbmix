@@ -333,7 +333,7 @@ class ShardMetadataManager:
             row_in_shard_cols_concat = np.concatenate(row_col_list)
             row_in_shard_boundaries = np.array(row_in_shard_boundaries, dtype=np.int64)
 
-            tmp_npz = self._cache_path + ".tmp"
+            tmp_npz = self._cache_path + ".tmp.npz"
             np.savez(tmp_npz,
                      cluster_labels=self._cluster_labels,
                      quality_scores=self._quality_scores,
