@@ -119,8 +119,10 @@ class ShardMetadataManager:
         data_dir: str,
         schema: Optional[DatasetSchema] = None,
         max_workers: Optional[int] = None,
+        cache_dir: Optional[str] = None,
     ):
         self._dir = data_dir
+        self._cache_dir = cache_dir or data_dir
         self._schema = schema or DatasetSchema.from_yaml("config/schema_stem.yaml")
         self._max_workers = max_workers
 
@@ -132,8 +134,8 @@ class ShardMetadataManager:
                 f"No {self._schema.preprocessed_pattern} files in {data_dir}"
             )
 
-        self._cache_path = os.path.join(data_dir, _CACHE_FILENAME)
-        self._shard_info_path = os.path.join(data_dir, _CACHE_META)
+        self._cache_path = os.path.join(self._cache_dir, _CACHE_FILENAME)
+        self._shard_info_path = os.path.join(self._cache_dir, _CACHE_META)
 
         if not self._try_load_cache():
             self._load_from_shards()
@@ -320,6 +322,7 @@ class ShardMetadataManager:
     def _write_cache(self) -> None:
         """Save metadata cache to disk."""
         try:
+            os.makedirs(self._cache_dir, exist_ok=True)
             row_col_list = [
                 self._row_in_shard_cols[i] for i in range(len(self._per_shard_info))
             ]
@@ -564,27 +567,27 @@ def _read_one_shard_texts(
     n_requested = len(row_col_values)
     select_ratio = n_requested / max(shard_total_rows, 1)
 
-    if is_row_col_sequential:
-        table = pq.read_table(shard_path, columns=[text_col], use_threads=False)
-        text_arr = table.column(text_col).to_numpy(zero_copy_only=False)
-        texts = []
-        for rv in row_col_values:
-            idx = int(rv)
-            if 0 <= idx < len(text_arr):
-                val = text_arr[idx]
-                texts.append(str(val) if val is not None else "")
-            else:
-                texts.append("")
-        return texts
-
     if select_ratio > 0.3:
-        table = pq.read_table(shard_path, columns=[row_col, text_col], use_threads=False)
-        row_arr = table.column(row_col).to_numpy(zero_copy_only=False)
-        text_arr = table.column(text_col).to_numpy(zero_copy_only=False)
-        chunk_map: dict = {}
-        for k, v in zip(row_arr, text_arr):
-            chunk_map[int(k)] = str(v) if v is not None else ""
-        return [chunk_map.get(int(rv), "") for rv in row_col_values]
+        if is_row_col_sequential:
+            table = pq.read_table(shard_path, columns=[text_col], use_threads=False)
+            text_arr = table.column(text_col).to_numpy(zero_copy_only=False)
+            texts = []
+            for rv in row_col_values:
+                idx = int(rv)
+                if 0 <= idx < len(text_arr):
+                    val = text_arr[idx]
+                    texts.append(str(val) if val is not None else "")
+                else:
+                    texts.append("")
+            return texts
+        else:
+            table = pq.read_table(shard_path, columns=[row_col, text_col], use_threads=False)
+            row_arr = table.column(row_col).to_numpy(zero_copy_only=False)
+            text_arr = table.column(text_col).to_numpy(zero_copy_only=False)
+            chunk_map: dict = {}
+            for k, v in zip(row_arr, text_arr):
+                chunk_map[int(k)] = str(v) if v is not None else ""
+            return [chunk_map.get(int(rv), "") for rv in row_col_values]
 
     table = pq.read_table(
         shard_path,

@@ -94,7 +94,7 @@ class CLIMBPipeline:
         texts_loaded, cluster_labels, quality_scores, token_counts, mm = \
             self._stage0_load(
                 data_dir, texts, cluster_labels, quality_scores,
-                token_counts, metadata_manager,
+                token_counts, metadata_manager, output_dir,
             )
         stage_times["stage0_load"] = time.time() - _t
 
@@ -228,7 +228,7 @@ class CLIMBPipeline:
 
     def _stage0_load(
         self, data_dir, texts, cluster_labels, quality_scores,
-        token_counts, metadata_manager,
+        token_counts, metadata_manager, output_dir=None,
     ):
         mm = None
         if metadata_manager is not None:
@@ -255,7 +255,7 @@ class CLIMBPipeline:
                 schema = DatasetSchema.from_yaml(self.config.schema_path)
             else:
                 schema = DatasetSchema.from_yaml("config/schema_stem.yaml")
-            mm = ShardMetadataManager(data_dir, schema=schema)
+            mm = ShardMetadataManager(data_dir, schema=schema, cache_dir=output_dir)
             cluster_labels = mm.cluster_labels
             quality_scores = mm.quality_scores
             token_counts = mm.estimate_token_counts()
