@@ -271,6 +271,13 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
     """Worker process: embed assigned shards on NPU worker_id, write to shared memmap."""
     import os
     os.environ["ASCEND_RT_VISIBLE_DEVICES"] = str(worker_id)
+    os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+    os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+    os.environ["WANDB_SILENT"] = "true"
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+    import warnings
+    warnings.filterwarnings("ignore", category=UserWarning)
 
     import torch
     import torch_npu
