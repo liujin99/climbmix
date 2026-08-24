@@ -369,6 +369,9 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
                       f"wait={t_wait*1000:.0f}ms npu={t_npu*1000:.0f}ms "
                       f"cpu={t_cpu*1000:.0f}ms", flush=True)
 
+            if (idx + 1) % 5 == 0:
+                torch.npu.empty_cache()
+
         docs_done += num_docs
         del texts, tok_futures
         torch.npu.empty_cache()
@@ -384,7 +387,7 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
 def embed_texts_streaming(
     metadata_manager,
     model_name: str = "NovaSearch/stella_en_400M_v5",
-    batch_size: int = 256,
+    batch_size: int = 512,
     cache_path: Optional[str] = None,
     device: str = "cpu",
     truncate_len: int = 512,
