@@ -119,6 +119,7 @@ class CLIMBPipeline:
                 quality_scores=quality_scores,
                 token_counts=token_counts,
                 metadata_manager=mm,
+                cache_dir=cluster_cache_dir,
             )
             num_clusters = len(cluster_info)
             print(f"[Stage 1] {num_clusters} clusters, {len(final_labels):,} documents")

@@ -26,6 +26,7 @@ class EmbeddingClusterDiscovery:
         quality_scores: Optional[npt.NDArray[np.float64]],
         token_counts: Optional[npt.NDArray[np.int64]],
         metadata_manager: Optional[object],
+        cache_dir: Optional[str] = None,
     ) -> Tuple[list, npt.NDArray[np.int64]]:
         from climbmix.core.cluster_merge import preprocess_pipeline
 
@@ -64,6 +65,7 @@ class EmbeddingClusterDiscovery:
                     K_enhanced=config.K_enhanced,
                     prune_threshold=config.prune_threshold,
                     merge_distance=config.merge_distance,
+                    embedding_cache=os.path.join(cache_dir, "embedding_cache.npz") if cache_dir else None,
                     device=device,
                 )
 
@@ -100,6 +102,7 @@ class EmbeddingClusterDiscovery:
             K_enhanced=config.K_enhanced,
             prune_threshold=config.prune_threshold,
             merge_distance=config.merge_distance,
+            embedding_cache=os.path.join(cache_dir, "embedding_cache.npz") if cache_dir else None,
             device=device,
         )
 
@@ -193,6 +196,7 @@ class QualityClusterDiscovery:
         quality_scores: Optional[npt.NDArray[np.float64]],
         token_counts: Optional[npt.NDArray[np.int64]],
         metadata_manager: Optional[object],
+        cache_dir: Optional[str] = None,
     ) -> Tuple[list, npt.NDArray[np.int64]]:
         from climbmix.core.cluster_merge import (
             compute_cluster_quality,

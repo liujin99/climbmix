@@ -26,6 +26,7 @@ class ClusterDiscovery(Protocol):
         quality_scores: Optional[npt.NDArray[np.float64]],
         token_counts: Optional[npt.NDArray[np.int64]],
         metadata_manager: Optional[object],
+        cache_dir: Optional[str] = None,
     ) -> Tuple[List[ClusterInfo], npt.NDArray[np.int64]]:
         ...
 

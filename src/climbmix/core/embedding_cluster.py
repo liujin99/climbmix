@@ -66,7 +66,7 @@ def embed_documents(
                 from sentence_transformers import SentenceTransformer
                 print(f"[Embed] Loading model: {model_name} (device=npu)")
                 t0 = time.time()
-                model = SentenceTransformer(model_name, device="npu")
+                model = SentenceTransformer(model_name, device="npu", trust_remote_code=True)
                 print(f"[Embed] Model loaded in {time.time() - t0:.1f}s")
             except Exception as e:
                 print(f"[Embed] NPU embedding failed ({e}), falling back to CPU")
