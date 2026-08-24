@@ -292,6 +292,9 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
     all_emb = np.memmap(memmap_path, dtype=np.float32, mode='r+',
                         shape=(total_docs, emb_dim))
 
+    print(f"[NPU {worker_id}] Starting encoding ({n_ws} shards, batch_size={batch_size})...", flush=True)
+    print(f"[NPU {worker_id}] First batch may take 1-2 min (NPU kernel compilation)...", flush=True)
+
     docs_done = 0
     t0 = time.time()
     n_ws = len(shard_indices)
@@ -315,7 +318,7 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
         del texts
         elapsed = time.time() - t0
         speed = docs_done / elapsed if elapsed > 0 else 0
-        if si_idx % 5 == 0 or si_idx == n_ws - 1:
+        if si_idx < 3 or si_idx % 10 == 0 or si_idx == n_ws - 1:
             eta = (n_ws - si_idx - 1) * elapsed / (si_idx + 1) if si_idx > 0 else 0
             print(f"  [NPU {worker_id}] {si_idx+1}/{n_ws} shards, "
                   f"{docs_done:,} docs, {speed:.0f} docs/s, "
