@@ -321,6 +321,7 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
     print(f"[NPU {worker_id}] First batch may take 1-2 min (NPU kernel compilation)...", flush=True)
 
     docs_done = 0
+    batch_num = 0
     t0 = time.time()
 
     for si_idx, si in enumerate(shard_indices):
@@ -356,6 +357,16 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
             del features, output
 
             all_emb[start_idx + j:start_idx + j + batch_len] = emb
+
+            batch_num += 1
+            if batch_num <= 3 or batch_num % 50 == 0:
+                elapsed = time.time() - t0
+                done = docs_done + j + batch_len
+                speed = done / elapsed if elapsed > 0 else 0
+                eta = (total_docs - done) / speed if speed > 0 else 0
+                print(f"  [NPU {worker_id}] batch {batch_num}: {done:,}/{total_docs:,} "
+                      f"docs ({done/total_docs*100:.1f}%), {speed:.0f} docs/s, "
+                      f"ETA {eta:.0f}s", flush=True)
 
         docs_done += num_docs
         del texts
