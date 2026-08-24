@@ -205,6 +205,23 @@ def embed_texts_streaming(
     model = _load_model(model_name, actual_device)
     print(f"[Embed-Stream] Model loaded in {time.time() - t0:.1f}s")
 
+    n_npus = 0
+    if actual_device == "npu":
+        try:
+            import torch
+            import torch_npu
+            n_npus = torch.npu.device_count()
+            if n_npus > 1:
+                print(f"[Embed-Stream] {n_npus} NPUs detected, wrapping transformer in DataParallel")
+                transformer = model[0].auto_model
+                transformer = torch.nn.DataParallel(transformer, device_ids=list(range(n_npus)))
+                model[0].auto_model = transformer
+                batch_size = batch_size * n_npus
+                print(f"[Embed-Stream] Adjusted batch_size={batch_size} ({batch_size // n_npus} per NPU)")
+        except Exception as e:
+            print(f"[Embed-Stream] DataParallel setup failed: {e}, using single NPU")
+            n_npus = 0
+
     import pyarrow.parquet as pq
 
     text_col = metadata_manager.schema.text_col
