@@ -314,7 +314,7 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
         return texts
 
     io_pool = ThreadPoolExecutor(max_workers=1)
-    tok_pool = ThreadPoolExecutor(max_workers=1)
+    tok_pool = ThreadPoolExecutor(max_workers=2)
 
     shard_future = io_pool.submit(_read_shard_texts, shard_infos[shard_indices[0]])
 
@@ -335,17 +335,15 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
         start_idx = sinfo["start_idx"]
         num_docs = sinfo["num_docs"]
 
-        next_tok_future = tok_pool.submit(model.tokenize, texts[:batch_size])
+        tok_futures = [
+            tok_pool.submit(model.tokenize, texts[j:j + batch_size])
+            for j in range(0, len(texts), batch_size)
+        ]
 
-        for j in range(0, len(texts), batch_size):
+        for idx, j in enumerate(range(0, len(texts), batch_size)):
             batch_len = min(batch_size, len(texts) - j)
 
-            features = next_tok_future.result()
-
-            next_j = j + batch_size
-            if next_j < len(texts):
-                next_tok_future = tok_pool.submit(
-                    model.tokenize, texts[next_j:next_j + batch_size])
+            features = tok_futures[idx].result()
 
             features = _to_device(features)
             with torch.no_grad():
@@ -360,7 +358,7 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
             shared_done[worker_id] = docs_done + j + batch_len
 
         docs_done += num_docs
-        del texts
+        del texts, tok_futures
 
     io_pool.shutdown()
     tok_pool.shutdown()
