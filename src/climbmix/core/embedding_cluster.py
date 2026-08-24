@@ -48,6 +48,29 @@ def embed_documents(
 
     actual_device = device
 
+    def _load_model(model_name, dev):
+        """Load SentenceTransformer with attention implementation fallback."""
+        from sentence_transformers import SentenceTransformer
+        try:
+            import xformers  # noqa: F401
+            has_xformers = True
+        except ImportError:
+            has_xformers = False
+
+        if has_xformers:
+            return SentenceTransformer(model_name, device=dev, trust_remote_code=True)
+
+        for impl in ["sdpa", "eager"]:
+            try:
+                print(f"[Embed] xformers not available, trying attn_implementation={impl}")
+                return SentenceTransformer(
+                    model_name, device=dev, trust_remote_code=True,
+                    model_kwargs={"attn_implementation": impl},
+                )
+            except (KeyError, AssertionError) as e:
+                print(f"[Embed] attn_implementation={impl} failed: {e}")
+        raise RuntimeError("Failed to load model: no compatible attention implementation")
+
     if device == "npu":
         try:
             import torch
@@ -63,10 +86,9 @@ def embed_documents(
 
         if actual_device == "npu":
             try:
-                from sentence_transformers import SentenceTransformer
                 print(f"[Embed] Loading model: {model_name} (device=npu)")
                 t0 = time.time()
-                model = SentenceTransformer(model_name, device="npu", trust_remote_code=True)
+                model = _load_model(model_name, "npu")
                 print(f"[Embed] Model loaded in {time.time() - t0:.1f}s")
             except Exception as e:
                 print(f"[Embed] NPU embedding failed ({e}), falling back to CPU")
@@ -86,10 +108,9 @@ def embed_documents(
                 except ImportError:
                     pass
 
-        from sentence_transformers import SentenceTransformer
         print(f"[Embed] Loading model: {model_name} (device={actual_device})")
         t0 = time.time()
-        model = SentenceTransformer(model_name, device=actual_device, trust_remote_code=True)
+        model = _load_model(model_name, actual_device)
         print(f"[Embed] Model loaded in {time.time() - t0:.1f}s")
 
     print(f"[Embed] Encoding {len(texts)} documents (batch_size={batch_size})...")
