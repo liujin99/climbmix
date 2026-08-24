@@ -59,9 +59,6 @@ echo "  ClimbMix: d${PROXY_DEPTH} proxy → d${TARGET_DEPTH} target  |  $OUTPUT_
 echo "  NPU: ${NUM_NPU}x910B4, npu_per_exp=${NPU_PER_EXP} ($((NUM_NPU / NPU_PER_EXP)) parallel)"
 echo "════════════════════════════════════════════════════════════"
 
-# Try installing xformers (stella model requires it, may fail on NPU systems)
-pip install xformers 2>/dev/null && echo "✓ xformers installed" || echo "⚠ xformers not available, will use sdpa fallback"
-
 python3 -c "import torch_npu; import torch; assert torch.npu.is_available(), 'NPU not available'" || { echo "✗ NPU not available"; exit 1; }
 [ -d "$NANOCHAT_DIR" ] || { echo "✗ nanochat-npu not found at $NANOCHAT_DIR"; exit 1; }
 for d in "$PROXY_DEPTH" "$TARGET_DEPTH"; do
