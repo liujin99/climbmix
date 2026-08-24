@@ -78,13 +78,13 @@ except ImportError:
                 q_pad = torch.zeros(n, max_s, H, D, dtype=q.dtype, device=q.device)
                 k_pad = torch.zeros(n, max_ks, H, D, dtype=k.dtype, device=k.device)
                 v_pad = torch.zeros(n, max_ks, H, D, dtype=v.dtype, device=v.device)
-                kmask = torch.zeros(n, 1, 1, max_ks, dtype=torch.bool, device=q.device)
+                kmask = torch.zeros(n, 1, max_s, max_ks, dtype=torch.bool, device=q.device)
                 q_off = k_off = 0
                 for i, (qs_i, ks_i) in enumerate(zip(qs_list, ks_list)):
                     q_pad[i, :qs_i] = q[0, q_off:q_off + qs_i]
                     k_pad[i, :ks_i] = k[0, k_off:k_off + ks_i]
                     v_pad[i, :ks_i] = v[0, k_off:k_off + ks_i]
-                    kmask[i, 0, 0, :ks_i] = True
+                    kmask[i, 0, :, :ks_i] = True
                     q_off += qs_i
                     k_off += ks_i
                 out = _F.scaled_dot_product_attention(
