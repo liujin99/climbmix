@@ -45,38 +45,64 @@ except ImportError:
             pass
 
     def _memory_efficient_attention(q, k, v, attn_bias=None, p=0.0, **kw):
-        # xformers layout: (B, S, H, D) — transpose to SDPA (B, H, S, D)
+        # xformers layout: (B, S, H, D) — SDPA layout: (B, H, S, D)
         need_transpose = q.dim() == 4 and q.shape[1] > q.shape[2]
-        if need_transpose:
-            q_s, k_s, v_s = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
-        else:
-            q_s, k_s, v_s = q, k, v
+
+        def _to_sdpa(t):
+            return t.transpose(1, 2) if need_transpose else t
+
+        def _from_sdpa(t):
+            return t.transpose(1, 2).contiguous() if need_transpose else t
 
         if isinstance(attn_bias, _BlockDiagonalMask):
-            Sq, Sk = q_s.shape[-2], k_s.shape[-2]
-            mask = torch.zeros(Sq, Sk, dtype=torch.bool, device=q_s.device)
-            q_off = k_off = 0
-            for qs, ks in zip(attn_bias.q_seqlen, attn_bias.kv_seqlen):
-                mask[q_off:q_off + qs, k_off:k_off + ks] = True
-                q_off += qs
-                k_off += ks
-            out = _F.scaled_dot_product_attention(
-                q_s, k_s, v_s, attn_mask=mask, dropout_p=p
-            )
-        elif isinstance(attn_bias, _LowerTriangularMask):
-            out = _F.scaled_dot_product_attention(
-                q_s, k_s, v_s, is_causal=True, dropout_p=p
-            )
+            # Convert packed (1, total_S, H, D) to padded batch (n, max_S, H, D)
+            # to avoid O(total_S^2) dense mask
+            qs_list = attn_bias.q_seqlen
+            ks_list = attn_bias.kv_seqlen
+            n = len(qs_list)
+            _, _, H, D = q.shape
+
+            if len(set(qs_list)) == 1 and len(set(ks_list)) == 1:
+                # All same length — just reshape (no copy)
+                s = qs_list[0]
+                ks = ks_list[0]
+                q_b = q.view(n, s, H, D).transpose(1, 2)
+                k_b = k.view(n, ks, H, D).transpose(1, 2)
+                v_b = v.view(n, ks, H, D).transpose(1, 2)
+                out = _F.scaled_dot_product_attention(q_b, k_b, v_b, dropout_p=p)
+                return out.transpose(1, 2).reshape(1, -1, H, D).contiguous()
+            else:
+                # Variable length — pad
+                max_s = max(qs_list)
+                max_ks = max(ks_list)
+                q_pad = torch.zeros(n, max_s, H, D, dtype=q.dtype, device=q.device)
+                k_pad = torch.zeros(n, max_ks, H, D, dtype=k.dtype, device=k.device)
+                v_pad = torch.zeros(n, max_ks, H, D, dtype=v.dtype, device=v.device)
+                kmask = torch.zeros(n, 1, 1, max_ks, dtype=torch.bool, device=q.device)
+                q_off = k_off = 0
+                for i, (qs_i, ks_i) in enumerate(zip(qs_list, ks_list)):
+                    q_pad[i, :qs_i] = q[0, q_off:q_off + qs_i]
+                    k_pad[i, :ks_i] = k[0, k_off:k_off + ks_i]
+                    v_pad[i, :ks_i] = v[0, k_off:k_off + ks_i]
+                    kmask[i, 0, 0, :ks_i] = True
+                    q_off += qs_i
+                    k_off += ks_i
+                out = _F.scaled_dot_product_attention(
+                    q_pad.transpose(1, 2), k_pad.transpose(1, 2), v_pad.transpose(1, 2),
+                    attn_mask=kmask, dropout_p=p
+                )
+                out = out.transpose(1, 2)  # (n, max_s, H, D)
+                chunks = [out[i, :qs_i].unsqueeze(0) for i, qs_i in enumerate(qs_list)]
+                return torch.cat(chunks, dim=1)  # (1, total_S, H, D)
+
+        q_s, k_s, v_s = _to_sdpa(q), _to_sdpa(k), _to_sdpa(v)
+        if isinstance(attn_bias, _LowerTriangularMask):
+            out = _F.scaled_dot_product_attention(q_s, k_s, v_s, is_causal=True, dropout_p=p)
         elif attn_bias is not None:
-            out = _F.scaled_dot_product_attention(
-                q_s, k_s, v_s, attn_mask=attn_bias, dropout_p=p
-            )
+            out = _F.scaled_dot_product_attention(q_s, k_s, v_s, attn_mask=attn_bias, dropout_p=p)
         else:
             out = _F.scaled_dot_product_attention(q_s, k_s, v_s, dropout_p=p)
-
-        if need_transpose:
-            out = out.transpose(1, 2).contiguous()
-        return out
+        return _from_sdpa(out)
 
     # Build fake module hierarchy: xformers.ops.fmha.attn_bias
     _attn_bias_mod = types.ModuleType("xformers.ops.fmha.attn_bias")
@@ -289,23 +315,6 @@ def embed_texts_streaming(
     model = _load_model(model_name, actual_device)
     print(f"[Embed-Stream] Model loaded in {time.time() - t0:.1f}s")
 
-    n_npus = 0
-    if actual_device == "npu":
-        try:
-            import torch
-            import torch_npu
-            n_npus = torch.npu.device_count()
-            if n_npus > 1:
-                print(f"[Embed-Stream] {n_npus} NPUs detected, wrapping transformer in DataParallel")
-                transformer = model[0].auto_model
-                transformer = torch.nn.DataParallel(transformer, device_ids=list(range(n_npus)))
-                model[0].auto_model = transformer
-                batch_size = batch_size * n_npus
-                print(f"[Embed-Stream] Adjusted batch_size={batch_size} ({batch_size // n_npus} per NPU)")
-        except Exception as e:
-            print(f"[Embed-Stream] DataParallel setup failed: {e}, using single NPU")
-            n_npus = 0
-
     import pyarrow.parquet as pq
 
     text_col = metadata_manager.schema.text_col
@@ -323,6 +332,7 @@ def embed_texts_streaming(
 
     t1 = time.time()
     docs_done = 0
+    batch_num = 0
     for si, sinfo in enumerate(shard_infos):
         shard_path = sinfo["path"]
         start_idx = sinfo["start_idx"]
@@ -337,6 +347,16 @@ def embed_texts_streaming(
             batch = shard_texts[j:j + batch_size]
             emb = model.encode(batch, show_progress_bar=False, normalize_embeddings=True)
             all_embeddings[start_idx + j:start_idx + j + len(batch)] = emb
+
+            batch_num += 1
+            if batch_num <= 5 or batch_num % 50 == 0:
+                elapsed = time.time() - t1
+                done = docs_done + j + len(batch)
+                speed = done / elapsed if elapsed > 0 else 0
+                eta = (total_docs - done) / speed if speed > 0 else 0
+                print(f"  [Embed-Stream] batch {batch_num}: {done:,}/{total_docs:,} docs "
+                      f"({done / total_docs * 100:.1f}%), {speed:.0f} docs/s, "
+                      f"elapsed {elapsed:.0f}s, ETA {eta:.0f}s")
 
         docs_done += num_docs
         del shard_texts
