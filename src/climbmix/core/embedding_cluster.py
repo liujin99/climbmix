@@ -286,6 +286,8 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
     import time
     from concurrent.futures import ThreadPoolExecutor
 
+    torch.npu.set_per_process_memory_fraction(0.92)
+
     print(f"[NPU {worker_id}] Loading model...", flush=True)
     model = _load_model_stream(model_name, "npu")
     model.eval()
@@ -369,12 +371,8 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
                       f"wait={t_wait*1000:.0f}ms npu={t_npu*1000:.0f}ms "
                       f"cpu={t_cpu*1000:.0f}ms", flush=True)
 
-            if (idx + 1) % 5 == 0:
-                torch.npu.empty_cache()
-
         docs_done += num_docs
         del texts, tok_futures
-        torch.npu.empty_cache()
 
     io_pool.shutdown()
     tok_pool.shutdown()
