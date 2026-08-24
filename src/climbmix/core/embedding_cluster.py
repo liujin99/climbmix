@@ -361,7 +361,7 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
             done_now = docs_done + j + batch_len
             shared_done[worker_id] = done_now
             batch_num += 1
-            if batch_num <= 3 or batch_num % 50 == 0:
+            if batch_num <= 3:
                 elapsed = time.time() - t0
                 speed = done_now / elapsed if elapsed > 0 else 0
                 print(f"  [NPU {worker_id}] batch {batch_num}: {done_now:,} docs, "
