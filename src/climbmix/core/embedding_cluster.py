@@ -67,7 +67,7 @@ def embed_documents(
                     model_name, device=dev, trust_remote_code=True,
                     model_kwargs={"attn_implementation": impl},
                 )
-            except (KeyError, AssertionError) as e:
+            except (KeyError, AssertionError, ValueError, TypeError) as e:
                 print(f"[Embed] attn_implementation={impl} failed: {e}")
         raise RuntimeError("Failed to load model: no compatible attention implementation")
 
@@ -171,7 +171,7 @@ def embed_texts_streaming(
                     model_name, device=dev, trust_remote_code=True,
                     model_kwargs={"attn_implementation": impl},
                 )
-            except (KeyError, AssertionError) as e:
+            except (KeyError, AssertionError, ValueError, TypeError) as e:
                 print(f"[Embed-Stream] attn_implementation={impl} failed: {e}")
         raise RuntimeError("Failed to load model: no compatible attention implementation")
 
