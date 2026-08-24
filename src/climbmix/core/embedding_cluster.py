@@ -96,7 +96,6 @@ def embed_documents(
 
     if actual_device != "npu":
         if actual_device == "cpu":
-            import os
             num_threads = os.environ.get("OMP_NUM_THREADS", "")
             if not num_threads:
                 import multiprocessing
@@ -190,7 +189,6 @@ def embed_texts_streaming(
             actual_device = "cpu"
 
     if actual_device == "cpu":
-        import os
         num_threads = os.environ.get("OMP_NUM_THREADS", "")
         if not num_threads:
             import multiprocessing
