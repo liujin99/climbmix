@@ -89,7 +89,7 @@ def embed_documents(
         from sentence_transformers import SentenceTransformer
         print(f"[Embed] Loading model: {model_name} (device={actual_device})")
         t0 = time.time()
-        model = SentenceTransformer(model_name, device=actual_device)
+        model = SentenceTransformer(model_name, device=actual_device, trust_remote_code=True)
         print(f"[Embed] Model loaded in {time.time() - t0:.1f}s")
 
     print(f"[Embed] Encoding {len(texts)} documents (batch_size={batch_size})...")
