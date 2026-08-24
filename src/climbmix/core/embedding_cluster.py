@@ -353,6 +353,8 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
             emb = torch.nn.functional.normalize(emb, p=2, dim=1)
             emb = emb.cpu().numpy()
 
+            del features, output
+
             all_emb[start_idx + j:start_idx + j + batch_len] = emb
 
         docs_done += num_docs
@@ -447,7 +449,9 @@ def embed_texts_streaming(
 
     if n_npus > 1:
         print(f"[Embed-Stream] {n_npus} NPUs detected, using process-based parallelism")
-        del model  # Free NPU 0 before workers start
+        del model, dummy_emb
+        import gc
+        gc.collect()
         import torch_npu
         torch.npu.empty_cache()
 
