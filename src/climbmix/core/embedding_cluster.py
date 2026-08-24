@@ -314,7 +314,7 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
         return texts
 
     io_pool = ThreadPoolExecutor(max_workers=1)
-    tok_pool = ThreadPoolExecutor(max_workers=2)
+    tok_pool = ThreadPoolExecutor(max_workers=4)
 
     shard_future = io_pool.submit(_read_shard_texts, shard_infos[shard_indices[0]])
 
@@ -343,19 +343,31 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
         for idx, j in enumerate(range(0, len(texts), batch_size)):
             batch_len = min(batch_size, len(texts) - j)
 
+            t_wait = time.time()
             features = tok_futures[idx].result()
+            t_wait = time.time() - t_wait
 
+            t_npu = time.time()
             features = _to_device(features)
             with torch.no_grad():
                 output = model(features)
-            emb = output["sentence_embedding"].float()
-            emb = torch.nn.functional.normalize(emb, p=2, dim=1)
-            emb = emb.cpu().numpy()
+            emb = output["sentence_embedding"].cpu()
+            t_npu = time.time() - t_npu
 
             del features, output
 
+            t_cpu = time.time()
+            emb = emb.float()
+            emb = torch.nn.functional.normalize(emb, p=2, dim=1)
+            emb = emb.numpy()
             all_emb[start_idx + j:start_idx + j + batch_len] = emb
             shared_done[worker_id] = docs_done + j + batch_len
+            t_cpu = time.time() - t_cpu
+
+            if si_idx == 0 and idx < 5:
+                print(f"  [NPU {worker_id}] batch {idx}: "
+                      f"wait={t_wait*1000:.0f}ms npu={t_npu*1000:.0f}ms "
+                      f"cpu={t_cpu*1000:.0f}ms", flush=True)
 
         docs_done += num_docs
         del texts, tok_futures
