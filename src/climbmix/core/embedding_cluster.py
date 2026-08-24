@@ -23,6 +23,12 @@ try:
 except ImportError:
     import torch
     import torch.nn.functional as _F
+    import itertools
+    try:
+        import torch_npu
+        _HAS_NPU_FA = hasattr(torch_npu, "npu_fusion_attention")
+    except ImportError:
+        _HAS_NPU_FA = False
 
     class _BlockDiagonalMask:
         """Fake BlockDiagonalMask — stores seq lens, materializes to bool tensor."""
@@ -72,7 +78,24 @@ except ImportError:
                 out = _F.scaled_dot_product_attention(q_b, k_b, v_b, dropout_p=p)
                 return out.transpose(1, 2).reshape(1, -1, H, D).contiguous()
             else:
-                # Variable length — pad
+                if _HAS_NPU_FA:
+                    cu_qlen = list(itertools.accumulate(qs_list))
+                    cu_kvlen = list(itertools.accumulate(ks_list))
+                    q_tnd = q.squeeze(0).contiguous() if q.dim() == 4 else q.contiguous()
+                    k_tnd = k.squeeze(0).contiguous() if k.dim() == 4 else k.contiguous()
+                    v_tnd = v.squeeze(0).contiguous() if v.dim() == 4 else v.contiguous()
+                    out, _, _, _, _, _, _ = torch_npu.npu_fusion_attention(
+                        q_tnd, k_tnd, v_tnd,
+                        head_num=H,
+                        input_layout="TND",
+                        actual_seq_qlen=cu_qlen,
+                        actual_seq_kvlen=cu_kvlen,
+                        scale=1.0 / (D ** 0.5),
+                        keep_prob=1.0 - p,
+                    )
+                    if q.dim() == 4:
+                        out = out.unsqueeze(0)
+                    return out
                 max_s = max(qs_list)
                 max_ks = max(ks_list)
                 q_pad = torch.zeros(n, max_s, H, D, dtype=q.dtype, device=q.device)
