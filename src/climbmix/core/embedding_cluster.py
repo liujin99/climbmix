@@ -75,7 +75,7 @@ except ImportError:
             out = _F.scaled_dot_product_attention(q_s, k_s, v_s, dropout_p=p)
 
         if need_transpose:
-            out = out.transpose(1, 2)
+            out = out.transpose(1, 2).contiguous()
         return out
 
     # Build fake module hierarchy: xformers.ops.fmha.attn_bias
