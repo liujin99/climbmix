@@ -41,6 +41,9 @@ class _BlockDiagonalMask:
 class _LowerTriangularMask:
     def __init__(self, *a, **kw): pass
 
+_captured_seqlens = []
+_captured_shapes = []
+
 def _memory_efficient_attention(q, k, v, attn_bias=None, p=0.0, **kw):
     need_transpose = q.dim() == 4 and q.shape[1] > q.shape[2]
     def _to_sdpa(t): return t.transpose(1, 2) if need_transpose else t
@@ -49,6 +52,9 @@ def _memory_efficient_attention(q, k, v, attn_bias=None, p=0.0, **kw):
     if isinstance(attn_bias, _BlockDiagonalMask):
         qs_list = attn_bias.q_seqlen
         ks_list = attn_bias.kv_seqlen
+        if not _captured_seqlens:
+            _captured_seqlens.extend(qs_list)
+            _captured_shapes.append(tuple(q.shape))
         n = len(qs_list)
         _, _, H, D = q.shape
 
@@ -126,27 +132,15 @@ for k in list(features.keys()):
     if isinstance(features[k], torch.Tensor):
         features[k] = features[k].to("npu")
 
-# Capture seqlens from a forward pass
-_attn_calls = []
-_orig_mea = _memory_efficient_attention
-def _logging_mea(q, k, v, attn_bias=None, p=0.0, **kw):
-    if isinstance(attn_bias, _BlockDiagonalMask):
-        _attn_calls.append(list(attn_bias.q_seqlen))
-    return _orig_mea(q, k, v, attn_bias=attn_bias, p=p, **kw)
-_ops.memory_efficient_attention = _logging_mea
-_fmha_mod.memory_efficient_attention = _logging_mea
-
+# Capture seqlens from a forward pass (logging is built into _memory_efficient_attention)
 with torch.no_grad():
     output = model(features)
 
-_ops.memory_efficient_attention = _orig_mea
-_fmha_mod.memory_efficient_attention = _orig_mea
-
-seqlens = _attn_calls[0] if _attn_calls else []
+seqlens = _captured_seqlens
 T = sum(seqlens)
 H, D = 16, 64
 cu_qlen = list(itertools.accumulate(seqlens))
-print(f"Layers: {len(_attn_calls)}, T={T}, n_seqs={len(seqlens)}")
+print(f"T={T}, n_seqs={len(seqlens)}")
 print(f"seqlens range: {min(seqlens)}-{max(seqlens)}, avg={T/len(seqlens):.0f}")
 
 # ============================================================
