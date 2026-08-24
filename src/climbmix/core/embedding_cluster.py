@@ -267,7 +267,7 @@ def _load_model_stream(model_name, dev):
 
 def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
                             model_name, batch_size, emb_dim,
-                            memmap_path, total_docs, shared_done):
+                            memmap_path, total_docs, shared_done, truncate_len):
     """Worker process: embed assigned shards on NPU worker_id, write to shared memmap."""
     import os
     os.environ["ASCEND_RT_VISIBLE_DEVICES"] = str(worker_id)
@@ -289,7 +289,9 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
     print(f"[NPU {worker_id}] Loading model...", flush=True)
     model = _load_model_stream(model_name, "npu")
     model.eval()
-    print(f"[NPU {worker_id}] Model loaded", flush=True)
+    model.max_seq_length = truncate_len
+    model.half()
+    print(f"[NPU {worker_id}] Model loaded (fp16, max_seq_len={truncate_len})", flush=True)
 
     all_emb = np.memmap(memmap_path, dtype=np.float32, mode='r+',
                         shape=(total_docs, emb_dim))
@@ -317,11 +319,9 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
     shard_future = io_pool.submit(_read_shard_texts, shard_infos[shard_indices[0]])
 
     n_ws = len(shard_indices)
-    print(f"[NPU {worker_id}] Starting encoding ({n_ws} shards, batch_size={batch_size})...", flush=True)
-    print(f"[NPU {worker_id}] First batch may take 1-2 min (NPU kernel compilation)...", flush=True)
+    print(f"[NPU {worker_id}] Starting encoding ({n_ws} shards, batch_size={batch_size})", flush=True)
 
     docs_done = 0
-    batch_num = 0
     t0 = time.time()
 
     for si_idx, si in enumerate(shard_indices):
@@ -350,32 +350,17 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
             features = _to_device(features)
             with torch.no_grad():
                 output = model(features)
-            emb = output["sentence_embedding"]
+            emb = output["sentence_embedding"].float()
             emb = torch.nn.functional.normalize(emb, p=2, dim=1)
             emb = emb.cpu().numpy()
 
             del features, output
 
             all_emb[start_idx + j:start_idx + j + batch_len] = emb
-
-            done_now = docs_done + j + batch_len
-            shared_done[worker_id] = done_now
-            batch_num += 1
-            if batch_num <= 3:
-                elapsed = time.time() - t0
-                speed = done_now / elapsed if elapsed > 0 else 0
-                print(f"  [NPU {worker_id}] batch {batch_num}: {done_now:,} docs, "
-                      f"{speed:.0f} docs/s", flush=True)
+            shared_done[worker_id] = docs_done + j + batch_len
 
         docs_done += num_docs
         del texts
-        elapsed = time.time() - t0
-        speed = docs_done / elapsed if elapsed > 0 else 0
-        if si_idx < 3 or si_idx % 10 == 0 or si_idx == n_ws - 1:
-            eta = (n_ws - si_idx - 1) * elapsed / (si_idx + 1) if si_idx > 0 else 0
-            print(f"  [NPU {worker_id}] {si_idx+1}/{n_ws} shards, "
-                  f"{docs_done:,} docs, {speed:.0f} docs/s, "
-                  f"elapsed {elapsed:.0f}s, ETA {eta:.0f}s", flush=True)
 
     io_pool.shutdown()
     tok_pool.shutdown()
@@ -388,9 +373,10 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
 def embed_texts_streaming(
     metadata_manager,
     model_name: str = "NovaSearch/stella_en_400M_v5",
-    batch_size: int = 256,
+    batch_size: int = 512,
     cache_path: Optional[str] = None,
     device: str = "cpu",
+    truncate_len: int = 512,
 ) -> npt.NDArray[np.float32]:
     """
     Stream-embed texts shard by shard, avoiding loading all texts into memory.
@@ -507,7 +493,7 @@ def embed_texts_streaming(
                 target=_embed_streaming_worker,
                 args=(wid, list(chunk), shard_infos, text_col,
                       model_name, batch_size, emb_dim,
-                      memmap_path, total_docs, shared_done),
+                      memmap_path, total_docs, shared_done, truncate_len),
             )
             p.start()
             procs.append(p)

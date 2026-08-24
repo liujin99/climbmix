@@ -261,6 +261,7 @@ def preprocess_pipeline(
     cluster_cache: Optional[str] = None,
     device: str = "cpu",
     metadata_manager: Optional[object] = None,
+    embedding_truncate_len: int = 512,
 ) -> Tuple[List[ClusterInfo], npt.NDArray[np.int64]]:
     """
     Full CLIMB preprocessing pipeline: embed → cluster → prune → merge → build info.
@@ -301,6 +302,7 @@ def preprocess_pipeline(
         embeddings = embed_texts_streaming(
             metadata_manager, model_name=embedding_model,
             cache_path=embedding_cache, device=device,
+            truncate_len=embedding_truncate_len,
         )
     else:
         raise ValueError("Either texts or metadata_manager must be provided")

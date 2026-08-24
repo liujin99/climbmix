@@ -107,6 +107,7 @@ class EmbeddingClusterDiscovery:
             merge_distance=config.merge_distance,
             embedding_cache=os.path.join(cache_dir, "embedding_cache.npz") if cache_dir else None,
             device=device,
+            embedding_truncate_len=config.embedding_truncate_len,
         )
 
         return cluster_info, final_labels
