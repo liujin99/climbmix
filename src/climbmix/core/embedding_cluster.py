@@ -267,7 +267,7 @@ def _load_model_stream(model_name, dev):
 
 def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
                             model_name, batch_size, emb_dim,
-                            memmap_path, total_docs):
+                            memmap_path, total_docs, shared_done):
     """Worker process: embed assigned shards on NPU worker_id, write to shared memmap."""
     import os
     os.environ["ASCEND_RT_VISIBLE_DEVICES"] = str(worker_id)
@@ -358,15 +358,14 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
 
             all_emb[start_idx + j:start_idx + j + batch_len] = emb
 
+            done_now = docs_done + j + batch_len
+            shared_done[worker_id] = done_now
             batch_num += 1
             if batch_num <= 3 or batch_num % 50 == 0:
                 elapsed = time.time() - t0
-                done = docs_done + j + batch_len
-                speed = done / elapsed if elapsed > 0 else 0
-                eta = (total_docs - done) / speed if speed > 0 else 0
-                print(f"  [NPU {worker_id}] batch {batch_num}: {done:,}/{total_docs:,} "
-                      f"docs ({done/total_docs*100:.1f}%), {speed:.0f} docs/s, "
-                      f"ETA {eta:.0f}s", flush=True)
+                speed = done_now / elapsed if elapsed > 0 else 0
+                print(f"  [NPU {worker_id}] batch {batch_num}: {done_now:,} docs, "
+                      f"{speed:.0f} docs/s", flush=True)
 
         docs_done += num_docs
         del texts
@@ -467,8 +466,25 @@ def embed_texts_streaming(
         torch.npu.empty_cache()
 
         import multiprocessing as mp
+        import threading
 
-        # Create memmap file for shared embedding storage
+        shared_done = mp.Array('q', n_npus)
+
+        def _monitor(shared_done, total_docs, n_npus, procs):
+            t0 = time.time()
+            while True:
+                time.sleep(15)
+                done = sum(shared_done[i] for i in range(n_npus))
+                elapsed = time.time() - t0
+                speed = done / elapsed if elapsed > 0 else 0
+                eta = (total_docs - done) / speed if speed > 0 else 0
+                alive = sum(1 for p in procs if p.is_alive())
+                print(f"[Embed-Stream] {done:,}/{total_docs:,} docs ({done/total_docs*100:.1f}%), "
+                      f"{speed:.0f} docs/s, elapsed {elapsed:.0f}s, ETA {eta:.0f}s, "
+                      f"{alive}/{n_npus} workers", flush=True)
+                if alive == 0:
+                    break
+
         cache_dir = os.path.dirname(cache_path) if cache_path else "/tmp"
         os.makedirs(cache_dir, exist_ok=True)
         memmap_path = os.path.join(cache_dir, "embedding_memmap.tmp")
@@ -481,7 +497,6 @@ def embed_texts_streaming(
         print(f"[Embed-Stream] Preallocated ({total_docs:,}, {emb_dim}) memmap "
               f"({total_docs * emb_dim * 4 / (1024**3):.1f} GB)")
 
-        # Split shards across NPUs
         indices = list(range(n_shards))
         chunks = np.array_split(indices, n_npus)
 
@@ -492,13 +507,19 @@ def embed_texts_streaming(
                 target=_embed_streaming_worker,
                 args=(wid, list(chunk), shard_infos, text_col,
                       model_name, batch_size, emb_dim,
-                      memmap_path, total_docs),
+                      memmap_path, total_docs, shared_done),
             )
             p.start()
             procs.append(p)
 
+        monitor = threading.Thread(target=_monitor,
+                                   args=(shared_done, total_docs, n_npus, procs),
+                                   daemon=True)
+        monitor.start()
+
         for p in procs:
             p.join()
+        monitor.join()
 
         failed = [(i, p.exitcode) for i, p in enumerate(procs) if p.exitcode != 0]
         if failed:
