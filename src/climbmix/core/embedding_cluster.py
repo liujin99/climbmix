@@ -241,6 +241,85 @@ def embed_documents(
     return embeddings
 
 
+def _load_model_stream(model_name, dev):
+    """Load sentence transformer model with xformers/SDPA fallback."""
+    from sentence_transformers import SentenceTransformer
+    try:
+        import xformers  # noqa: F401
+        has_xformers = True
+    except ImportError:
+        has_xformers = False
+
+    if has_xformers:
+        return SentenceTransformer(model_name, device=dev, trust_remote_code=True)
+
+    for impl in ["sdpa", "eager"]:
+        try:
+            print(f"[Embed-Stream] xformers not available, trying attn_implementation={impl}")
+            return SentenceTransformer(
+                model_name, device=dev, trust_remote_code=True,
+                model_kwargs={"attn_implementation": impl},
+            )
+        except (KeyError, AssertionError, ValueError, TypeError) as e:
+            print(f"[Embed-Stream] attn_implementation={impl} failed: {e}")
+    raise RuntimeError("Failed to load model: no compatible attention implementation")
+
+
+def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
+                            model_name, batch_size, emb_dim,
+                            memmap_path, total_docs):
+    """Worker process: embed assigned shards on NPU worker_id, write to shared memmap."""
+    import os
+    os.environ["ASCEND_RT_VISIBLE_DEVICES"] = str(worker_id)
+
+    import torch
+    import torch_npu
+    import numpy as np
+    import pyarrow.parquet as pq
+    import time
+
+    print(f"[NPU {worker_id}] Loading model...", flush=True)
+    model = _load_model_stream(model_name, "npu")
+    print(f"[NPU {worker_id}] Model loaded", flush=True)
+
+    all_emb = np.memmap(memmap_path, dtype=np.float32, mode='r+',
+                        shape=(total_docs, emb_dim))
+
+    docs_done = 0
+    t0 = time.time()
+    n_ws = len(shard_indices)
+    for si_idx, si in enumerate(shard_indices):
+        sinfo = shard_infos[si]
+        shard_path = sinfo["path"]
+        start_idx = sinfo["start_idx"]
+        num_docs = sinfo["num_docs"]
+
+        table = pq.read_table(shard_path, columns=[text_col], use_threads=True)
+        col = table.column(text_col)
+        texts = [str(v) if v is not None else "" for v in col.to_pylist()]
+        del table, col
+
+        for j in range(0, len(texts), batch_size):
+            batch = texts[j:j + batch_size]
+            emb = model.encode(batch, show_progress_bar=False, normalize_embeddings=True)
+            all_emb[start_idx + j:start_idx + j + len(batch)] = emb
+
+        docs_done += num_docs
+        del texts
+        elapsed = time.time() - t0
+        speed = docs_done / elapsed if elapsed > 0 else 0
+        if si_idx % 5 == 0 or si_idx == n_ws - 1:
+            eta = (n_ws - si_idx - 1) * elapsed / (si_idx + 1) if si_idx > 0 else 0
+            print(f"  [NPU {worker_id}] {si_idx+1}/{n_ws} shards, "
+                  f"{docs_done:,} docs, {speed:.0f} docs/s, "
+                  f"elapsed {elapsed:.0f}s, ETA {eta:.0f}s", flush=True)
+
+    all_emb.flush()
+    elapsed = time.time() - t0
+    print(f"[NPU {worker_id}] Done: {docs_done:,} docs in {elapsed:.0f}s "
+          f"({docs_done/elapsed:.0f} docs/s)", flush=True)
+
+
 def embed_texts_streaming(
     metadata_manager,
     model_name: str = "NovaSearch/stella_en_400M_v5",
@@ -262,28 +341,6 @@ def embed_texts_streaming(
         return embeddings
 
     actual_device = device
-
-    def _load_model(model_name, dev):
-        from sentence_transformers import SentenceTransformer
-        try:
-            import xformers  # noqa: F401
-            has_xformers = True
-        except ImportError:
-            has_xformers = False
-
-        if has_xformers:
-            return SentenceTransformer(model_name, device=dev, trust_remote_code=True)
-
-        for impl in ["sdpa", "eager"]:
-            try:
-                print(f"[Embed-Stream] xformers not available, trying attn_implementation={impl}")
-                return SentenceTransformer(
-                    model_name, device=dev, trust_remote_code=True,
-                    model_kwargs={"attn_implementation": impl},
-                )
-            except (KeyError, AssertionError, ValueError, TypeError) as e:
-                print(f"[Embed-Stream] attn_implementation={impl} failed: {e}")
-        raise RuntimeError("Failed to load model: no compatible attention implementation")
 
     if device == "npu":
         try:
@@ -312,7 +369,7 @@ def embed_texts_streaming(
 
     print(f"[Embed-Stream] Loading model: {model_name} (device={actual_device})")
     t0 = time.time()
-    model = _load_model(model_name, actual_device)
+    model = _load_model_stream(model_name, actual_device)
     print(f"[Embed-Stream] Model loaded in {time.time() - t0:.1f}s")
 
     import pyarrow.parquet as pq
@@ -325,12 +382,81 @@ def embed_texts_streaming(
     dummy_emb = model.encode(["test"], show_progress_bar=False, normalize_embeddings=True)
     emb_dim = dummy_emb.shape[1]
 
+    # Detect NPUs for process-based parallelism
+    n_npus = 0
+    if actual_device == "npu":
+        try:
+            n_npus = torch.npu.device_count()
+        except Exception:
+            pass
+
+    t1 = time.time()
+
+    if n_npus > 1:
+        print(f"[Embed-Stream] {n_npus} NPUs detected, using process-based parallelism")
+        del model  # Free NPU 0 before workers start
+        import torch_npu
+        torch.npu.empty_cache()
+
+        import multiprocessing as mp
+
+        # Create memmap file for shared embedding storage
+        cache_dir = os.path.dirname(cache_path) if cache_path else "/tmp"
+        os.makedirs(cache_dir, exist_ok=True)
+        memmap_path = os.path.join(cache_dir, "embedding_memmap.tmp")
+        if os.path.exists(memmap_path):
+            os.remove(memmap_path)
+        memmap_init = np.memmap(memmap_path, dtype=np.float32, mode='w+',
+                                shape=(total_docs, emb_dim))
+        del memmap_init
+
+        print(f"[Embed-Stream] Preallocated ({total_docs:,}, {emb_dim}) memmap "
+              f"({total_docs * emb_dim * 4 / (1024**3):.1f} GB)")
+
+        # Split shards across NPUs
+        indices = list(range(n_shards))
+        chunks = np.array_split(indices, n_npus)
+
+        ctx = mp.get_context("spawn")
+        procs = []
+        for wid, chunk in enumerate(chunks):
+            p = ctx.Process(
+                target=_embed_streaming_worker,
+                args=(wid, list(chunk), shard_infos, text_col,
+                      model_name, batch_size, emb_dim,
+                      memmap_path, total_docs),
+            )
+            p.start()
+            procs.append(p)
+
+        for p in procs:
+            p.join()
+
+        failed = [(i, p.exitcode) for i, p in enumerate(procs) if p.exitcode != 0]
+        if failed:
+            raise RuntimeError(f"{len(failed)} workers failed: {failed}")
+
+        all_embeddings = np.memmap(memmap_path, dtype=np.float32, mode='r',
+                                   shape=(total_docs, emb_dim))
+
+        elapsed = time.time() - t1
+        print(f"[Embed-Stream] Encoded {total_docs:,} docs in {elapsed:.1f}s "
+              f"({total_docs / elapsed:.0f} docs/s), dim={emb_dim}")
+
+        if cache_path:
+            cache_dir = os.path.dirname(cache_path) or "."
+            os.makedirs(cache_dir, exist_ok=True)
+            np.savez(cache_path, embeddings=np.array(all_embeddings))
+            print(f"[Embed-Stream] Cached embeddings to: {cache_path}")
+            os.remove(memmap_path)
+
+        return np.array(all_embeddings)
+
+    # Single NPU / CPU path
     all_embeddings = np.empty((total_docs, emb_dim), dtype=np.float32)
     print(f"[Embed-Stream] Preallocated ({total_docs:,}, {emb_dim}) embeddings array "
           f"({total_docs * emb_dim * 4 / (1024**3):.1f} GB)")
     print(f"[Embed-Stream] Streaming {n_shards} shards, batch_size={batch_size}")
-
-    t1 = time.time()
     docs_done = 0
     batch_num = 0
     for si, sinfo in enumerate(shard_infos):
