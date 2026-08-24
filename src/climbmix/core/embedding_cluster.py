@@ -284,35 +284,76 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
     import numpy as np
     import pyarrow.parquet as pq
     import time
+    from concurrent.futures import ThreadPoolExecutor
 
     print(f"[NPU {worker_id}] Loading model...", flush=True)
     model = _load_model_stream(model_name, "npu")
+    model.eval()
     print(f"[NPU {worker_id}] Model loaded", flush=True)
 
     all_emb = np.memmap(memmap_path, dtype=np.float32, mode='r+',
                         shape=(total_docs, emb_dim))
 
+    device = "npu"
+
+    def _to_device(features):
+        for key in features:
+            if isinstance(features[key], torch.Tensor):
+                features[key] = features[key].to(device)
+            elif isinstance(features[key], dict):
+                _to_device(features[key])
+        return features
+
+    def _read_shard_texts(sinfo):
+        table = pq.read_table(sinfo["path"], columns=[text_col], use_threads=True)
+        col = table.column(text_col)
+        texts = [str(v) if v is not None else "" for v in col.to_pylist()]
+        del table, col
+        return texts
+
+    io_pool = ThreadPoolExecutor(max_workers=1)
+    tok_pool = ThreadPoolExecutor(max_workers=1)
+
+    shard_future = io_pool.submit(_read_shard_texts, shard_infos[shard_indices[0]])
+
+    n_ws = len(shard_indices)
     print(f"[NPU {worker_id}] Starting encoding ({n_ws} shards, batch_size={batch_size})...", flush=True)
     print(f"[NPU {worker_id}] First batch may take 1-2 min (NPU kernel compilation)...", flush=True)
 
     docs_done = 0
     t0 = time.time()
-    n_ws = len(shard_indices)
+
     for si_idx, si in enumerate(shard_indices):
+        texts = shard_future.result()
+
+        if si_idx + 1 < n_ws:
+            shard_future = io_pool.submit(
+                _read_shard_texts, shard_infos[shard_indices[si_idx + 1]])
+
         sinfo = shard_infos[si]
-        shard_path = sinfo["path"]
         start_idx = sinfo["start_idx"]
         num_docs = sinfo["num_docs"]
 
-        table = pq.read_table(shard_path, columns=[text_col], use_threads=True)
-        col = table.column(text_col)
-        texts = [str(v) if v is not None else "" for v in col.to_pylist()]
-        del table, col
+        next_tok_future = tok_pool.submit(model.tokenize, texts[:batch_size])
 
         for j in range(0, len(texts), batch_size):
-            batch = texts[j:j + batch_size]
-            emb = model.encode(batch, show_progress_bar=False, normalize_embeddings=True)
-            all_emb[start_idx + j:start_idx + j + len(batch)] = emb
+            batch_len = min(batch_size, len(texts) - j)
+
+            features = next_tok_future.result()
+
+            next_j = j + batch_size
+            if next_j < len(texts):
+                next_tok_future = tok_pool.submit(
+                    model.tokenize, texts[next_j:next_j + batch_size])
+
+            features = _to_device(features)
+            with torch.no_grad():
+                output = model(features)
+            emb = output["sentence_embedding"]
+            emb = torch.nn.functional.normalize(emb, p=2, dim=1)
+            emb = emb.cpu().numpy()
+
+            all_emb[start_idx + j:start_idx + j + batch_len] = emb
 
         docs_done += num_docs
         del texts
@@ -324,6 +365,8 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
                   f"{docs_done:,} docs, {speed:.0f} docs/s, "
                   f"elapsed {elapsed:.0f}s, ETA {eta:.0f}s", flush=True)
 
+    io_pool.shutdown()
+    tok_pool.shutdown()
     all_emb.flush()
     elapsed = time.time() - t0
     print(f"[NPU {worker_id}] Done: {docs_done:,} docs in {elapsed:.0f}s "
