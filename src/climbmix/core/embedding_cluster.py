@@ -468,7 +468,8 @@ def embed_texts_streaming(
         import multiprocessing as mp
         import threading
 
-        shared_done = mp.Array('q', n_npus)
+        ctx = mp.get_context("spawn")
+        shared_done = ctx.Array('q', n_npus)
 
         def _monitor(shared_done, total_docs, n_npus, procs):
             t0 = time.time()
@@ -500,7 +501,6 @@ def embed_texts_streaming(
         indices = list(range(n_shards))
         chunks = np.array_split(indices, n_npus)
 
-        ctx = mp.get_context("spawn")
         procs = []
         for wid, chunk in enumerate(chunks):
             p = ctx.Process(
