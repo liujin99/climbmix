@@ -21,21 +21,84 @@ from typing import List, Optional, Tuple
 try:
     import xformers  # noqa: F401
 except ImportError:
+    import torch
     import torch.nn.functional as _F
 
-    _ops = types.ModuleType("xformers.ops")
+    class _BlockDiagonalMask:
+        """Fake BlockDiagonalMask — stores seq lens, materializes to bool tensor."""
+        def __init__(self, q_seqlen, kv_seqlen=None, device=None):
+            if isinstance(q_seqlen, int):
+                q_seqlen = [q_seqlen]
+            self.q_seqlen = list(q_seqlen)
+            self.kv_seqlen = list(kv_seqlen) if kv_seqlen is not None else self.q_seqlen
+            self.device = device
+
+        @classmethod
+        def from_seqlens(cls, q_seqlen, kv_seqlen=None, device=None, **kw):
+            if (isinstance(q_seqlen, tuple) and len(q_seqlen) == 2
+                    and isinstance(q_seqlen[0], (list, tuple))):
+                q_seqlen, kv_seqlen = q_seqlen
+            return cls(q_seqlen, kv_seqlen, device)
+
+    class _LowerTriangularMask:
+        def __init__(self, *a, **kw):
+            pass
 
     def _memory_efficient_attention(q, k, v, attn_bias=None, p=0.0, **kw):
-        return _F.scaled_dot_product_attention(
-            q, k, v, attn_mask=attn_bias, dropout_p=p
-        )
+        # xformers layout: (B, S, H, D) — transpose to SDPA (B, H, S, D)
+        need_transpose = q.dim() == 4 and q.shape[1] > q.shape[2]
+        if need_transpose:
+            q_s, k_s, v_s = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+        else:
+            q_s, k_s, v_s = q, k, v
 
+        if isinstance(attn_bias, _BlockDiagonalMask):
+            Sq, Sk = q_s.shape[-2], k_s.shape[-2]
+            mask = torch.zeros(Sq, Sk, dtype=torch.bool, device=q_s.device)
+            q_off = k_off = 0
+            for qs, ks in zip(attn_bias.q_seqlen, attn_bias.kv_seqlen):
+                mask[q_off:q_off + qs, k_off:k_off + ks] = True
+                q_off += qs
+                k_off += ks
+            out = _F.scaled_dot_product_attention(
+                q_s, k_s, v_s, attn_mask=mask, dropout_p=p
+            )
+        elif isinstance(attn_bias, _LowerTriangularMask):
+            out = _F.scaled_dot_product_attention(
+                q_s, k_s, v_s, is_causal=True, dropout_p=p
+            )
+        elif attn_bias is not None:
+            out = _F.scaled_dot_product_attention(
+                q_s, k_s, v_s, attn_mask=attn_bias, dropout_p=p
+            )
+        else:
+            out = _F.scaled_dot_product_attention(q_s, k_s, v_s, dropout_p=p)
+
+        if need_transpose:
+            out = out.transpose(1, 2)
+        return out
+
+    # Build fake module hierarchy: xformers.ops.fmha.attn_bias
+    _attn_bias_mod = types.ModuleType("xformers.ops.fmha.attn_bias")
+    _attn_bias_mod.BlockDiagonalMask = _BlockDiagonalMask
+    _attn_bias_mod.LowerTriangularMask = _LowerTriangularMask
+
+    _fmha_mod = types.ModuleType("xformers.ops.fmha")
+    _fmha_mod.attn_bias = _attn_bias_mod
+    _fmha_mod.memory_efficient_attention = _memory_efficient_attention
+
+    _ops = types.ModuleType("xformers.ops")
     _ops.memory_efficient_attention = _memory_efficient_attention
+    _ops.fmha = _fmha_mod
+
     _xfm = types.ModuleType("xformers")
     _xfm.ops = _ops
     _xfm.__version__ = "0.0.0"
+
     sys.modules["xformers"] = _xfm
     sys.modules["xformers.ops"] = _ops
+    sys.modules["xformers.ops.fmha"] = _fmha_mod
+    sys.modules["xformers.ops.fmha.attn_bias"] = _attn_bias_mod
 
 
 def embed_documents(
