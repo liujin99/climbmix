@@ -256,7 +256,7 @@ class CLIMBPipeline:
                 schema = DatasetSchema.from_yaml(self.config.schema_path)
             else:
                 schema = DatasetSchema.from_yaml("config/schema_stem.yaml")
-            mm = ShardMetadataManager(data_dir, schema=schema, cache_dir=output_dir)
+            mm = ShardMetadataManager(data_dir, schema=schema, cache_dir=data_dir)
             cluster_labels = mm.cluster_labels
             quality_scores = mm.quality_scores
             token_counts = mm.estimate_token_counts()

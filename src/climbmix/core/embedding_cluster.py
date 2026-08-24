@@ -11,10 +11,31 @@ Paper details (Section 2.1):
 """
 
 import os
+import sys
+import types
 import time
 import numpy as np
 import numpy.typing as npt
 from typing import List, Optional, Tuple
+
+try:
+    import xformers  # noqa: F401
+except ImportError:
+    import torch.nn.functional as _F
+
+    _ops = types.ModuleType("xformers.ops")
+
+    def _memory_efficient_attention(q, k, v, attn_bias=None, p=0.0, **kw):
+        return _F.scaled_dot_product_attention(
+            q, k, v, attn_mask=attn_bias, dropout_p=p
+        )
+
+    _ops.memory_efficient_attention = _memory_efficient_attention
+    _xfm = types.ModuleType("xformers")
+    _xfm.ops = _ops
+    _xfm.__version__ = "0.0.0"
+    sys.modules["xformers"] = _xfm
+    sys.modules["xformers.ops"] = _ops
 
 
 def embed_documents(
