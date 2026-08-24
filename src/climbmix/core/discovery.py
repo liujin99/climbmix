@@ -7,6 +7,7 @@ methods via config:
   - "quality_cluster": cluster by domain + quality scores (no embedding, no text reading)
 """
 
+import os
 from typing import Dict, Optional, Tuple
 import numpy as np
 import numpy.typing as npt
