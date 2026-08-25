@@ -79,14 +79,16 @@ except ImportError:
                 return out.transpose(1, 2).reshape(1, -1, H, D).contiguous()
             else:
                 if _HAS_NPU_FA:
-                    cu_qlen = list(itertools.accumulate(qs_list))
-                    cu_kvlen = list(itertools.accumulate(ks_list))
+                    cu_qlen = tuple(itertools.accumulate(qs_list))
+                    cu_kvlen = tuple(itertools.accumulate(ks_list))
                     q_tnd = q.squeeze(0).contiguous() if q.dim() == 4 else q.contiguous()
                     k_tnd = k.squeeze(0).contiguous() if k.dim() == 4 else k.contiguous()
                     v_tnd = v.squeeze(0).contiguous() if v.dim() == 4 else v.contiguous()
                     out, _, _, _, _, _, _ = torch_npu.npu_fusion_attention(
                         q_tnd, k_tnd, v_tnd,
                         head_num=H,
+                        pse=None,
+                        atten_mask=None,
                         input_layout="TND",
                         actual_seq_qlen=cu_qlen,
                         actual_seq_kvlen=cu_kvlen,
