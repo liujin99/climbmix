@@ -58,19 +58,13 @@ except ImportError:
             # Always use fallback path (pad + bool mask SDPA) for all docs.
             # This ensures identical computation path for batch=512 and batch=1,
             # eliminating any bias from different attention kernels.
-            #
-            # PAD TO 512: Different batches may have different max(qs_list)
-            # (e.g. 4 for short-only batch, 512 for mixed batch). The SDPA kernel
-            # uses different algorithms for different matrix sizes, producing
-            # different fp16 results. Padding to a fixed 512 ensures all batches
-            # use the same [n, 16, 512, 512] matrix → batch-independent results.
             qs_list = attn_bias.q_seqlen
             ks_list = attn_bias.kv_seqlen
             n = len(qs_list)
             _, _, H, D = q.shape
 
-            max_s = max(512, max(qs_list))
-            max_ks = max(512, max(ks_list))
+            max_s = max(qs_list)
+            max_ks = max(ks_list)
             q_pad = torch.zeros(n, max_s, H, D, dtype=q.dtype, device=q.device)
             k_pad = torch.zeros(n, max_ks, H, D, dtype=k.dtype, device=k.device)
             v_pad = torch.zeros(n, max_ks, H, D, dtype=v.dtype, device=v.device)
