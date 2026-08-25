@@ -58,13 +58,19 @@ except ImportError:
             # Always use fallback path (pad + bool mask SDPA) for all docs.
             # This ensures identical computation path for batch=512 and batch=1,
             # eliminating any bias from different attention kernels.
+            #
+            # PAD TO 512: Different batches may have different max(qs_list)
+            # (e.g. 4 for short-only batch, 512 for mixed batch). The SDPA kernel
+            # uses different algorithms for different matrix sizes, producing
+            # different fp16 results. Padding to a fixed 512 ensures all batches
+            # use the same [n, 16, 512, 512] matrix → batch-independent results.
             qs_list = attn_bias.q_seqlen
             ks_list = attn_bias.kv_seqlen
             n = len(qs_list)
             _, _, H, D = q.shape
 
-            max_s = max(qs_list)
-            max_ks = max(ks_list)
+            max_s = max(512, max(qs_list))
+            max_ks = max(512, max(ks_list))
             q_pad = torch.zeros(n, max_s, H, D, dtype=q.dtype, device=q.device)
             k_pad = torch.zeros(n, max_ks, H, D, dtype=k.dtype, device=k.device)
             v_pad = torch.zeros(n, max_ks, H, D, dtype=v.dtype, device=v.device)
@@ -350,21 +356,17 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
         start_idx = sinfo["start_idx"]
         num_docs = sinfo["num_docs"]
 
-        sort_order = sorted(range(len(texts)), key=lambda i: len(texts[i]))
-        sorted_texts = [texts[i] for i in sort_order]
-        del texts
+        next_tok_future = tok_pool.submit(model.tokenize, texts[:batch_size])
 
-        next_tok_future = tok_pool.submit(model.tokenize, sorted_texts[:batch_size])
-
-        for j in range(0, len(sorted_texts), batch_size):
-            batch_len = min(batch_size, len(sorted_texts) - j)
+        for j in range(0, len(texts), batch_size):
+            batch_len = min(batch_size, len(texts) - j)
 
             features = next_tok_future.result()
 
             next_j = j + batch_size
-            if next_j < len(sorted_texts):
+            if next_j < len(texts):
                 next_tok_future = tok_pool.submit(
-                    model.tokenize, sorted_texts[next_j:next_j + batch_size])
+                    model.tokenize, texts[next_j:next_j + batch_size])
 
             features = _to_device(features)
             with torch.no_grad():
@@ -379,7 +381,7 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
                 nan_count += n_nan
                 nan_locs = np.where(nan_mask)[0]
                 for k in nan_locs:
-                    retry_features = model.tokenize([sorted_texts[j + k]])
+                    retry_features = model.tokenize([texts[j + k]])
                     retry_features = _to_device(retry_features)
                     with torch.no_grad():
                         retry_out = model(retry_features)
@@ -395,12 +397,11 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
 
             del features, output
 
-            batch_orig = np.array(sort_order[j:j + batch_len], dtype=np.int64) + start_idx
-            all_emb[batch_orig] = emb
+            all_emb[start_idx + j:start_idx + j + batch_len] = emb
             shared_done[worker_id] = docs_done + j + batch_len
 
         docs_done += num_docs
-        del sorted_texts
+        del texts
 
     io_pool.shutdown()
     tok_pool.shutdown()

@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""Verify length-sorted embedding via tokenize+model() path (streaming worker).
+"""Verify fixed-512 padding produces batch-independent embeddings.
 
-model.encode() already sorts by length internally, so testing through encode()
-can't measure the benefit. The streaming worker uses model.tokenize() + model()
-directly — no auto-sort. This script tests that path with sorted vs unsorted
-batches, verifying both correctness and performance.
+Root cause: model always unpads and uses BlockDiagonalMask. Our fallback
+path re-pads to max(qs_list) which varies by batch (4 vs 512). SDPA kernel
+uses different algorithms for different matrix sizes → fp16 results differ.
+
+Fix: always pad to 512 (max_seq_length). All batches use [n, 16, 512, 512]
+matrices → same kernel algorithm → batch-independent results.
+
+This script verifies: sorted vs unsorted via tokenize+model() path
+should now produce identical results (max diff = 0.0).
 """
 import os
 os.environ["ASCEND_RT_VISIBLE_DEVICES"] = "0"
@@ -57,7 +62,6 @@ def _to_device(features):
     return features
 
 def embed_batch(model, texts_batch):
-    """Embed a batch via tokenize+model() — same path as streaming worker."""
     features = model.tokenize(texts_batch)
     features = _to_device(features)
     with torch.no_grad():
@@ -67,7 +71,6 @@ def embed_batch(model, texts_batch):
     return emb.cpu().numpy()
 
 def embed_all(model, texts, batch_size=BS):
-    """Embed all texts via tokenize+model() in batches."""
     all_emb = np.empty((len(texts), 1024), dtype=np.float32)
     for j in range(0, len(texts), batch_size):
         batch = texts[j:j + batch_size]
@@ -85,14 +88,6 @@ print(f"  NaN: {n_nan}")
 print("\n--- 2. Length-sorted embedding (tokenize+model, bs=512) ---")
 sort_order = sorted(range(len(sample_texts)), key=lambda i: len(sample_texts[i]))
 sorted_texts = [sample_texts[i] for i in sort_order]
-
-lens = [len(t) for t in sample_texts]
-sorted_lens = [len(t) for t in sorted_texts]
-print(f"  Original: min={min(lens)}, max={max(lens)}, median={sorted(lens)[len(lens)//2]}")
-print(f"  Sorted batch 0: lens={sorted_lens[:5]}...{sorted_lens[507:512]}")
-print(f"  Sorted batch 1: lens={sorted_lens[512:517]}...{sorted_lens[1019:1024]}")
-print(f"  Sorted batch 2: lens={sorted_lens[1024:1029]}...{sorted_lens[1531:1536]}")
-print(f"  Sorted batch 3: lens={sorted_lens[1536:1541]}...{sorted_lens[1995:2000]}")
 
 emb_sorted_raw = embed_all(m, sorted_texts)
 n_nan_sorted = np.isnan(emb_sorted_raw).any(axis=1).sum()
@@ -113,40 +108,27 @@ cos = (emb_unsorted * emb_sorted).sum(axis=1) / (
 print(f"  Cosine sim:    min={cos.min():.10f}, mean={cos.mean():.10f}, max={cos.max():.10f}")
 
 if diff.max() < 1e-6:
-    print("  → IDENTICAL (sorted == unsorted)")
+    print("  → IDENTICAL (sorted == unsorted) ✓")
 elif diff.max() < 1e-3:
-    print("  → NEGLIGIBLE difference (< 1e-3, expected fp16 rounding)")
+    print("  → NEGLIGIBLE difference (< 1e-3)")
 else:
-    print("  → SIGNIFICANT difference (> 1e-3)")
+    print(f"  → SIGNIFICANT difference (> 1e-3) ✗ — padding fix did not resolve")
 
-# ── 4. Performance comparison ──
-print("\n--- 4. Performance comparison (tokenize+model path) ---")
+# ── 4. Also compare with model.encode() ──
+print("\n--- 4. tokenize+model vs model.encode() ---")
+emb_encode = m.encode(sample_texts, batch_size=512, show_progress_bar=False, normalize_embeddings=True)
+emb_encode = np.array(emb_encode, dtype=np.float32)
 
-t0 = time.time()
-for _ in range(3):
-    _ = embed_all(m, sample_texts)
-t_unsorted = (time.time() - t0) / 3
+diff2 = np.abs(emb_unsorted - emb_encode)
+print(f"  Max abs diff:  {diff2.max():.10f}")
+print(f"  Mean abs diff: {diff2.mean():.10f}")
 
-t0 = time.time()
-for _ in range(3):
-    _ = embed_all(m, sorted_texts)
-t_sorted = (time.time() - t0) / 3
-
-print(f"  Unsorted: {t_unsorted:.2f}s ({len(sample_texts)/t_unsorted:.0f} docs/s)")
-print(f"  Sorted:   {t_sorted:.2f}s ({len(sample_texts)/t_sorted:.0f} docs/s)")
-print(f"  Speedup:  {t_unsorted/t_sorted:.2f}x")
-
-# ── 5. Per-batch timing ──
-print("\n--- 5. Per-batch timing ---")
-for label, tlist in [("unsorted", sample_texts), ("sorted", sorted_texts)]:
-    print(f"  {label}:")
-    for j in range(0, len(tlist), BS):
-        batch = tlist[j:j + BS]
-        t0 = time.time()
-        _ = embed_batch(m, batch)
-        dt = time.time() - t0
-        max_len = max(len(t) for t in batch)
-        print(f"    batch {j//BS}: {dt:.2f}s, max_char_len={max_len}, n={len(batch)}")
+if diff2.max() < 1e-6:
+    print("  → IDENTICAL (tokenize+model == encode) ✓")
+elif diff2.max() < 1e-3:
+    print("  → NEGLIGIBLE difference (< 1e-3)")
+else:
+    print(f"  → SIGNIFICANT difference (> 1e-3)")
 
 print("\n" + "=" * 70)
 print("DONE")
