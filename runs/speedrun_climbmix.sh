@@ -23,7 +23,7 @@ export PYTHONPATH="${CLIMBMIX_DIR}/src:${PYTHONPATH:-}"
 
 DATA_DIR="${DATA_DIR:-/home/ma-user/work/100B_stem_parquet_filtered}"
 SPEED_DATA="/tmp/speedrun_data"
-NANOCHAT_DIR="${NANOCHAT_DIR:-/home/liujin99/nanochat-npu}"
+NANOCHAT_DIR="${NANOCHAT_DIR:-/home/ma-user/work/nanochat-npu}"
 NANOCHAT_BASE_DIR="${NANOCHAT_BASE_DIR:-/home/ma-user/work/nanochat_model_dir}"
 
 PROXY_DEPTH=20
