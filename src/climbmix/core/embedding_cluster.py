@@ -218,16 +218,25 @@ def embed_documents(
 
     safe_texts = [t if t and len(t.strip()) > 0 else "empty" for t in texts]
 
-    print(f"[Embed] Encoding {len(safe_texts)} documents (batch_size={batch_size})...")
+    sort_order = sorted(range(len(safe_texts)), key=lambda i: len(safe_texts[i]))
+    sorted_texts = [safe_texts[i] for i in sort_order]
+    inv_order = [0] * len(sort_order)
+    for new_pos, orig_pos in enumerate(sort_order):
+        inv_order[orig_pos] = new_pos
+
+    print(f"[Embed] Encoding {len(sorted_texts)} documents (batch_size={batch_size}, length-sorted)...")
     t1 = time.time()
-    embeddings = model.encode(
-        safe_texts,
+    sorted_embeddings = model.encode(
+        sorted_texts,
         batch_size=batch_size,
         show_progress_bar=True,
         normalize_embeddings=True,
     )
-    embeddings = np.array(embeddings, dtype=np.float32)
-    print(f"[Embed] Encoded {len(safe_texts)} docs in {time.time() - t1:.1f}s, dim={embeddings.shape[1]}")
+    sorted_embeddings = np.array(sorted_embeddings, dtype=np.float32)
+    embeddings = np.empty_like(sorted_embeddings)
+    for orig_pos, new_pos in enumerate(inv_order):
+        embeddings[orig_pos] = sorted_embeddings[new_pos]
+    print(f"[Embed] Encoded {len(sorted_texts)} docs in {time.time() - t1:.1f}s, dim={embeddings.shape[1]}")
 
     n_nan = np.isnan(embeddings).any(axis=1).sum()
     if n_nan > 0:
@@ -350,17 +359,21 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
         start_idx = sinfo["start_idx"]
         num_docs = sinfo["num_docs"]
 
-        next_tok_future = tok_pool.submit(model.tokenize, texts[:batch_size])
+        sort_order = sorted(range(len(texts)), key=lambda i: len(texts[i]))
+        sorted_texts = [texts[i] for i in sort_order]
+        del texts
 
-        for j in range(0, len(texts), batch_size):
-            batch_len = min(batch_size, len(texts) - j)
+        next_tok_future = tok_pool.submit(model.tokenize, sorted_texts[:batch_size])
+
+        for j in range(0, len(sorted_texts), batch_size):
+            batch_len = min(batch_size, len(sorted_texts) - j)
 
             features = next_tok_future.result()
 
             next_j = j + batch_size
-            if next_j < len(texts):
+            if next_j < len(sorted_texts):
                 next_tok_future = tok_pool.submit(
-                    model.tokenize, texts[next_j:next_j + batch_size])
+                    model.tokenize, sorted_texts[next_j:next_j + batch_size])
 
             features = _to_device(features)
             with torch.no_grad():
@@ -375,7 +388,7 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
                 nan_count += n_nan
                 nan_locs = np.where(nan_mask)[0]
                 for k in nan_locs:
-                    retry_features = model.tokenize([texts[j + k]])
+                    retry_features = model.tokenize([sorted_texts[j + k]])
                     retry_features = _to_device(retry_features)
                     with torch.no_grad():
                         retry_out = model(retry_features)
@@ -391,11 +404,12 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
 
             del features, output
 
-            all_emb[start_idx + j:start_idx + j + batch_len] = emb
+            batch_orig = np.array(sort_order[j:j + batch_len], dtype=np.int64) + start_idx
+            all_emb[batch_orig] = emb
             shared_done[worker_id] = docs_done + j + batch_len
 
         docs_done += num_docs
-        del texts
+        del sorted_texts
 
     io_pool.shutdown()
     tok_pool.shutdown()
