@@ -78,7 +78,7 @@ else:
 print("\n" + "=" * 60)
 print("Test 3: Large batch (512 texts, production-like)")
 print("=" * 60)
-large_texts = [f"word{(i*7+j*13)%500} " * (50 + (i*37)%400) for i in range(512)]
+large_texts = [f"word{(i*7)%500} " * (50 + (i*37)%400) for i in range(512)]
 
 emb_large = model.encode(large_texts, batch_size=512, show_progress_bar=False, normalize_embeddings=True)
 emb_large = np.array(emb_large, dtype=np.float32)
