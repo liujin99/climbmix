@@ -218,25 +218,16 @@ def embed_documents(
 
     safe_texts = [t if t and len(t.strip()) > 0 else "empty" for t in texts]
 
-    sort_order = sorted(range(len(safe_texts)), key=lambda i: len(safe_texts[i]))
-    sorted_texts = [safe_texts[i] for i in sort_order]
-    inv_order = [0] * len(sort_order)
-    for new_pos, orig_pos in enumerate(sort_order):
-        inv_order[orig_pos] = new_pos
-
-    print(f"[Embed] Encoding {len(sorted_texts)} documents (batch_size={batch_size}, length-sorted)...")
+    print(f"[Embed] Encoding {len(safe_texts)} documents (batch_size={batch_size})...")
     t1 = time.time()
-    sorted_embeddings = model.encode(
-        sorted_texts,
+    embeddings = model.encode(
+        safe_texts,
         batch_size=batch_size,
         show_progress_bar=True,
         normalize_embeddings=True,
     )
-    sorted_embeddings = np.array(sorted_embeddings, dtype=np.float32)
-    embeddings = np.empty_like(sorted_embeddings)
-    for orig_pos, new_pos in enumerate(inv_order):
-        embeddings[orig_pos] = sorted_embeddings[new_pos]
-    print(f"[Embed] Encoded {len(sorted_texts)} docs in {time.time() - t1:.1f}s, dim={embeddings.shape[1]}")
+    embeddings = np.array(embeddings, dtype=np.float32)
+    print(f"[Embed] Encoded {len(safe_texts)} docs in {time.time() - t1:.1f}s, dim={embeddings.shape[1]}")
 
     n_nan = np.isnan(embeddings).any(axis=1).sum()
     if n_nan > 0:
