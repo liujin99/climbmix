@@ -245,16 +245,23 @@ def embed_documents(
         model = _load_model(model_name, actual_device)
         print(f"[Embed] Model loaded in {time.time() - t0:.1f}s")
 
-    print(f"[Embed] Encoding {len(texts)} documents (batch_size={batch_size})...")
+    safe_texts = [t if t and len(t.strip()) > 0 else "empty" for t in texts]
+
+    print(f"[Embed] Encoding {len(safe_texts)} documents (batch_size={batch_size})...")
     t1 = time.time()
     embeddings = model.encode(
-        texts,
+        safe_texts,
         batch_size=batch_size,
         show_progress_bar=True,
         normalize_embeddings=True,
     )
     embeddings = np.array(embeddings, dtype=np.float32)
-    print(f"[Embed] Encoded {len(texts)} docs in {time.time() - t1:.1f}s, dim={embeddings.shape[1]}")
+    print(f"[Embed] Encoded {len(safe_texts)} docs in {time.time() - t1:.1f}s, dim={embeddings.shape[1]}")
+
+    n_nan = np.isnan(embeddings).any(axis=1).sum()
+    if n_nan > 0:
+        print(f"[Embed] WARNING: {n_nan} docs produced NaN embeddings, replacing with zeros")
+        embeddings = np.nan_to_num(embeddings, nan=0.0, posinf=0.0, neginf=0.0)
 
     if cache_path:
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
@@ -643,6 +650,13 @@ def cluster_embeddings_faiss(
     n_docs = embeddings.shape[0]
 
     print(f"[Cluster] FAISS K-means: K={K_init}, dim={dim}, n_docs={n_docs}")
+
+    n_nan = np.isnan(embeddings).any(axis=1).sum()
+    n_inf = np.isinf(embeddings).any(axis=1).sum()
+    if n_nan > 0 or n_inf > 0:
+        print(f"[Cluster] WARNING: {n_nan} NaN + {n_inf} Inf rows found, replacing with zeros")
+        embeddings = np.nan_to_num(embeddings, nan=0.0, posinf=0.0, neginf=0.0)
+
     t0 = time.time()
 
     kmeans = faiss.Kmeans(
