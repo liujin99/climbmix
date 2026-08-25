@@ -271,7 +271,7 @@ class TargetRunner:
         cmd = [
             "torchrun", "--standalone",
             f"--nproc_per_node={self.npu_devices}",
-            "-m", "scripts.mid_train",
+            "-m", "scripts.mid_train", "--",
             "--run", model_tag,
             "--device-type", self.device_type,
             "--model-tag", model_tag,
@@ -290,7 +290,7 @@ class TargetRunner:
         cmd = [
             "torchrun", "--standalone",
             f"--nproc_per_node={self.npu_devices}",
-            "-m", "scripts.base_eval",
+            "-m", "scripts.base_eval", "--",
             "--eval", "core",
             "--eval-benchmarks", self.eval_benchmarks,
             "--model-tag", model_tag,
