@@ -23,14 +23,6 @@ try:
 except ImportError:
     import torch
     import torch.nn.functional as _F
-    import itertools
-    try:
-        import torch_npu
-        _HAS_NPU_FA = False  # npu_fusion_attention TND kernel has non-deterministic
-                             # NaN bug across processes. Fallback (pad+SDPA) is stable.
-                             # See docs/nan_investigation.md for details.
-    except ImportError:
-        _HAS_NPU_FA = False
 
     class _BlockDiagonalMask:
         """Fake BlockDiagonalMask — stores seq lens, materializes to bool tensor."""
@@ -63,64 +55,35 @@ except ImportError:
             return t.transpose(1, 2).contiguous() if need_transpose else t
 
         if isinstance(attn_bias, _BlockDiagonalMask):
-            # Convert packed (1, total_S, H, D) to padded batch (n, max_S, H, D)
-            # to avoid O(total_S^2) dense mask
+            # Always use fallback path (pad + bool mask SDPA) for all docs.
+            # This ensures identical computation path for batch=512 and batch=1,
+            # eliminating any bias from different attention kernels.
             qs_list = attn_bias.q_seqlen
             ks_list = attn_bias.kv_seqlen
             n = len(qs_list)
             _, _, H, D = q.shape
 
-            if len(set(qs_list)) == 1 and len(set(ks_list)) == 1:
-                # All same length — just reshape (no copy)
-                s = qs_list[0]
-                ks = ks_list[0]
-                q_b = q.view(n, s, H, D).transpose(1, 2)
-                k_b = k.view(n, ks, H, D).transpose(1, 2)
-                v_b = v.view(n, ks, H, D).transpose(1, 2)
-                out = _F.scaled_dot_product_attention(q_b, k_b, v_b, dropout_p=p)
-                return out.transpose(1, 2).reshape(1, -1, H, D).contiguous()
-            else:
-                if _HAS_NPU_FA:
-                    cu_qlen = tuple(itertools.accumulate(qs_list))
-                    cu_kvlen = tuple(itertools.accumulate(ks_list))
-                    q_tnd = q.squeeze(0).contiguous() if q.dim() == 4 else q.contiguous()
-                    k_tnd = k.squeeze(0).contiguous() if k.dim() == 4 else k.contiguous()
-                    v_tnd = v.squeeze(0).contiguous() if v.dim() == 4 else v.contiguous()
-                    out, _, _, _, _, _, _ = torch_npu.npu_fusion_attention(
-                        q_tnd, k_tnd, v_tnd,
-                        head_num=H,
-                        pse=None,
-                        atten_mask=None,
-                        input_layout="TND",
-                        actual_seq_qlen=cu_qlen,
-                        actual_seq_kvlen=cu_kvlen,
-                        scale=1.0 / (D ** 0.5),
-                        keep_prob=1.0 - p,
-                    )
-                    if q.dim() == 4:
-                        out = out.unsqueeze(0)
-                    return out
-                max_s = max(qs_list)
-                max_ks = max(ks_list)
-                q_pad = torch.zeros(n, max_s, H, D, dtype=q.dtype, device=q.device)
-                k_pad = torch.zeros(n, max_ks, H, D, dtype=k.dtype, device=k.device)
-                v_pad = torch.zeros(n, max_ks, H, D, dtype=v.dtype, device=v.device)
-                kmask = torch.zeros(n, 1, max_s, max_ks, dtype=torch.bool, device=q.device)
-                q_off = k_off = 0
-                for i, (qs_i, ks_i) in enumerate(zip(qs_list, ks_list)):
-                    q_pad[i, :qs_i] = q[0, q_off:q_off + qs_i]
-                    k_pad[i, :ks_i] = k[0, k_off:k_off + ks_i]
-                    v_pad[i, :ks_i] = v[0, k_off:k_off + ks_i]
-                    kmask[i, 0, :, :ks_i] = True
-                    q_off += qs_i
-                    k_off += ks_i
-                out = _F.scaled_dot_product_attention(
-                    q_pad.transpose(1, 2), k_pad.transpose(1, 2), v_pad.transpose(1, 2),
-                    attn_mask=kmask, dropout_p=p
-                )
-                out = out.transpose(1, 2)  # (n, max_s, H, D)
-                chunks = [out[i, :qs_i].unsqueeze(0) for i, qs_i in enumerate(qs_list)]
-                return torch.cat(chunks, dim=1)  # (1, total_S, H, D)
+            max_s = max(qs_list)
+            max_ks = max(ks_list)
+            q_pad = torch.zeros(n, max_s, H, D, dtype=q.dtype, device=q.device)
+            k_pad = torch.zeros(n, max_ks, H, D, dtype=k.dtype, device=k.device)
+            v_pad = torch.zeros(n, max_ks, H, D, dtype=v.dtype, device=v.device)
+            kmask = torch.zeros(n, 1, max_s, max_ks, dtype=torch.bool, device=q.device)
+            q_off = k_off = 0
+            for i, (qs_i, ks_i) in enumerate(zip(qs_list, ks_list)):
+                q_pad[i, :qs_i] = q[0, q_off:q_off + qs_i]
+                k_pad[i, :ks_i] = k[0, k_off:k_off + ks_i]
+                v_pad[i, :ks_i] = v[0, k_off:k_off + ks_i]
+                kmask[i, 0, :, :ks_i] = True
+                q_off += qs_i
+                k_off += ks_i
+            out = _F.scaled_dot_product_attention(
+                q_pad.transpose(1, 2), k_pad.transpose(1, 2), v_pad.transpose(1, 2),
+                attn_mask=kmask, dropout_p=p
+            )
+            out = out.transpose(1, 2)  # (n, max_s, H, D)
+            chunks = [out[i, :qs_i].unsqueeze(0) for i, qs_i in enumerate(qs_list)]
+            return torch.cat(chunks, dim=1)  # (1, total_S, H, D)
 
         q_s, k_s, v_s = _to_sdpa(q), _to_sdpa(k), _to_sdpa(v)
         if isinstance(attn_bias, _LowerTriangularMask):
