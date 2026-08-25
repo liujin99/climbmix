@@ -33,8 +33,12 @@ test_env() {
         env_str="$env_str $*"
     fi
     echo -n "  [TEST] ${label}: "
-    result=$(env $env_str python3 "$CLIMBMIX_DIR/scripts/diagnostics/diagnose_env_test.py" 2>/dev/null | grep "^RESULT:")
-    echo "$result"
+    local logfile="/tmp/diag_env_$$.log"
+    env $env_str python3 "$CLIMBMIX_DIR/scripts/diagnostics/diagnose_env_test.py" 2>&1 | tee "$logfile" | grep "^RESULT:" || {
+        echo "ERROR (no RESULT line, showing last 20 lines of output)"
+        tail -20 "$logfile"
+    }
+    rm -f "$logfile"
 }
 
 echo "════════════════════════════════════════════════════════════"
