@@ -155,34 +155,47 @@ def merge_clusters_by_distance(
           f"merge_distance={merge_distance}")
 
     unique_ids = sorted(np.unique(cluster_labels[cluster_labels >= 0]).tolist())
-    current_centroids = centroids.copy()
+    id_to_idx = {uid: i for i, uid in enumerate(unique_ids)}
+    D = centroids.shape[1]
+    max_id = max(unique_ids) + 1
+
+    current_centroids = np.zeros((max_id, D), dtype=np.float32)
+    for uid in unique_ids:
+        current_centroids[uid] = centroids[uid]
+
+    cluster_sizes = np.bincount(cluster_labels[cluster_labels >= 0], minlength=max_id).astype(np.int64)
+
+    dist_matrix = cdist(current_centroids[unique_ids], current_centroids[unique_ids], metric='euclidean')
+    np.fill_diagonal(dist_matrix, np.inf)
+
+    active = np.zeros(max_id, dtype=bool)
+    for uid in unique_ids:
+        active[uid] = True
+
     current_to_final: Dict[int, int] = {uid: uid for uid in unique_ids}
     cluster_groups: Dict[int, List[int]] = {uid: [uid] for uid in unique_ids}
 
     iteration = 0
     while True:
-        active_ids = list(cluster_groups.keys())
+        active_ids = np.where(active)[0]
         K_current = len(active_ids)
 
         if target_K is not None and K_current <= target_K:
             break
 
-        active_centroids = current_centroids[active_ids]
-        dist_matrix = cdist(active_centroids, active_centroids, metric='euclidean')
-        np.fill_diagonal(dist_matrix, np.inf)
-
-        min_idx = np.argmin(dist_matrix)
-        i, j = divmod(min_idx, len(active_ids))
-        min_dist = dist_matrix[i, j]
+        sub = dist_matrix[np.ix_(active_ids, active_ids)]
+        min_idx = np.argmin(sub)
+        i, j = divmod(min_idx, K_current)
+        min_dist = sub[i, j]
 
         if min_dist > merge_distance and target_K is None:
             break
 
-        id_i = active_ids[i]
-        id_j = active_ids[j]
+        id_i = int(active_ids[i])
+        id_j = int(active_ids[j])
 
-        docs_i = int(np.sum(cluster_labels == id_i))
-        docs_j = int(np.sum(cluster_labels == id_j))
+        docs_i = int(cluster_sizes[id_i])
+        docs_j = int(cluster_sizes[id_j])
         new_centroid = (current_centroids[id_i] * docs_i + current_centroids[id_j] * docs_j) / (docs_i + docs_j)
 
         merged_id = min(id_i, id_j)
@@ -191,6 +204,17 @@ def merge_clusters_by_distance(
         cluster_groups[merged_id] = cluster_groups.pop(id_i) + cluster_groups.pop(id_j)
 
         current_centroids[merged_id] = new_centroid
+        cluster_sizes[merged_id] += cluster_sizes[id_j]
+        active[absorbed_id] = False
+
+        for uid in active_ids:
+            if uid == merged_id:
+                continue
+            d = np.linalg.norm(new_centroid - current_centroids[uid])
+            dist_matrix[merged_id, uid] = d
+            dist_matrix[uid, merged_id] = d
+        dist_matrix[merged_id, merged_id] = np.inf
+
         for old_id in cluster_groups[merged_id]:
             current_to_final[old_id] = merged_id
 
