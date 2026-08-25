@@ -83,8 +83,8 @@ except ImportError:
             v_f = v_pad.transpose(1, 2).bfloat16()  # (n, H, max_ks, D)
             scale = D ** 0.5
             scores = torch.matmul(q_f, k_f.transpose(-2, -1)) / scale  # (n, H, max_s, max_ks)
-            scores = scores.float().masked_fill(~kmask, torch.finfo(torch.float32).min)
-            attn = torch.softmax(scores, dim=-1).to(v_f.dtype)
+            scores.masked_fill_(~kmask, torch.finfo(torch.float32).min)
+            attn = torch.softmax(scores, dim=-1)
             out = torch.matmul(attn, v_f).to(q.dtype)  # (n, H, max_s, D)
             out = out.transpose(1, 2)  # (n, max_s, H, D)
             chunks = [out[i, :qs_i].unsqueeze(0) for i, qs_i in enumerate(qs_list)]
