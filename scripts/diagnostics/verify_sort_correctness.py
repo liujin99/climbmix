@@ -13,6 +13,7 @@ os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
 import warnings
 warnings.filterwarnings("ignore")
 
+import climbmix.core.embedding_cluster  # noqa: F401 — installs fake xformers
 import torch
 import torch_npu
 import numpy as np
