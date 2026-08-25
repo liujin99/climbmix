@@ -139,6 +139,13 @@ class EmbeddingClusterDiscovery:
                 continue
 
             sampled_clusters = sample_labels[sampled_in_domain]
+            valid_mask = sampled_clusters >= 0
+            sampled_clusters = sampled_clusters[valid_mask]
+
+            if len(sampled_clusters) == 0:
+                final_labels[domain_indices] = 0
+                continue
+
             unique_clusters, counts = np.unique(sampled_clusters, return_counts=True)
 
             unassigned = domain_indices[final_labels[domain_indices] == -1]
@@ -162,10 +169,17 @@ class EmbeddingClusterDiscovery:
                 final_labels[shuffled[pos:pos + n]] = int(cid)
                 pos += n
 
-        n_unassigned = int((final_labels == -1).sum())
+        sampled_nan = np.zeros(n_total, dtype=bool)
+        sampled_nan[sample_indices] = True
+        nan_and_unassigned = (final_labels == -1) & (~sampled_nan)
+        n_unassigned = int(nan_and_unassigned.sum())
         if n_unassigned > 0:
             print(f"[EmbeddingCluster] WARNING: {n_unassigned:,} docs unassigned, setting to cluster 0")
-            final_labels[final_labels == -1] = 0
+            final_labels[nan_and_unassigned] = 0
+
+        n_excluded = int(((final_labels == -1) & sampled_nan).sum())
+        if n_excluded > 0:
+            print(f"[EmbeddingCluster] {n_excluded:,} sampled docs excluded (NaN/invalid embeddings)")
 
         n_clusters = len(np.unique(final_labels[final_labels >= 0]))
         print(f"[EmbeddingCluster] Assigned clusters to {n_total:,} docs "

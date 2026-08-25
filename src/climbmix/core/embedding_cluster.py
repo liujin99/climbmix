@@ -677,9 +677,16 @@ def cluster_embeddings_faiss(
     _, labels = index.search(embeddings, 1)
     labels = labels.reshape(-1).astype(np.int64)
 
+    zero_mask = np.all(embeddings == 0, axis=1)
+    n_zero = zero_mask.sum()
+    if n_zero > 0:
+        print(f"[Cluster] {n_zero} docs have zero/NaN embeddings — excluding from clusters")
+        labels[zero_mask] = -1
+
     elapsed = time.time() - t0
-    unique_labels = np.unique(labels)
-    print(f"[Cluster] Done in {elapsed:.1f}s, {len(unique_labels)} unique clusters")
+    valid_labels = labels[labels >= 0]
+    n_unique = len(np.unique(valid_labels)) if len(valid_labels) > 0 else 0
+    print(f"[Cluster] Done in {elapsed:.1f}s, {n_unique} unique clusters, {n_zero} excluded")
 
     if cache_path:
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)

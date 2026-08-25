@@ -59,6 +59,8 @@ def compute_cluster_quality(
     if quality_scores is None or np.all(quality_scores == 0):
         unique_clusters = np.unique(cluster_labels)
         for c in unique_clusters:
+            if c < 0:
+                continue
             cluster_quality[int(c)] = 5.0
         if quality_scores is not None and np.all(quality_scores == 0):
             print("[ClusterQuality] All-zero scores detected, skipping pruning")
@@ -66,6 +68,8 @@ def compute_cluster_quality(
 
     unique_clusters = np.unique(cluster_labels)
     for c in unique_clusters:
+        if c < 0:
+            continue
         mask = cluster_labels == c
         avg_quality = float(quality_scores[mask].mean())
         cluster_quality[int(c)] = avg_quality
@@ -94,6 +98,8 @@ def prune_clusters(
     unique_clusters = np.unique(cluster_labels)
     kept_clusters = []
     for c in unique_clusters:
+        if c < 0:
+            continue
         if cluster_quality.get(int(c), 0.0) >= threshold:
             kept_clusters.append(int(c))
 
