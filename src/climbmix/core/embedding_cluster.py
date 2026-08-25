@@ -222,7 +222,11 @@ def embed_documents(
                 print(f"[Embed] Loading model: {model_name} (device=npu)")
                 t0 = time.time()
                 model = _load_model(model_name, "npu")
-                print(f"[Embed] Model loaded in {time.time() - t0:.1f}s")
+                model.eval()
+                model.half()
+                model.max_seq_length = 512
+                batch_size = max(batch_size, 512)
+                print(f"[Embed] Model loaded in {time.time() - t0:.1f}s (fp16, msl=512, bs={batch_size})")
             except Exception as e:
                 print(f"[Embed] NPU embedding failed ({e}), falling back to CPU")
                 actual_device = "cpu"
