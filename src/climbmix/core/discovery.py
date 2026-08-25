@@ -132,28 +132,45 @@ class EmbeddingClusterDiscovery:
         for d in unique_domains:
             domain_mask = domain_labels == d
             domain_indices = np.where(domain_mask)[0]
-            sampled_domain = sample_indices[domain_labels[sample_indices] == d]
+            sampled_in_domain = domain_labels[sample_indices] == d
 
-            if len(sampled_domain) == 0:
+            if sampled_in_domain.sum() == 0:
                 final_labels[domain_indices] = 0
                 continue
 
-            sampled_clusters = sample_labels[
-                np.isin(sample_indices, sampled_domain)
-            ]
+            sampled_clusters = sample_labels[sampled_in_domain]
             unique_clusters, counts = np.unique(sampled_clusters, return_counts=True)
-            dominant = unique_clusters[np.argmax(counts)]
 
             unassigned = domain_indices[final_labels[domain_indices] == -1]
-            final_labels[unassigned] = int(dominant)
+            n_unassigned = len(unassigned)
+            if n_unassigned == 0:
+                continue
+
+            proportions = counts.astype(np.float64) / counts.sum()
+            n_per_cluster = np.floor(proportions * n_unassigned).astype(int)
+            remainder = n_unassigned - n_per_cluster.sum()
+            order = np.argsort(-counts)
+            for i in range(remainder):
+                n_per_cluster[order[i % len(order)]] += 1
+
+            rng = np.random.default_rng(42 + int(d))
+            shuffled = unassigned.copy()
+            rng.shuffle(shuffled)
+
+            pos = 0
+            for cid, n in zip(unique_clusters, n_per_cluster):
+                final_labels[shuffled[pos:pos + n]] = int(cid)
+                pos += n
 
         n_unassigned = int((final_labels == -1).sum())
         if n_unassigned > 0:
             print(f"[EmbeddingCluster] WARNING: {n_unassigned:,} docs unassigned, setting to cluster 0")
             final_labels[final_labels == -1] = 0
 
+        n_clusters = len(np.unique(final_labels[final_labels >= 0]))
         print(f"[EmbeddingCluster] Assigned clusters to {n_total:,} docs "
-              f"(sampled {len(sample_indices):,}, domain-mapped {n_total - len(sample_indices):,})")
+              f"(sampled {len(sample_indices):,}, domain-mapped {n_total - len(sample_indices):,}), "
+              f"{n_clusters} clusters used")
         return final_labels
 
     @staticmethod
