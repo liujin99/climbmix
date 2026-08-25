@@ -358,6 +358,7 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
     print(f"[NPU {worker_id}] Starting encoding ({n_ws} shards, batch_size={batch_size})", flush=True)
 
     docs_done = 0
+    nan_count = 0
     t0 = time.time()
 
     for si_idx, si in enumerate(shard_indices):
@@ -390,6 +391,12 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
             emb = torch.nn.functional.normalize(emb, p=2, dim=1)
             emb = emb.cpu().numpy()
 
+            nan_mask = np.isnan(emb).any(axis=1)
+            if nan_mask.any():
+                n_nan = int(nan_mask.sum())
+                nan_count += n_nan
+                emb[nan_mask] = 0.0
+
             del features, output
 
             all_emb[start_idx + j:start_idx + j + batch_len] = emb
@@ -402,8 +409,9 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
     tok_pool.shutdown()
     all_emb.flush()
     elapsed = time.time() - t0
+    nan_msg = f", {nan_count} NaN excluded" if nan_count > 0 else ""
     print(f"[NPU {worker_id}] Done: {docs_done:,} docs in {elapsed:.0f}s "
-          f"({docs_done/elapsed:.0f} docs/s)", flush=True)
+          f"({docs_done/elapsed:.0f} docs/s{nan_msg})", flush=True)
 
 
 def embed_texts_streaming(
