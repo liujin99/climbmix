@@ -55,9 +55,9 @@ except ImportError:
             return t.transpose(1, 2).contiguous() if need_transpose else t
 
         if isinstance(attn_bias, _BlockDiagonalMask):
-            # Always use fallback path (pad + bool mask SDPA) for all docs.
-            # This ensures identical computation path for batch=512 and batch=1,
-            # eliminating any bias from different attention kernels.
+            # Manual fp32 attention — bypass NPU SDPA kernel entirely.
+            # NPU SDPA has intermittent NaN bug in both fp16 and bf16.
+            # fp32 matmul + stable softmax is slower but numerically reliable.
             qs_list = attn_bias.q_seqlen
             ks_list = attn_bias.kv_seqlen
             n = len(qs_list)
@@ -77,10 +77,15 @@ except ImportError:
                 kmask[i, 0, :, :ks_i] = True
                 q_off += qs_i
                 k_off += ks_i
-            out = _F.scaled_dot_product_attention(
-                q_pad.transpose(1, 2), k_pad.transpose(1, 2), v_pad.transpose(1, 2),
-                attn_mask=kmask, dropout_p=p
-            )
+
+            q_f = q_pad.transpose(1, 2).float()  # (n, H, max_s, D)
+            k_f = k_pad.transpose(1, 2).float()  # (n, H, max_ks, D)
+            v_f = v_pad.transpose(1, 2).float()  # (n, H, max_ks, D)
+            scale = D ** 0.5
+            scores = torch.matmul(q_f, k_f.transpose(-2, -1)) / scale  # (n, H, max_s, max_ks)
+            scores = scores.masked_fill(~kmask, torch.finfo(torch.float32).min)
+            attn = torch.softmax(scores, dim=-1)
+            out = torch.matmul(attn, v_f).to(q.dtype)  # (n, H, max_s, D)
             out = out.transpose(1, 2)  # (n, max_s, H, D)
             chunks = [out[i, :qs_i].unsqueeze(0) for i, qs_i in enumerate(qs_list)]
             return torch.cat(chunks, dim=1)  # (1, total_S, H, D)
@@ -190,10 +195,10 @@ def embed_documents(
                 t0 = time.time()
                 model = _load_model(model_name, "npu")
                 model.eval()
-                model.bfloat16()
+                model.half()
                 model.max_seq_length = 512
                 batch_size = max(batch_size, 512)
-                print(f"[Embed] Model loaded in {time.time() - t0:.1f}s (bf16, msl=512, bs={batch_size})")
+                print(f"[Embed] Model loaded in {time.time() - t0:.1f}s (fp16+fp32attn, msl=512, bs={batch_size})")
             except Exception as e:
                 print(f"[Embed] NPU embedding failed ({e}), falling back to CPU")
                 actual_device = "cpu"
@@ -304,8 +309,8 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
     model = _load_model_stream(model_name, "npu")
     model.eval()
     model.max_seq_length = truncate_len
-    model.bfloat16()
-    print(f"[NPU {worker_id}] Model loaded (bf16, max_seq_len={truncate_len})", flush=True)
+    model.half()
+    print(f"[NPU {worker_id}] Model loaded (fp16+fp32attn, max_seq_len={truncate_len})", flush=True)
 
     all_emb = np.memmap(memmap_path, dtype=np.float32, mode='r+',
                         shape=(total_docs, emb_dim))
