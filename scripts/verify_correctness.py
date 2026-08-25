@@ -232,17 +232,15 @@ print(f"  {len(test_texts)} texts, seqlens: {seqlens}")
 
 # Get embeddings with npu_fusion_attention
 _use_npu_fa[0] = True
-with torch.no_grad():
-    emb_fa = model(features)
-torch.npu.synchronize()
-emb_fa = emb_fa.cpu().float().numpy()
+emb_fa = model.encode(test_texts, batch_size=len(test_texts),
+                      show_progress_bar=False, normalize_embeddings=True)
+emb_fa = np.array(emb_fa, dtype=np.float32)
 
 # Get embeddings with fallback (pad + bool-mask SDPA)
 _use_npu_fa[0] = False
-with torch.no_grad():
-    emb_pad = model(features)
-torch.npu.synchronize()
-emb_pad = emb_pad.cpu().float().numpy()
+emb_pad = model.encode(test_texts, batch_size=len(test_texts),
+                       show_progress_bar=False, normalize_embeddings=True)
+emb_pad = np.array(emb_pad, dtype=np.float32)
 
 # Compare
 diff = np.abs(emb_fa - emb_pad)
