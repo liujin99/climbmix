@@ -201,10 +201,10 @@ def embed_documents(
                 t0 = time.time()
                 model = _load_model(model_name, "npu")
                 model.eval()
-                model.bfloat16()
+                model.half()
                 model.max_seq_length = 512
                 batch_size = max(batch_size, 512)
-                print(f"[Embed] Model loaded in {time.time() - t0:.1f}s (bf16+fp32chunk, msl=512, bs={batch_size})")
+                print(f"[Embed] Model loaded in {time.time() - t0:.1f}s (fp16+fp32chunk, msl=512, bs={batch_size})")
             except Exception as e:
                 print(f"[Embed] NPU embedding failed ({e}), falling back to CPU")
                 actual_device = "cpu"
@@ -315,8 +315,8 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
     model = _load_model_stream(model_name, "npu")
     model.eval()
     model.max_seq_length = truncate_len
-    model.bfloat16()
-    print(f"[NPU {worker_id}] Model loaded (bf16+fp32chunk, max_seq_len={truncate_len})", flush=True)
+    model.half()
+    print(f"[NPU {worker_id}] Model loaded (fp16+fp32chunk, max_seq_len={truncate_len})", flush=True)
 
     all_emb = np.memmap(memmap_path, dtype=np.float32, mode='r+',
                         shape=(total_docs, emb_dim))
