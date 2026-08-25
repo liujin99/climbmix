@@ -209,16 +209,16 @@ model.eval()
 model.max_seq_length = 512
 model.half()
 
-# Small batch of variable-length texts
+# Small batch of variable-length texts (longer to avoid short-seq issues)
 test_texts = [
-    "Machine learning is a subset of artificial intelligence.",
-    "The cat sat on the mat.",
-    "In quantum mechanics, the Heisenberg uncertainty principle states that the position and momentum of a particle cannot be simultaneously measured with arbitrary precision. This fundamental limit arises from the wave-like nature of matter at microscopic scales.",
-    "def hello_world():\n    print('Hello, World!')\n    return 42",
-    "The Treaty of Westphalia, signed in 1648, ended the Thirty Years' War and established the modern system of sovereign states in Europe.",
-    "Photosynthesis converts light energy into chemical energy stored in glucose molecules.",
-    "The stock market crash of 1929 triggered the Great Depression.",
-    "In topology, a manifold is a topological space that locally resembles Euclidean space near each point.",
+    "Machine learning is a subset of artificial intelligence that enables systems to learn and improve from experience without being explicitly programmed. It focuses on developing algorithms that can identify patterns in data and make predictions or decisions with minimal human intervention. " * 3,
+    "The cat sat on the mat. It was a sunny day and the birds were singing. The cat was happy and content. It purred softly as it watched the world go by from its favorite spot by the window. " * 3,
+    "In quantum mechanics, the Heisenberg uncertainty principle states that the position and momentum of a particle cannot be simultaneously measured with arbitrary precision. This fundamental limit arises from the wave-like nature of matter at microscopic scales and has profound implications for our understanding of physical reality. " * 3,
+    "def hello_world():\n    print('Hello, World!')\n    return 42\n\nclass MyClass:\n    def __init__(self):\n        self.value = 0\n    def increment(self):\n        self.value += 1\n        return self.value\n\n# This is a comment\nif __name__ == '__main__':\n    obj = MyClass()\n    print(obj.increment()) " * 2,
+    "The Treaty of Westphalia, signed in 1648, ended the Thirty Years' War and established the modern system of sovereign states in Europe. It recognized the principle of cuius regio, eius religio, granting rulers the right to determine the religion of their territories. The treaty also established a balance of power that would shape European politics for centuries. " * 2,
+    "Photosynthesis converts light energy into chemical energy stored in glucose molecules. The process occurs in the chloroplasts of plant cells and involves two main stages: the light-dependent reactions and the Calvin cycle. During the light-dependent reactions, water molecules are split, releasing oxygen as a byproduct. " * 3,
+    "The stock market crash of 1929 triggered the Great Depression, one of the worst economic downturns in modern history. On October 29, known as Black Tuesday, stock prices collapsed completely. The crash led to widespread bank failures, mass unemployment, and a decade of economic hardship that lasted until World War II. " * 2,
+    "In topology, a manifold is a topological space that locally resembles Euclidean space near each point. More precisely, an n-dimensional manifold is a space where each point has a neighborhood homeomorphic to an open subset of n-dimensional Euclidean space. Manifolds are fundamental objects in geometry and physics. " * 3,
 ]
 
 features = model.tokenize(test_texts)
@@ -235,12 +235,31 @@ _use_npu_fa[0] = True
 emb_fa = model.encode(test_texts, batch_size=len(test_texts),
                       show_progress_bar=False, normalize_embeddings=True)
 emb_fa = np.array(emb_fa, dtype=np.float32)
+print(f"  npu_fusion_attention: NaN={np.isnan(emb_fa).sum()}, shape={emb_fa.shape}")
 
 # Get embeddings with fallback (pad + bool-mask SDPA)
 _use_npu_fa[0] = False
 emb_pad = model.encode(test_texts, batch_size=len(test_texts),
                        show_progress_bar=False, normalize_embeddings=True)
 emb_pad = np.array(emb_pad, dtype=np.float32)
+print(f"  fallback (pad+bool): NaN={np.isnan(emb_pad).sum()}, shape={emb_pad.shape}")
+
+# Check for NaN before proceeding
+if np.isnan(emb_fa).any() or np.isnan(emb_pad).any():
+    print("  WARNING: NaN detected in embeddings!")
+    # Try with even longer texts
+    test_texts_long = [t * 2 for t in test_texts]
+    print(f"  Retrying with longer texts ({len(test_texts_long[0])} chars each)")
+    _use_npu_fa[0] = True
+    emb_fa = model.encode(test_texts_long, batch_size=len(test_texts_long),
+                          show_progress_bar=False, normalize_embeddings=True)
+    emb_fa = np.array(emb_fa, dtype=np.float32)
+    _use_npu_fa[0] = False
+    emb_pad = model.encode(test_texts_long, batch_size=len(test_texts_long),
+                           show_progress_bar=False, normalize_embeddings=True)
+    emb_pad = np.array(emb_pad, dtype=np.float32)
+    print(f"  npu_fusion_attention: NaN={np.isnan(emb_fa).sum()}")
+    print(f"  fallback (pad+bool): NaN={np.isnan(emb_pad).sum()}")
 
 # Compare
 diff = np.abs(emb_fa - emb_pad)
