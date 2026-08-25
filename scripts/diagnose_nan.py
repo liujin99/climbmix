@@ -24,7 +24,6 @@ import numpy as np
 import pyarrow.parquet as pq
 
 DATA_DIR = os.environ.get("DATA_DIR", "/home/ma-user/work/100B_stem_parquet_filtered")
-SMOKE_DATA = "/tmp/smoke_data"
 
 # ── Step 1: Load texts and check statistics ──
 print("=" * 70)
@@ -32,11 +31,10 @@ print("Step 1: Text statistics from parquet files")
 print("=" * 70)
 
 text_col = "text"
+parquet_files = sorted([f for f in os.listdir(DATA_DIR) if f.endswith(".parquet")])[:2]
 texts = []
-for fname in sorted(os.listdir(SMOKE_DATA))[:2]:
-    if not fname.endswith(".parquet"):
-        continue
-    fpath = os.path.join(SMOKE_DATA, fname)
+for fname in parquet_files:
+    fpath = os.path.join(DATA_DIR, fname)
     table = pq.read_table(fpath, columns=[text_col])
     col_texts = table.column(text_col).to_pylist()
     texts.extend([str(t) if t is not None else "" for t in col_texts])
