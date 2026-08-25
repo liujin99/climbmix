@@ -264,8 +264,10 @@ def embed_documents(
 
     n_nan = np.isnan(embeddings).any(axis=1).sum()
     if n_nan > 0:
-        print(f"[Embed] WARNING: {n_nan} docs produced NaN embeddings, replacing with zeros")
+        print(f"[Embed] WARNING: {n_nan}/{len(safe_texts)} docs produced NaN embeddings, replacing with zeros")
         embeddings = np.nan_to_num(embeddings, nan=0.0, posinf=0.0, neginf=0.0)
+    else:
+        print(f"[Embed] No NaN detected ({len(safe_texts)} docs)")
 
     if cache_path:
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
