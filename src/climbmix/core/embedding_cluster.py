@@ -55,10 +55,11 @@ except ImportError:
             return t.transpose(1, 2).contiguous() if need_transpose else t
 
         if isinstance(attn_bias, _BlockDiagonalMask):
-            # Manual fp32 attention with chunking — bypass NPU SDPA entirely.
-            # NPU SDPA produces NaN (1643/2000). bf16 model prevents weight
-            # overflow (fixes remaining 464 NaN). fp32 matmul+softmax is stable.
-            # Chunked (64 docs) to avoid OOM from large fp32 scores tensor.
+            # Manual fp32 attention — bypass NPU SDPA entirely.
+            # NPU SDPA broken for fp16/bf16. bf16 model also broken (2000 NaN).
+            # fp16 model had 464 NaN from weight overflow -> inf Q/K/V.
+            # fp32 model: no overflow, no SDPA, should be 0 NaN.
+            # Chunked (64 docs) to limit fp32 scores memory.
             qs_list = attn_bias.q_seqlen
             ks_list = attn_bias.kv_seqlen
             n = len(qs_list)
@@ -68,7 +69,7 @@ except ImportError:
             max_ks = max(ks_list)
             q_pad = torch.zeros(n, max_s, H, D, dtype=q.dtype, device=q.device)
             k_pad = torch.zeros(n, max_ks, H, D, dtype=k.dtype, device=k.device)
-            v_pad = torch.zeros(n, max_ks, H, D, dtype=v.dtype, device=v.device)
+            v_pad = torch.zeros(n, max_ks, H, D, dtype=v.dtype, device=q.device)
             kmask = torch.zeros(n, 1, max_s, max_ks, dtype=torch.bool, device=q.device)
             q_off = k_off = 0
             for i, (qs_i, ks_i) in enumerate(zip(qs_list, ks_list)):
@@ -81,19 +82,21 @@ except ImportError:
 
             CHUNK = 64
             scale = D ** 0.5
-            out_pad = torch.empty(n, max_s, H, D, dtype=q.dtype, device=q.device)
+            out_list = []
             for start in range(0, n, CHUNK):
                 end = min(start + CHUNK, n)
-                q_c = q_pad[start:end].transpose(1, 2).float()  # (c, H, max_s, D)
-                k_c = k_pad[start:end].transpose(1, 2).float()  # (c, H, max_ks, D)
-                v_c = v_pad[start:end].transpose(1, 2).float()  # (c, H, max_ks, D)
+                q_c = q_pad[start:end].transpose(1, 2)  # (c, H, max_s, D)
+                k_c = k_pad[start:end].transpose(1, 2)  # (c, H, max_ks, D)
+                v_c = v_pad[start:end].transpose(1, 2)  # (c, H, max_ks, D)
                 m_c = kmask[start:end]  # (c, 1, max_s, max_ks)
                 scores = torch.matmul(q_c, k_c.transpose(-2, -1)) / scale
-                scores.masked_fill_(~m_c, torch.finfo(torch.float32).min)
+                scores = scores.masked_fill(~m_c, torch.finfo(torch.float32).min)
                 attn = torch.softmax(scores, dim=-1)
-                out_pad[start:end] = torch.matmul(attn, v_c).to(q.dtype).transpose(1, 2)
+                out_c = torch.matmul(attn, v_c)  # (c, H, max_s, D)
+                out_list.append(out_c.transpose(1, 2))  # (c, max_s, H, D)
 
-            chunks = [out_pad[i, :qs_i].unsqueeze(0) for i, qs_i in enumerate(qs_list)]
+            out = torch.cat(out_list, dim=0)  # (n, max_s, H, D)
+            chunks = [out[i, :qs_i].unsqueeze(0) for i, qs_i in enumerate(qs_list)]
             return torch.cat(chunks, dim=1)  # (1, total_S, H, D)
 
         q_s, k_s, v_s = _to_sdpa(q), _to_sdpa(k), _to_sdpa(v)
@@ -201,10 +204,10 @@ def embed_documents(
                 t0 = time.time()
                 model = _load_model(model_name, "npu")
                 model.eval()
-                model.half()
+                model.float()
                 model.max_seq_length = 512
                 batch_size = max(batch_size, 512)
-                print(f"[Embed] Model loaded in {time.time() - t0:.1f}s (fp16+fp32chunk, msl=512, bs={batch_size})")
+                print(f"[Embed] Model loaded in {time.time() - t0:.1f}s (fp32+manual_attn, msl=512, bs={batch_size})")
             except Exception as e:
                 print(f"[Embed] NPU embedding failed ({e}), falling back to CPU")
                 actual_device = "cpu"
@@ -315,8 +318,8 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
     model = _load_model_stream(model_name, "npu")
     model.eval()
     model.max_seq_length = truncate_len
-    model.half()
-    print(f"[NPU {worker_id}] Model loaded (fp16+fp32chunk, max_seq_len={truncate_len})", flush=True)
+    model.float()
+    print(f"[NPU {worker_id}] Model loaded (fp32+manual_attn, max_seq_len={truncate_len})", flush=True)
 
     all_emb = np.memmap(memmap_path, dtype=np.float32, mode='r+',
                         shape=(total_docs, emb_dim))
