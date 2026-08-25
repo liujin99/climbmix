@@ -26,7 +26,9 @@ except ImportError:
     import itertools
     try:
         import torch_npu
-        _HAS_NPU_FA = hasattr(torch_npu, "npu_fusion_attention")
+        _HAS_NPU_FA = False  # npu_fusion_attention TND kernel has non-deterministic
+                             # NaN bug across processes. Fallback (pad+SDPA) is stable.
+                             # See docs/nan_investigation.md for details.
     except ImportError:
         _HAS_NPU_FA = False
 
@@ -266,8 +268,19 @@ def embed_documents(
 
     n_nan = np.isnan(embeddings).any(axis=1).sum()
     if n_nan > 0:
-        print(f"[Embed] WARNING: {n_nan}/{len(safe_texts)} docs produced NaN embeddings, replacing with zeros")
-        embeddings = np.nan_to_num(embeddings, nan=0.0, posinf=0.0, neginf=0.0)
+        nan_indices = np.where(np.isnan(embeddings).any(axis=1))[0]
+        print(f"[Embed] {n_nan}/{len(safe_texts)} docs produced NaN, retrying with bs=1...")
+        for idx in nan_indices:
+            single = model.encode(
+                [safe_texts[idx]], batch_size=1, show_progress_bar=False,
+                normalize_embeddings=True)
+            embeddings[idx] = np.array(single[0], dtype=np.float32)
+        still_nan = np.isnan(embeddings).any(axis=1).sum()
+        if still_nan > 0:
+            raise RuntimeError(
+                f"{still_nan} docs still produce NaN after bs=1 retry — "
+                f"cannot recover, aborting to prevent data loss")
+        print(f"[Embed] All {n_nan} NaN docs recovered via bs=1 retry")
     else:
         print(f"[Embed] No NaN detected ({len(safe_texts)} docs)")
 
@@ -397,7 +410,21 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
             if nan_mask.any():
                 n_nan = int(nan_mask.sum())
                 nan_count += n_nan
-                emb[nan_mask] = 0.0
+                nan_locs = np.where(nan_mask)[0]
+                for k in nan_locs:
+                    retry_features = model.tokenize([texts[j + k]])
+                    retry_features = _to_device(retry_features)
+                    with torch.no_grad():
+                        retry_out = model(retry_features)
+                    retry_emb = retry_out["sentence_embedding"].float()
+                    retry_emb = torch.nn.functional.normalize(retry_emb, p=2, dim=1)
+                    emb[k] = retry_emb.cpu().numpy()[0]
+                    del retry_features, retry_out
+                still_nan = np.isnan(emb).any(axis=1).sum()
+                if still_nan > 0:
+                    raise RuntimeError(
+                        f"[NPU {worker_id}] {still_nan} docs still NaN after bs=1 retry — "
+                        f"cannot recover, aborting to prevent data loss")
 
             del features, output
 
@@ -411,7 +438,7 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
     tok_pool.shutdown()
     all_emb.flush()
     elapsed = time.time() - t0
-    nan_msg = f", {nan_count} NaN excluded" if nan_count > 0 else ""
+    nan_msg = f", {nan_count} NaN recovered" if nan_count > 0 else ""
     print(f"[NPU {worker_id}] Done: {docs_done:,} docs in {elapsed:.0f}s "
           f"({docs_done/elapsed:.0f} docs/s{nan_msg})", flush=True)
 

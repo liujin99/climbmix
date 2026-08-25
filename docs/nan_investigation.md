@@ -187,9 +187,38 @@ batch_size = max(batch_size, 512)     # 强制 ≥512（关键）
 
 ## 6. 验证结果
 
+### 6.1 fp16 + bs=512 + TND（初步修复）
+
 修复后（fp16 + bs=512 + msl=512）在 2000 docs 上：
 - 3 次重复：0 NaN
-- 完全确定性
+- 完全确定性（进程内）
+
+### 6.2 跨进程非确定性（关键发现）
+
+fp16+bs=512 在诊断中 0% NaN，但 smoke test（不同进程、相同配置）产生了 143/2000 (7.15%) NaN。
+
+说明 `npu_fusion_attention` TND 内核的行为在**进程级别非确定性**——不同进程启动时 NPU 内核初始化状态不同。
+
+### 6.3 根因诊断（最终确认）
+
+诊断脚本 `diagnose_root_cause.py` 结果：
+
+| 测试 | TND | Fallback (pad+SDPA) |
+|------|-----|---------------------|
+| 5 次重复 NaN | 0% (本进程) | 0% (本进程) |
+| 跨进程稳定性 | 非确定（smoke test 7%） | **稳定**（2 次诊断均 0%） |
+| 进程内一致性 | max_diff = 0.0 | max_diff = 0.0 |
+| 路径间差异 | max=0.002, mean=0.000002, cosine≥0.9998 | — |
+
+### 6.4 最终方案
+
+**禁用 TND 路径，全部走 fallback（pad+SDPA）**：
+
+- `_HAS_NPU_FA = False`（禁用 `npu_fusion_attention` TND）
+- 所有 docs 使用同一计算路径 → 零偏差
+- fallback 在所有测试中 0% NaN → 零丢弃
+- 如果 fallback 仍出 NaN（极小概率），逐条重试（bs=1 走 uniform-length 标准 SDPA 路径）
+- 如果 bs=1 仍出 NaN，raise RuntimeError（不丢数据，显式报错）
 
 ---
 
@@ -197,21 +226,17 @@ batch_size = max(batch_size, 512)     # 强制 ≥512（关键）
 
 1. **NPU 不要反复 reload model**: 多次 `del model; empty_cache(); new SentenceTransformer(...)` 会导致 NPU 内核状态损坏，后续所有计算返回 100% NaN。诊断脚本必须单次加载模型。
 
-2. **fp32 在 NPU 上不稳定**: `npu_fusion_attention` TND 路径在 fp32 下有 bug，fp16 更稳定。NPU 上应优先使用 fp16。
+2. **npu_fusion_attention TND 有非确定性 NaN bug**: 进程级非确定性，无法复现，无法修复（CANN 闭源）。fallback（pad+SDPA）是稳定替代。
 
-3. **batch size 影响数值稳定性**: 小 batch (8) 可能走不同内核路径而稳定；大 batch (≥256) 在 fp16 下也稳定。需要找到稳定区间。
+3. **调用约定需匹配 transformers**: 显式传 `pse=None, atten_mask=None`，`actual_seq_*len` 用 tuple 而非 list。
 
-4. **诊断脚本设计原则**:
-   - 单次加载模型，避免 reload 污染
-   - 同一配置重复多次，检查确定性
-   - 隔离变量（精度、batch size、max_seq_length）逐一测试
-   - 记录具体哪些输入产生 NaN（行号、文本特征）
+4. **fallback 与 TND 的 embedding 差异可忽略**: mean abs diff = 0.000002，cosine sim mean = 0.99999988。但为避免偏差，全部走同一路径。
 
 5. **NaN 防护应该是多层防御**:
-   - embedding 层：检测 + 替换
-   - 聚类层：检测 + 标记
-   - 选择层：过滤
-   - 即使修复了根因，防护层仍需保留
+   - attention 层：禁用 TND，使用稳定 fallback
+   - embedding 层：检测 NaN → 逐条重试（bs=1）→ 仍 NaN 则 raise
+   - 聚类层：零向量 → label -1（安全网，理论上不再触发）
+   - 选择层：只选 label ≥ 0（安全网）
 
 ---
 
@@ -219,8 +244,8 @@ batch_size = max(batch_size, 512)     # 强制 ≥512（关键）
 
 | 文件 | 说明 |
 |------|------|
-| `src/climbmix/core/embedding_cluster.py` | fake xformers (lines 21-127), `embed_documents` (line 153), `cluster_embeddings_faiss` (line 608) |
+| `src/climbmix/core/embedding_cluster.py` | fake xformers (lines 21-127, `_HAS_NPU_FA=False`), `embed_documents` (line 157, NaN retry bs=1), streaming worker (line 410, NaN retry bs=1) |
 | `src/climbmix/core/cluster_merge.py` | `compute_cluster_quality` (line 32), `prune_clusters` (line 76), `merge_clusters_by_distance` (line 128) |
 | `src/climbmix/core/discovery.py` | `_assign_remaining_by_domain` (line 116) |
-| `scripts/diagnose_nan3.py` | 生产诊断脚本（单次加载，fp32→fp16 切换） |
-| `docs/embedding_performance.md` | embedding 性能优化记录（npu_fusion_attention 1.32x 加速） |
+| `scripts/diagnostics/diagnose_root_cause.py` | 根因诊断脚本（TND vs fallback, 5 runs, 偏差评估） |
+| `docs/embedding_performance.md` | embedding 性能优化记录 |
