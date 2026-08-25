@@ -13,7 +13,7 @@
 source /usr/local/Ascend/ascend-toolkit/set_env.sh 2>/dev/null || true
 set -euo pipefail
 
-CLIMBMIX_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+CLIMBMIX_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 export PYTHONPATH="${CLIMBMIX_DIR}/src:${PYTHONPATH:-}"
 export DATA_DIR="${DATA_DIR:-/home/ma-user/work/100B_stem_parquet_filtered}"
 
