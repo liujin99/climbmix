@@ -55,25 +55,19 @@ except ImportError:
             return t.transpose(1, 2).contiguous() if need_transpose else t
 
         if isinstance(attn_bias, _BlockDiagonalMask):
-            # Manual fp32 attention — bypass NPU SDPA entirely.
-            # NaN diagnostic: check inputs and outputs.
+            # Always use fallback path (pad + bool mask SDPA) for all docs.
+            # This ensures identical computation path for batch=512 and batch=1,
+            # eliminating any bias from different attention kernels.
             qs_list = attn_bias.q_seqlen
             ks_list = attn_bias.kv_seqlen
             n = len(qs_list)
             _, _, H, D = q.shape
 
-            # Diagnostic: check if Q/K/V already have NaN (model forward pass broken)
-            q_in_nan = torch.isnan(q).any().item()
-            k_in_nan = torch.isnan(k).any().item()
-            v_in_nan = torch.isnan(v).any().item()
-            if q_in_nan or k_in_nan or v_in_nan:
-                print(f"  [Attn DIAG] NaN in INPUT! q={q_in_nan} k={k_in_nan} v={v_in_nan} dtype={q.dtype}", flush=True)
-
             max_s = max(qs_list)
             max_ks = max(ks_list)
             q_pad = torch.zeros(n, max_s, H, D, dtype=q.dtype, device=q.device)
             k_pad = torch.zeros(n, max_ks, H, D, dtype=k.dtype, device=k.device)
-            v_pad = torch.zeros(n, max_ks, H, D, dtype=v.dtype, device=q.device)
+            v_pad = torch.zeros(n, max_ks, H, D, dtype=v.dtype, device=v.device)
             kmask = torch.zeros(n, 1, max_s, max_ks, dtype=torch.bool, device=q.device)
             q_off = k_off = 0
             for i, (qs_i, ks_i) in enumerate(zip(qs_list, ks_list)):
@@ -83,23 +77,11 @@ except ImportError:
                 kmask[i, 0, :, :ks_i] = True
                 q_off += qs_i
                 k_off += ks_i
-
-            # Non-chunked fp32 attention (batch_size=64, so n<=64, no OOM)
-            q_f = q_pad.transpose(1, 2)  # (n, H, max_s, D)
-            k_f = k_pad.transpose(1, 2)  # (n, H, max_ks, D)
-            v_f = v_pad.transpose(1, 2)  # (n, H, max_ks, D)
-            scale = D ** 0.5
-            scores = torch.matmul(q_f, k_f.transpose(-2, -1)) / scale
-            scores = scores.masked_fill(~kmask, torch.finfo(torch.float32).min)
-            attn = torch.softmax(scores, dim=-1)
-            out = torch.matmul(attn, v_f)  # (n, H, max_s, D)
+            out = _F.scaled_dot_product_attention(
+                q_pad.transpose(1, 2), k_pad.transpose(1, 2), v_pad.transpose(1, 2),
+                attn_mask=kmask, dropout_p=p
+            )
             out = out.transpose(1, 2)  # (n, max_s, H, D)
-
-            # Diagnostic: check output
-            out_nan = torch.isnan(out).any().item()
-            if out_nan:
-                print(f"  [Attn DIAG] NaN in OUTPUT! (input was clean={not (q_in_nan or k_in_nan or v_in_nan)})", flush=True)
-
             chunks = [out[i, :qs_i].unsqueeze(0) for i, qs_i in enumerate(qs_list)]
             return torch.cat(chunks, dim=1)  # (1, total_S, H, D)
 
@@ -208,10 +190,10 @@ def embed_documents(
                 t0 = time.time()
                 model = _load_model(model_name, "npu")
                 model.eval()
-                model.float()
+                model.half()
                 model.max_seq_length = 512
-                batch_size = min(batch_size, 64)
-                print(f"[Embed] Model loaded in {time.time() - t0:.1f}s (fp32+manual_attn, msl=512, bs={batch_size})")
+                batch_size = max(batch_size, 512)
+                print(f"[Embed] Model loaded in {time.time() - t0:.1f}s (fp16, msl=512, bs={batch_size})")
             except Exception as e:
                 print(f"[Embed] NPU embedding failed ({e}), falling back to CPU")
                 actual_device = "cpu"
@@ -322,8 +304,8 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
     model = _load_model_stream(model_name, "npu")
     model.eval()
     model.max_seq_length = truncate_len
-    model.float()
-    print(f"[NPU {worker_id}] Model loaded (fp32+manual_attn, max_seq_len={truncate_len})", flush=True)
+    model.half()
+    print(f"[NPU {worker_id}] Model loaded (fp16, max_seq_len={truncate_len})", flush=True)
 
     all_emb = np.memmap(memmap_path, dtype=np.float32, mode='r+',
                         shape=(total_docs, emb_dim))
