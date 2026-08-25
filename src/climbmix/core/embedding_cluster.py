@@ -56,14 +56,18 @@ except ImportError:
 
         if isinstance(attn_bias, _BlockDiagonalMask):
             # Manual fp32 attention — bypass NPU SDPA entirely.
-            # NPU SDPA broken for fp16/bf16. bf16 model also broken (2000 NaN).
-            # fp16 model had 464 NaN from weight overflow -> inf Q/K/V.
-            # fp32 model: no overflow, no SDPA, should be 0 NaN.
-            # Chunked (64 docs) to limit fp32 scores memory.
+            # NaN diagnostic: check inputs and outputs.
             qs_list = attn_bias.q_seqlen
             ks_list = attn_bias.kv_seqlen
             n = len(qs_list)
             _, _, H, D = q.shape
+
+            # Diagnostic: check if Q/K/V already have NaN (model forward pass broken)
+            q_in_nan = torch.isnan(q).any().item()
+            k_in_nan = torch.isnan(k).any().item()
+            v_in_nan = torch.isnan(v).any().item()
+            if q_in_nan or k_in_nan or v_in_nan:
+                print(f"  [Attn DIAG] NaN in INPUT! q={q_in_nan} k={k_in_nan} v={v_in_nan} dtype={q.dtype}", flush=True)
 
             max_s = max(qs_list)
             max_ks = max(ks_list)
@@ -80,22 +84,22 @@ except ImportError:
                 q_off += qs_i
                 k_off += ks_i
 
-            CHUNK = 64
+            # Non-chunked fp32 attention (batch_size=64, so n<=64, no OOM)
+            q_f = q_pad.transpose(1, 2)  # (n, H, max_s, D)
+            k_f = k_pad.transpose(1, 2)  # (n, H, max_ks, D)
+            v_f = v_pad.transpose(1, 2)  # (n, H, max_ks, D)
             scale = D ** 0.5
-            out_list = []
-            for start in range(0, n, CHUNK):
-                end = min(start + CHUNK, n)
-                q_c = q_pad[start:end].transpose(1, 2)  # (c, H, max_s, D)
-                k_c = k_pad[start:end].transpose(1, 2)  # (c, H, max_ks, D)
-                v_c = v_pad[start:end].transpose(1, 2)  # (c, H, max_ks, D)
-                m_c = kmask[start:end]  # (c, 1, max_s, max_ks)
-                scores = torch.matmul(q_c, k_c.transpose(-2, -1)) / scale
-                scores = scores.masked_fill(~m_c, torch.finfo(torch.float32).min)
-                attn = torch.softmax(scores, dim=-1)
-                out_c = torch.matmul(attn, v_c)  # (c, H, max_s, D)
-                out_list.append(out_c.transpose(1, 2))  # (c, max_s, H, D)
+            scores = torch.matmul(q_f, k_f.transpose(-2, -1)) / scale
+            scores = scores.masked_fill(~kmask, torch.finfo(torch.float32).min)
+            attn = torch.softmax(scores, dim=-1)
+            out = torch.matmul(attn, v_f)  # (n, H, max_s, D)
+            out = out.transpose(1, 2)  # (n, max_s, H, D)
 
-            out = torch.cat(out_list, dim=0)  # (n, max_s, H, D)
+            # Diagnostic: check output
+            out_nan = torch.isnan(out).any().item()
+            if out_nan:
+                print(f"  [Attn DIAG] NaN in OUTPUT! (input was clean={not (q_in_nan or k_in_nan or v_in_nan)})", flush=True)
+
             chunks = [out[i, :qs_i].unsqueeze(0) for i, qs_i in enumerate(qs_list)]
             return torch.cat(chunks, dim=1)  # (1, total_S, H, D)
 
@@ -206,7 +210,7 @@ def embed_documents(
                 model.eval()
                 model.float()
                 model.max_seq_length = 512
-                batch_size = max(batch_size, 512)
+                batch_size = min(batch_size, 64)
                 print(f"[Embed] Model loaded in {time.time() - t0:.1f}s (fp32+manual_attn, msl=512, bs={batch_size})")
             except Exception as e:
                 print(f"[Embed] NPU embedding failed ({e}), falling back to CPU")
