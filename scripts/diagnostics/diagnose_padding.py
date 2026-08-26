@@ -57,8 +57,6 @@ print("Test 1: 2 short sentences, no padding (seq_len=8)")
 print(f"{'='*70}")
 
 texts_short = ["This is a test sentence.", "Another sentence here."]
-tok_res = tok(texts_short, padding=False, truncation=True, max_length=512, return_tensors="pt")
-# Pad manually to equal length (both 8, no padding needed)
 tok_res = tok(texts_short, padding=True, truncation=True, max_length=512, return_tensors="pt")
 input_ids = tok_res["input_ids"].to("npu")
 attn_mask = tok_res["attention_mask"].to("npu")
