@@ -117,6 +117,42 @@ except ImportError:
     sys.modules["xformers.ops.fmha.attn_bias"] = _attn_bias_mod
 
 
+def _repair_stella_buffers(model):
+    """Re-init stella's non-persistent buffers corrupted at load on torch_npu.
+
+    stella registers position_ids, inv_freq, cos_cached, sin_cached as
+    persistent=False, so they're absent from the checkpoint. On torch_npu
+    these end up holding uninitialized heap memory, causing OOB indexing
+    in rope_cos[position_ids] -> NaN embeddings.
+    """
+    import torch
+    try:
+        inner = model[0].model          # SentenceTransformer[0].model -> NewModel
+        embeddings = inner.embeddings
+        cfg = inner.config
+        device = inner.device
+    except (AttributeError, IndexError, TypeError):
+        return  # not a stella model; nothing to do
+
+    max_pos = cfg.max_position_embeddings
+
+    # position_ids — re-register as arange on the correct device
+    embeddings.register_buffer(
+        "position_ids", torch.arange(max_pos, device=device), persistent=False
+    )
+
+    # rotary_emb (inv_freq, cos_cached, sin_cached) — re-create via the
+    # model's own _init_rope (handles base RoPE and NTK scaling correctly),
+    # then move to device.  This rebuilds all three non-persistent buffers.
+    embeddings._init_rope(cfg)
+    embeddings.rotary_emb = embeddings.rotary_emb.to(device)
+
+    # Sanity check
+    assert torch.equal(embeddings.position_ids,
+                       torch.arange(max_pos, device=device)), \
+        "position_ids repair failed — still not arange"
+
+
 def embed_documents(
     texts: List[str],
     model_name: str = "NovaSearch/stella_en_400M_v5",
@@ -190,6 +226,7 @@ def embed_documents(
                 t0 = time.time()
                 model = _load_model(model_name, "npu")
                 model.eval()
+                _repair_stella_buffers(model)
                 model.half()
                 model.max_seq_length = 512
                 batch_size = max(batch_size, 512)
@@ -214,6 +251,7 @@ def embed_documents(
         print(f"[Embed] Loading model: {model_name} (device={actual_device})")
         t0 = time.time()
         model = _load_model(model_name, actual_device)
+        _repair_stella_buffers(model)
         print(f"[Embed] Model loaded in {time.time() - t0:.1f}s")
 
     safe_texts = [t if t and len(t.strip()) > 0 else "empty" for t in texts]
@@ -303,6 +341,7 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
     print(f"[NPU {worker_id}] Loading model...", flush=True)
     model = _load_model_stream(model_name, "npu")
     model.eval()
+    _repair_stella_buffers(model)
     model.max_seq_length = truncate_len
     model.half()
     print(f"[NPU {worker_id}] Model loaded (fp16, max_seq_len={truncate_len})", flush=True)
