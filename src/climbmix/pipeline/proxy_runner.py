@@ -558,6 +558,21 @@ class ProxyRunner:
             "--lr-scale", str(self.proxy_lr_scale),
             "--warmup-ratio", str(self.proxy_warmup),
             "--warmdown-ratio", str(self.proxy_warmdown),
+            # Base checkpoints save optimizer state as PER-RANK SHARDS
+            # (optim_<step>_rank<r>.pt; 8-rank pretrain -> lm_head/wte
+            # moments are [vocab/8, n_embd]). This proxy runs at a different
+            # world size (npu_per_exp), and torch's load_state_dict does NOT
+            # shape-check state tensors: the mismatched shard is silently
+            # assigned and explodes at the first AdamW lerp_ (aclnnInplaceLerp
+            # EZ1001 "32768 and 4096 cannot broadcast", speedrun 2026-08-26).
+            # Fresh optimizer state is also the CLIMB-correct semantics: proxy
+            # experiments are short fine-tunes compared ACROSS mixtures, so
+            # every candidate must get identical (cold) optimizer state.
+            # LR inheritance is unaffected: lrs come from the pretrain meta
+            # (user_config), and the batch_ratio LR adjustment inside the
+            # load_optimizer block is a no-op here (proxy inherits
+            # total_batch_size from the same checkpoint).
+            "--load-optimizer", "0",
             "--data-dir", mixture_data_dir,
         ]
         return cmd
