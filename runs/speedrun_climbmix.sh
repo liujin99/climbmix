@@ -229,6 +229,9 @@ link_dir="$NANOCHAT_BASE_DIR/base_checkpoints/$CLIMB_TAG"
 if [ -f "$OUTPUT_DIR/.done_mid_train_climb" ]; then
     echo "  mid_train climb: already done, skip"
 else
+    # Clean a stale/broken symlink from a previous crashed attempt: a broken
+    # link fails `[ -e ]` yet still blocks ln -s (EEXIST) under set -e.
+    if [ -L "$link_dir" ] && [ ! -e "$link_dir" ]; then rm -f "$link_dir"; fi
     [ -e "$link_dir" ] || ln -s "$NANOCHAT_BASE_DIR/base_checkpoints/d${TARGET_DEPTH}" "$link_dir"
     # Clear partial checkpoints from a crashed attempt (whole-run atomicity)
     rm -rf "$NANOCHAT_BASE_DIR/mid_checkpoints/$CLIMB_TAG"
@@ -241,10 +244,12 @@ else
         --eval-benchmarks="$EVAL_BENCHMARKS" \
         --data-dir="$CLIMB_DATA" 2>&1 | tee "$OUTPUT_DIR/mid_train_climb.log" ) || {
         echo "✗ Target mid_train FAILED"
-        [ -L "$link_dir" ] && rm "$link_dir"
+        if [ -L "$link_dir" ]; then rm -f "$link_dir"; fi
         exit 1
     }
-    [ -L "$link_dir" ] && rm "$link_dir"
+    # NOT `[ -L ] && rm`: a non-symlink link_dir would return 1 here, kill the
+    # script under set -e, and leave .done unwritten → retrain on every resume.
+    if [ -L "$link_dir" ]; then rm -f "$link_dir"; fi
     touch "$OUTPUT_DIR/.done_mid_train_climb"
 fi
 echo "✓ Target training complete"

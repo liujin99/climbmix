@@ -43,6 +43,14 @@ from climbmix.sampling.data_selector import select_data_by_mixture
 
 
 class ProxyRunner:
+    # Process-wide: base_eval.py writes its output CSV into one SHARED
+    # $NANOCHAT_BASE_DIR/base_eval/ directory under a step-only name
+    # (mid_model_{step:06d}.csv — no model tag; base_eval.py:462,537), and
+    # parallel proxy experiments all finish at the same final step, so two
+    # concurrent evals overwrite each other's CSV and the wrong scores get
+    # attributed silently. Evals must therefore be serialized across all
+    # threads; training stays parallel. See run_experiment.
+    _eval_lock = threading.Lock()
 
     def __init__(
         self,
@@ -202,10 +210,21 @@ class ProxyRunner:
                                         nproc_per_node=nproc_per_node,
                                         master_port=master_port)
         print(f"  [Exp {experiment_id}] base_eval: {' '.join(eval_cmd)}")
-        eval_start_time = time.time()
-        eval_rc = self._run_subprocess(eval_cmd, exp_dir, "eval",
-                                       device_ids=device_ids, master_port=master_port)
-        eval_end_time = time.time()
+        # Eval section is serialized via _eval_lock (see its definition):
+        # purge leftover CSVs, run eval, then move the fresh CSV into exp_dir
+        # before any other eval can overwrite/claim it. The old mtime-window
+        # heuristic mis-attributed scores whenever two evals finished within
+        # the same ±60s window — i.e. always, in parallel mode.
+        with ProxyRunner._eval_lock:
+            self._purge_stale_eval_csvs()
+            eval_rc = self._run_subprocess(eval_cmd, exp_dir, "eval",
+                                           device_ids=device_ids, master_port=master_port)
+            if eval_rc == 0:
+                csv_path = self._claim_eval_csv(exp_dir, model_tag)
+            else:
+                csv_path = None
+                # Remove a partial CSV the failed eval may have written.
+                self._purge_stale_eval_csvs()
         if eval_rc != 0:
             raise RuntimeError(
                 f"base_eval failed (rc={eval_rc}) for experiment {experiment_id}, "
@@ -213,9 +232,7 @@ class ProxyRunner:
 
         self._copy_mid_checkpoint(model_tag, exp_dir)
         per_task, val_accuracy, stem_metric, per_task_nlls, stem_nll = \
-            self._parse_eval_results(model_tag, exp_dir,
-                                     eval_start=eval_start_time,
-                                     eval_end=eval_end_time)
+            self._parse_eval_results(csv_path)
 
         elapsed = time.time() - t_start
 
@@ -604,70 +621,66 @@ class ProxyRunner:
 
         return proc.returncode
 
-    @staticmethod
-    def _locate_eval_csv(
-        csv_dir: str,
-        model_tag: str,
-        eval_start: Optional[float] = None,
-        eval_end: Optional[float] = None,
-    ) -> Optional[str]:
-        """Locate the base_eval CSV produced by this experiment (3-tier strategy).
+    def _purge_stale_eval_csvs(self) -> None:
+        """Delete leftover mid_model_*.csv in the shared base_eval dir.
 
-        1. mid_model_* files whose filename contains model_tag (newest by mtime)
-        2. mid_model_* files modified within our eval window [start-60s, end+60s]
-           (newest by mtime)
-        3. globally newest mid_model_* file (last-resort fallback)
-
-        Only considers nanochat's own ``mid_model_*`` outputs, so archive copies
-        named ``{model_tag}.csv`` never shadow a fresh result.
+        Any such file present at this point belongs to a previous eval that
+        crashed or failed to claim its output — successful evals move their
+        CSV into their own exp dir, so nothing of value is ever deleted.
+        Must be called under _eval_lock.
         """
+        csv_dir = os.path.join(self.nanochat_base_dir, "base_eval")
         try:
             names = [f for f in os.listdir(csv_dir)
-                     if f.endswith(".csv") and f.startswith("mid_model_")]
+                     if f.startswith("mid_model_") and f.endswith(".csv")]
         except OSError:
-            return None
+            return
+        for f in names:
+            try:
+                os.remove(os.path.join(csv_dir, f))
+            except OSError:
+                pass
+
+    def _claim_eval_csv(self, exp_dir: str, model_tag: str) -> Optional[str]:
+        """Move the CSV written by THIS eval into exp_dir (under _eval_lock).
+
+        base_eval.py names its output f"{model_slug}.csv" where
+        model_slug = f"{model_type}_model_{step:06d}" — the step is the same
+        for every proxy experiment, so the shared filename cannot identify
+        the experiment that produced it. Under _eval_lock, the newest (and
+        only) mid_model_*.csv after our subprocess returned is unambiguously
+        ours; moving it out guarantees no later eval can claim it, and
+        resume/debug has a per-experiment record at eval_{model_tag}.csv.
+        """
+        csv_dir = os.path.join(self.nanochat_base_dir, "base_eval")
+        try:
+            names = [f for f in os.listdir(csv_dir)
+                     if f.startswith("mid_model_") and f.endswith(".csv")]
+        except OSError:
+            names = []
         if not names:
+            print(f"  [Eval] WARNING: base_eval exited 0 but wrote no CSV in "
+                  f"{csv_dir} — scores for {model_tag} will be NaN")
             return None
+        newest = max(names,
+                     key=lambda f: os.path.getmtime(os.path.join(csv_dir, f)))
+        src = os.path.join(csv_dir, newest)
+        dst = os.path.join(exp_dir, f"eval_{model_tag}.csv")
+        shutil.move(src, dst)
+        print(f"  [Eval] Claimed {newest} -> {dst}")
+        return dst
 
-        paths = [os.path.join(csv_dir, f) for f in names]
-        mtimes = {p: os.path.getmtime(p) for p in paths}
-
-        tagged = [p for p in paths if model_tag in os.path.basename(p)]
-        if tagged:
-            return max(tagged, key=lambda p: mtimes[p])
-
-        if eval_start is not None:
-            slack = 60.0
-            end = eval_end if eval_end is not None else float("inf")
-            window = [p for p in paths
-                      if mtimes[p] >= eval_start - slack and mtimes[p] <= end + slack]
-            if window:
-                return max(window, key=lambda p: mtimes[p])
-
-        return max(paths, key=lambda p: mtimes[p])
-
-    def _parse_eval_results(
-        self,
-        model_tag: str,
-        exp_dir: str,
-        eval_start: Optional[float] = None,
-        eval_end: Optional[float] = None,
-    ) -> tuple:
+    def _parse_eval_results(self, csv_path: Optional[str]) -> tuple:
+        """Parse the eval CSV previously claimed into exp_dir by
+        _claim_eval_csv. csv_path=None (eval produced no readable output)
+        yields per_task=None — the search scores this experiment NaN."""
         per_task: Optional[Dict[str, float]] = None
         per_task_nlls: Optional[Dict[str, float]] = None
         val_accuracy: float = 0.0
         stem_metric: Optional[float] = None
         stem_nll: float = 0.0
 
-        csv_dir = os.path.join(self.nanochat_base_dir, "base_eval")
-
-        csv_path = self._locate_eval_csv(csv_dir, model_tag, eval_start, eval_end)
         if csv_path is not None:
-            import shutil
-            local_copy = os.path.join(exp_dir, f"eval_{model_tag}.csv")
-            shutil.copy2(csv_path, local_copy)
-            print(f"  [Eval] Using {os.path.basename(csv_path)}")
-
             per_task = {}
             per_task_nlls = {}
             with open(csv_path) as f:

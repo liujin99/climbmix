@@ -145,24 +145,43 @@ def generate_distribution_chart(
 
 
 def parse_eval_log(path: str) -> dict:
-    info = {"core_metric": None, "tasks": {}}
+    info = {"core_metric": None, "stem_metric": None, "stem_nll": None, "tasks": {}}
     if not path or not os.path.exists(path):
         return info
+    # base_eval.py prints (same line, print end=''):
+    #   "Evaluating: <task> (<n>-shot, type: <t>)... "
+    #   "accuracy: A | centered: C | nll: N | time: Ts"
+    # nll was added to the line later; treat it (and time) as optional so the
+    # pattern parses both old and new logs. A missing optional group is None.
     task_pat = re.compile(
-        r"Evaluating:\s+(.+?)\s+\(.*?\)\.\.\.\s+accuracy:\s+([\d.]+)\s+\|\s+centered:\s+([\d.-]+)\s+\|\s+time:\s+([\d.]+)s"
+        r"Evaluating:\s+(.+?)\s+\(.*?\)\.\.\.\s+accuracy:\s+([\d.]+)\s+\|\s+centered:\s+(-?[\d.]+)"
+        r"(?:\s+\|\s+nll:\s+(-?[\d.]+))?"
+        r"(?:\s+\|\s+time:\s+([\d.]+)s)?"
     )
-    core_pat = re.compile(r"CORE metric:\s+([\d.]+)")
+    core_pat = re.compile(r"CORE metric:\s+(-?[\d.]+)")
+    # Printed for --eval-benchmarks=stem (CORE only exists when all 22 DCLM
+    # core tasks ran): "STEM metric: X" / "STEM NLL: Y" — without these the
+    # whole Step 8 comparison showed N/A for every STEM-only eval.
+    stem_pat = re.compile(r"STEM metric:\s+(-?[\d.]+)")
+    stem_nll_pat = re.compile(r"STEM NLL:\s+(-?[\d.]+)")
     for line in open(path):
         m = task_pat.search(line)
         if m:
             info["tasks"][m.group(1)] = {
                 "accuracy": float(m.group(2)),
                 "centered": float(m.group(3)),
-                "time": float(m.group(4)),
+                "nll": float(m.group(4)) if m.group(4) is not None else None,
+                "time": float(m.group(5)) if m.group(5) is not None else None,
             }
         m = core_pat.search(line)
         if m:
             info["core_metric"] = float(m.group(1))
+        m = stem_pat.search(line)
+        if m:
+            info["stem_metric"] = float(m.group(1))
+        m = stem_nll_pat.search(line)
+        if m:
+            info["stem_nll"] = float(m.group(1))
     return info
 
 
@@ -177,6 +196,18 @@ def generate_midtrain_report(
     climb_eval = parse_eval_log(climb_eval_log)
     random_eval = parse_eval_log(random_eval_log)
 
+    # Aggregated metric: CORE only exists when all 22 DCLM core tasks ran;
+    # STEM-only evals (this pipeline's default) print "STEM metric" instead.
+    # Prefer CORE, fall back to STEM — never show N/A when we have a number.
+    if climb_eval["core_metric"] is not None or random_eval["core_metric"] is not None:
+        metric_name = "CORE"
+    else:
+        metric_name = "STEM (centered acc)"
+    climb_m = climb_eval["core_metric"] if climb_eval["core_metric"] is not None \
+        else climb_eval["stem_metric"]
+    random_m = random_eval["core_metric"] if random_eval["core_metric"] is not None \
+        else random_eval["stem_metric"]
+
     lines: List[str] = []
     lines.append("# CLIMB Mid-Training Validation Report")
     lines.append("")
@@ -186,35 +217,49 @@ def generate_midtrain_report(
     lines.append(f"**Random model:** `{random_model_tag}`")
     lines.append("")
 
-    lines.append("## CORE Metric Comparison")
+    lines.append(f"## {metric_name} Comparison")
     lines.append("")
-    climb_core = climb_eval["core_metric"]
-    random_core = random_eval["core_metric"]
-    lines.append(f"| Method | CORE metric |")
+    lines.append(f"| Method | {metric_name} |")
     lines.append(f"|---|---|")
-    lines.append(f"| CLIMB optimal | {climb_core:.4f} |" if climb_core else "| CLIMB optimal | N/A |")
-    lines.append(f"| Random baseline | {random_core:.4f} |" if random_core else "| Random baseline | N/A |")
-    if climb_core and random_core:
-        delta = climb_core - random_core
+    lines.append(f"| CLIMB optimal | {climb_m:.4f} |" if climb_m is not None else "| CLIMB optimal | N/A |")
+    lines.append(f"| Random baseline | {random_m:.4f} |" if random_m is not None else "| Random baseline | N/A |")
+    if climb_m is not None and random_m is not None:
+        delta = climb_m - random_m
         lines.append(f"| **Delta** | **{delta:+.4f}** |")
+    if metric_name.startswith("STEM") and (climb_eval["stem_nll"] is not None
+                                            or random_eval["stem_nll"] is not None):
+        lines.append("")
+        lines.append("| Method | STEM NLL |")
+        lines.append("|---|---|")
+        cn, rn = climb_eval["stem_nll"], random_eval["stem_nll"]
+        lines.append(f"| CLIMB optimal | {cn:.4f} |" if cn is not None else "| CLIMB optimal | N/A |")
+        lines.append(f"| Random baseline | {rn:.4f} |" if rn is not None else "| Random baseline | N/A |")
+        if cn is not None and rn is not None:
+            lines.append(f"| **Delta** | **{cn - rn:+.4f}** |")
     lines.append("")
 
     all_tasks = sorted(set(climb_eval["tasks"].keys()) | set(random_eval["tasks"].keys()))
     if all_tasks:
         lines.append("## Per-Task Breakdown")
         lines.append("")
-        lines.append("| Task | CLIMB accuracy | Random accuracy | Delta |")
-        lines.append("|---|---|---|---|")
+        # Centered accuracy is the paper's comparison metric (raw accuracy
+        # sits near chance on multiple-choice STEM tasks and hides differences).
+        lines.append("| Task | CLIMB acc | CLIMB centered | Random acc | Random centered | Δ centered |")
+        lines.append("|---|---|---|---|---|---|")
         for task in all_tasks:
-            ca = climb_eval["tasks"].get(task, {}).get("accuracy", None)
-            ra = random_eval["tasks"].get(task, {}).get("accuracy", None)
-            ca_str = f"{ca:.4f}" if ca else "N/A"
-            ra_str = f"{ra:.4f}" if ra else "N/A"
-            if ca and ra:
-                delta_str = f"{ca - ra:+.4f}"
+            ct = climb_eval["tasks"].get(task, {})
+            rt = random_eval["tasks"].get(task, {})
+            ca, ra = ct.get("accuracy"), rt.get("accuracy")
+            cc, rc = ct.get("centered"), rt.get("centered")
+            ca_str = f"{ca:.4f}" if ca is not None else "N/A"
+            ra_str = f"{ra:.4f}" if ra is not None else "N/A"
+            cc_str = f"{cc:.4f}" if cc is not None else "N/A"
+            rc_str = f"{rc:.4f}" if rc is not None else "N/A"
+            if cc is not None and rc is not None:
+                delta_str = f"{cc - rc:+.4f}"
             else:
                 delta_str = "N/A"
-            lines.append(f"| {task} | {ca_str} | {ra_str} | {delta_str} |")
+            lines.append(f"| {task} | {ca_str} | {cc_str} | {ra_str} | {rc_str} | {delta_str} |")
         lines.append("")
 
     report_text = "\n".join(lines)

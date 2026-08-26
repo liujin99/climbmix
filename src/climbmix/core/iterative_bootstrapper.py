@@ -74,9 +74,21 @@ class IterativeBootstrapper:
         return score_a < score_b
 
     def _best_index(self, scores: npt.NDArray[np.float64]) -> int:
+        """Index of the best FINITE score; 0 if none (caller guards).
+
+        NaN-safe: np.argmax/argmin on NaN-contaminated arrays return a NaN
+        slot (NaN 'wins' comparisons), which would present a failed
+        experiment as the iteration's best config.
+        """
+        scores = np.asarray(scores, dtype=np.float64)
+        if scores.size == 0:
+            return 0
+        finite = np.isfinite(scores)
+        if not finite.any():
+            return 0
         if self.metric_direction == "maximize":
-            return int(np.argmax(scores))
-        return int(np.argmin(scores))
+            return int(np.argmax(np.where(finite, scores, -np.inf)))
+        return int(np.argmin(np.where(finite, scores, np.inf)))
 
     def _save_state(self):
         if not self.state_path:
@@ -138,37 +150,58 @@ class IterativeBootstrapper:
         sigma2_noise = 0.25 / K (worst-case binomial variance).
         f = 1 - noise/between (can be negative when noise > between).
         w = max(w_floor, min(1, max(0, (1+f)/2))) — clamped to [w_floor, 1].
+
+        Unmeasured entries (failed experiments -> empty per-task dicts,
+        unparseable eval CSVs -> None) contribute NaN, never 0.0: a
+        fabricated 0.0 poisons every z-score, the SNR weight, and the
+        predictor, because 0.0 looks like a real measurement (observed in
+        speedrun 2026-08-26 17:35). A config's score is the mean over the
+        benchmarks it was actually measured on; NaN if it was measured on
+        none. NaN scores are dropped by predictor training (isfinite) and
+        skipped by best-config selection.
         """
         N = len(self._accumulated_per_benchmark)
         if N == 0:
             return np.array([], dtype=np.float64)
 
         benchmarks = self.config.val_tasks
-        per_config_scores = np.zeros(N, dtype=np.float64)
+        score_sum = np.zeros(N, dtype=np.float64)
+        score_cnt = np.zeros(N, dtype=np.int64)
 
         for b in benchmarks:
             accs = np.array([
-                (d[0] or {}).get(b, 0.0) for d in self._accumulated_per_benchmark
-            ])
+                (d[0] or {}).get(b, np.nan) for d in self._accumulated_per_benchmark
+            ], dtype=np.float64)
             nlls = np.array([
-                (d[1] or {}).get(b, 0.0) for d in self._accumulated_per_benchmark
-            ])
+                (d[1] or {}).get(b, np.nan) for d in self._accumulated_per_benchmark
+            ], dtype=np.float64)
 
-            acc_z = (accs - accs.mean()) / (accs.std() + 1e-12)
-            nll_z = -(nlls - nlls.mean()) / (nlls.std() + 1e-12)
+            valid = np.isfinite(accs) & np.isfinite(nlls)
+            n_valid = int(valid.sum())
+            if n_valid == 0:
+                print(f"    {b}: no valid measurements, skipping")
+                continue
+
+            acc_z = (accs - np.nanmean(accs)) / (np.nanstd(accs) + 1e-12)
+            nll_z = -(nlls - np.nanmean(nlls)) / (np.nanstd(nlls) + 1e-12)
 
             K = BENCHMARK_SIZES.get(b, 1000)
             sigma2_noise = 0.25 / K
-            sigma2_between = float(accs.var()) + 1e-12
+            sigma2_between = float(accs[valid].var()) + 1e-12
             f = 1.0 - sigma2_noise / sigma2_between
             w = max(self.w_floor, min(1.0, max(0.0, (1.0 + f) / 2.0)))
 
-            per_config_scores += w * acc_z + (1.0 - w) * nll_z
+            score_sum += np.where(valid, w * acc_z + (1.0 - w) * nll_z, 0.0)
+            score_cnt += valid
 
-            print(f"    {b}: w={w:.3f} (f={f:.3f}, noise={sigma2_noise:.6f}, between={sigma2_between:.6f})")
+            extra = f", {N - n_valid} unmeasured" if n_valid < N else ""
+            print(f"    {b}: w={w:.3f} (f={f:.3f}, noise={sigma2_noise:.6f}, "
+                  f"between={sigma2_between:.6f}{extra})")
 
-        per_config_scores /= len(benchmarks)
-        return per_config_scores
+        scores = np.full(N, np.nan, dtype=np.float64)
+        measured = score_cnt > 0
+        scores[measured] = score_sum[measured] / score_cnt[measured]
+        return scores
 
     def _refit_predictor(self) -> Tuple[npt.NDArray[np.float64], Optional[List[Any]], Optional[npt.NDArray[np.float64]]]:
         """(Re)train the predictor on all accumulated configs.
@@ -191,8 +224,6 @@ class IterativeBootstrapper:
         if not self._accumulated_configs:
             return all_scores, None, None
 
-        print(f"[Predictor] Training predictor on {len(self._accumulated_configs)} accumulated configs")
-
         if self.metric_direction == "minimize":
             predictor_targets = all_scores
         else:
@@ -202,6 +233,15 @@ class IterativeBootstrapper:
 
         train_configs = [c for c, v in zip(self._accumulated_configs, valid_mask) if v]
         train_targets = predictor_targets[valid_mask]
+
+        print(f"[Predictor] Training predictor on {len(train_configs)} valid "
+              f"of {len(self._accumulated_configs)} accumulated configs")
+
+        if not train_configs:
+            print("[Predictor] WARNING: no config has a finite score (all "
+                  "failed or unmeasured) — predictor not trained")
+            self._predictor = None
+            return all_scores, None, None
 
         n_total = len(train_configs)
         val_configs_split = None
@@ -354,6 +394,12 @@ class IterativeBootstrapper:
                 pass
             results = proxy_runner.run_batch(new_configs, **run_kwargs)
             self._raise_if_all_failed(results, iteration)
+            n_err = sum(1 for r in results if r.metadata.get("error"))
+            if n_err:
+                print(f"[Iter {iteration}] WARNING: {n_err}/{len(results)} experiments "
+                      f"failed — scored NaN (excluded from predictor training and "
+                      f"best-config selection; no meta.json written, so a resume "
+                      f"of this iteration re-runs them)")
             for r in results:
                 trained_configs.append(r.mixture_config)
                 self._accumulated_configs.append(r.mixture_config)
@@ -374,6 +420,17 @@ class IterativeBootstrapper:
 
         n_new = len(trained_configs)
         scores_arr = all_scores[-n_new:] if n_new > 0 else np.array([], dtype=np.float64)
+
+        if not np.isfinite(scores_arr).any():
+            # Mirrors _raise_if_all_failed for the no-error-but-unmeasured
+            # case (e.g. base_eval exited 0 without a parseable CSV): an
+            # iteration with zero measurable scores must not advance the
+            # search on garbage.
+            raise RuntimeError(
+                f"Iteration {iteration}: no experiment produced a measurable "
+                f"score (all failed or eval output unparseable). Check "
+                f"result/*/exp_*/mid_train.log and eval.log; the pending-config "
+                f"state makes resume re-run exactly this iteration.")
 
         best_idx = self._best_index(scores_arr)
         best_config = trained_configs[best_idx]

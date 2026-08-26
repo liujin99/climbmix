@@ -224,6 +224,10 @@ RANDOM_TAG="d${TARGET_DEPTH}_random_${EXP_NAME}"
 run_mid_train() {
     local data_dir="$1" tag="$2" name="$3"
     local link_dir="$NANOCHAT_BASE_DIR/base_checkpoints/$tag"
+    # Clean a stale/broken symlink from a previous crashed attempt BEFORE the
+    # `[ -e ] || ln -s`: a broken link fails `[ -e ]` yet still blocks ln -s
+    # (EEXIST), which kills the script under set -e.
+    if [ -L "$link_dir" ] && [ ! -e "$link_dir" ]; then rm -f "$link_dir"; fi
     [ -e "$link_dir" ] || ln -s "$NANOCHAT_BASE_DIR/base_checkpoints/d${TARGET_DEPTH}" "$link_dir"
     # Clear partial checkpoints from a crashed attempt (nanochat may otherwise
     # try to auto-resume from inconsistent state; whole-run atomicity instead)
@@ -235,7 +239,10 @@ run_mid_train() {
         --run="${name}_mid" --model-tag="$tag" \
         --eval-benchmarks="$EVAL_BENCHMARKS" \
         --data-dir="$data_dir" 2>&1 | tee "$OUTPUT_DIR/mid_train_${name}.log" )
-    [ -L "$link_dir" ] && rm "$link_dir"
+    # NOT `[ -L ] && rm` as the last statement: when link_dir is absent or not
+    # a symlink the function would return 1, and under set -e the script dies
+    # AFTER successful training with .done unwritten → retrain on every resume.
+    if [ -L "$link_dir" ]; then rm -f "$link_dir"; fi
 }
 
 if [ -f "$OUTPUT_DIR/.done_mid_train_climb" ]; then
