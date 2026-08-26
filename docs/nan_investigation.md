@@ -80,6 +80,14 @@ equals_arange= False    # ← 应为 True
 
 这解释了为什么在 NPU 上表现为 100% NaN 而非崩溃。
 
+### 3.6 责任归属
+
+| 环节 | 责任 | 说明 |
+|------|------|------|
+| stella 模型作者 | 无责 | `register_buffer(..., persistent=False)` 是 PyTorch 标准用法，契约是：不存 checkpoint，但 `__init__` 重新运行时会正确赋值。stella 只是"触发者"——恰好用了 `persistent=False` + RoPE 索引的组合。 |
+| PyTorch 本身 | 无责 | 在 CPU/CUDA 上 `persistent=False` 缓冲区的加载机制完全正常。 |
+| **torch_npu** | **全责** | 两层缺陷：(1) 加载 `trust_remote_code` 模型时，`persistent=False` 缓冲区的 `__init__` 重新初始化未正确执行，残留未初始化堆内存；(2) NPU 索引操作无 bounds check，越界静默返回 NaN 而非报 `IndexError`，掩盖了问题的真正来源。 |
+
 ---
 
 ## 4. 调查过程（排除的假设）
