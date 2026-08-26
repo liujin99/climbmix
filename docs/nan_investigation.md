@@ -198,12 +198,11 @@ RESULT: NaN=0/200 (0.0%) [PASS]
 
 ## 7. 诊断脚本
 
-调查过程中创建了大量中间诊断脚本（13 个），均在错误假设下编写（TND 内核、batch size、padding、warmup 等），已全部删除。仅保留以下 2 个：
+调查过程中创建了大量中间诊断脚本（14 个），均在错误假设下编写（TND 内核、batch size、padding、warmup 等），已全部删除。仅保留：
 
 | 脚本 | 说明 |
 |------|------|
-| `diagnose_env_test.py` | 最小验证脚本（200 docs），已更新调用 `_repair_stella_buffers`，用于回归测试 |
-| `diagnose_env_vars.sh` | 环境变量二分法脚本（已完成，排除环境因素，保留作为记录） |
+| `diagnose_env_test.py` | 最小验证脚本（200 docs），已调用 `_repair_stella_buffers`，用于回归测试 |
 
 ---
 
