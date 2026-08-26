@@ -107,6 +107,7 @@ def download_climbmix(data_dir, num_shards, num_workers=16):
         failed = [remaining[i] for i, r in enumerate(results) if not r]
         if not failed:
             print(f"  Round {round_idx}: all {len(remaining)} files downloaded")
+            remaining = []
             break
         print(f"  Round {round_idx}: {len(failed)} files still failed")
         remaining = failed

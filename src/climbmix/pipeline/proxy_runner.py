@@ -292,12 +292,14 @@ class ProxyRunner:
             batch_end = min(batch_start + n_parallel, len(configs))
             batch_size = batch_end - batch_start
             print(f"\n  [ProxyRunner] Batch {batch_start // n_parallel + 1}: "
-                  f"experiments {batch_start}..{batch_end - 1} ({batch_size} parallel)")
+                  f"experiments {experiment_id_base + batch_start}.."
+                  f"{experiment_id_base + batch_end - 1} ({batch_size} parallel)")
 
             with ThreadPoolExecutor(max_workers=batch_size) as pool:
                 futures = {}
                 for i in range(batch_size):
-                    exp_id = experiment_id_base + batch_start + i
+                    local_idx = batch_start + i
+                    exp_id = experiment_id_base + local_idx
                     group_id = i
                     dev_start = group_id * devices_per_exp
                     devices = list(range(dev_start, dev_start + devices_per_exp))
@@ -305,7 +307,7 @@ class ProxyRunner:
 
                     future = pool.submit(
                         self.run_experiment,
-                        configs[exp_id],
+                        configs[local_idx],
                         experiment_id=exp_id,
                         data_dir=data_dir,
                         output_dir=output_dir,
@@ -317,12 +319,13 @@ class ProxyRunner:
 
                 for future in as_completed(futures):
                     exp_id = futures[future]
+                    local_idx = exp_id - experiment_id_base
                     try:
-                        results[exp_id] = future.result()
+                        results[local_idx] = future.result()
                     except Exception as e:
                         print(f"  [Exp {exp_id}] FAILED: {e}")
-                        results[exp_id] = ProxyResult(
-                            mixture_config=configs[exp_id],
+                        results[local_idx] = ProxyResult(
+                            mixture_config=configs[local_idx],
                             validation_loss=float("inf"),
                             validation_accuracy=0.0,
                             validation_nll=float("inf"),
