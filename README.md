@@ -159,6 +159,14 @@ Both runners are resumable: **re-run the same command after an interruption.**
   tags (`d28_climb_myexp`) so parallel/sequential experiments never overwrite
   each other. Valid chars: `[A-Za-z0-9_-]`.
 - **Force fresh run**: change `EXP_NAME` or `rm -rf result/$EXP_NAME`.
+- **HF download endpoint**: `runs/*.sh` default `HF_ENDPOINT` to
+  `https://hf-mirror.com` (override: `HF_ENDPOINT=https://huggingface.co bash runs/...`).
+  The corporate proxy selectively refuses Python-issued CONNECT tunnels to
+  huggingface.co (90+ consecutive 503s over 80 min) while allowing both curl to
+  huggingface.co and Python to hf-mirror.com — the mirror serves identical
+  bytes, so downloads, Range resume and parquet validation work unchanged. One
+  variable covers ClimbMix shards (`dataset.py`) and `eval_stem.zip`
+  (`base_eval.py`); both read it at import time, so it must be set before launch.
 
 ## CLI Options
 

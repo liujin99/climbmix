@@ -53,6 +53,16 @@ NUM_NPU="${NUM_NPU:-8}"
 NPU_PER_EXP="${NPU_PER_EXP:-1}"
 OUTPUT_DIR="${OUTPUT_DIR:-$CLIMBMIX_DIR/result/$EXP_NAME}"
 
+# ── HF download endpoint ──
+# The corporate proxy (proxy.modelarts.com) selectively rejects Python's bare
+# CONNECT tunnels to huggingface.co (observed: 90+ consecutive 503s across two
+# independent runs / 80 min, while curl to the same host AND Python to
+# hf-mirror.com both succeeded). hf-mirror.com serves the same bytes (Range
+# resume verified, 206). Covers ClimbMix shards + eval_stem.zip (nanochat
+# reads HF_ENDPOINT at import time in dataset.py AND base_eval.py).
+# Override to use the origin: HF_ENDPOINT=https://huggingface.co bash runs/...
+export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
+
 # ── NPU Environment ──
 export OMP_NUM_THREADS=1 WANDB_MODE=offline NANOCHAT_BASE_DIR="$NANOCHAT_BASE_DIR"
 mkdir -p "$NANOCHAT_BASE_DIR"

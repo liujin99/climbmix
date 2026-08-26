@@ -18,6 +18,7 @@
 - **Eval CSV location**: 3-tier strategy (filename contains model_tag → mtime within eval window → global newest); failed evals skip parsing instead of reading stale CSVs
 - **nanochat-npu integration**: all training via subprocess torchrun, --device-type npu
 - **Self-contained scripts**: get_model_info.py and mix_general_data.py in climbmix/scripts/, no quadmix dependency
+- **HF_ENDPOINT defaults to hf-mirror.com in runs/*.sh**: corporate proxy selectively rejects Python CONNECT tunnels to huggingface.co (curl + Python-to-mirror both fine); mirror serves identical bytes; covers ClimbMix shards + eval_stem.zip; override with the env var
 - **Crash resume (A+B+C+D)**: fingerprint auto-reset (code/param change → archive stale output dir), shard-level embedding resume (memmap + per-worker progress ledgers), iteration-level search state (`search_state.json`, atomic, with pending-iteration configs), experiment-level reuse (`exp_XXXX/meta.json` rc=0/0 + weight match, globally unique exp ids), predictor refit on resume (search continues paper-faithfully incl. full-design-space selection), atomic writes + `.done` markers for shards/mix/sampled/cluster caches, per-target `.done` markers with partial-checkpoint cleanup. EXP_NAME isolates experiments (output dir + proxy/target tags)
 
 ## Resolved Design Decisions
