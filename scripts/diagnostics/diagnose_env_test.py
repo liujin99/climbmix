@@ -28,6 +28,7 @@ sample = [texts[i] for i in idx]
 from sentence_transformers import SentenceTransformer
 m = SentenceTransformer("NovaSearch/stella_en_400M_v5", device="npu", trust_remote_code=True)
 m.eval()
+climbmix.core.embedding_cluster._repair_stella_buffers(m)
 m.half()
 m.max_seq_length = 512
 
