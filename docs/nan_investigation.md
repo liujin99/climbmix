@@ -196,17 +196,14 @@ RESULT: NaN=0/200 (0.0%) [PASS]
 
 ---
 
-## 7. 关于旧诊断脚本
+## 7. 诊断脚本
 
-以下诊断脚本在调查过程中创建，现已过时（引用了已删除的 `ec._HAS_NPU_FA`）：
+调查过程中创建了大量中间诊断脚本（13 个），均在错误假设下编写（TND 内核、batch size、padding、warmup 等），已全部删除。仅保留以下 2 个：
 
-| 脚本 | 状态 | 说明 |
-|------|------|------|
-| `diagnose_root_cause.py` | 过期 | 引用 `ec._HAS_NPU_FA`（已删除），会 crash |
-| `diagnose_fallback_stability.py` | 过期 | 同上 |
-| `diagnose_env_test.py` | 已更新 | 已添加 `_repair_stella_buffers` 调用，可用 |
-| `diagnose_env_vars.sh` | 可用 | 环境变量二分法脚本（已完成使命，结果：全部 100% NaN，排除环境因素） |
-| 其他 `diagnose_*.py` | 历史参考 | 调查过程中的中间脚本，不再需要运行 |
+| 脚本 | 说明 |
+|------|------|
+| `diagnose_env_test.py` | 最小验证脚本（200 docs），已更新调用 `_repair_stella_buffers`，用于回归测试 |
+| `diagnose_env_vars.sh` | 环境变量二分法脚本（已完成，排除环境因素，保留作为记录） |
 
 ---
 
