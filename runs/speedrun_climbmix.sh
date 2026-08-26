@@ -9,7 +9,9 @@
 #    - 5 个 parquet 文件 (~580K docs)
 #    - configs=2,3,2 (7 个), proxy_steps=50, target_steps=50
 #    - 8 NPU 做 embedding, 1 NPU/experiment 做 proxy search
-#    - STEM only (不混 general data, 不做 random baseline)
+#    - 70% STEM + 30% ClimbMix general data (含 proxy 实验内混合 + Step 5 混合;
+#      首次运行会下载 3 个 ClimbMix 分片到 GENERAL_DATA_DIR, 之后复用缓存;
+#      该缓存也供 full run 复用)。不做 random baseline。
 #
 #  用法:  bash runs/speedrun_climbmix.sh
 # ═══════════════════════════════════════════════════════════════════════
@@ -25,6 +27,7 @@ DATA_DIR="${DATA_DIR:-/home/ma-user/work/100B_stem_parquet_filtered}"
 SPEED_DATA="/tmp/speedrun_data"
 NANOCHAT_DIR="${NANOCHAT_DIR:-/home/ma-user/work/nanochat-npu}"
 NANOCHAT_BASE_DIR="${NANOCHAT_BASE_DIR:-/home/ma-user/work/nanochat_model_dir}"
+GENERAL_DATA_DIR="${GENERAL_DATA_DIR:-$NANOCHAT_BASE_DIR/climbmix_shards}"
 
 PROXY_DEPTH=20
 TARGET_DEPTH=28
@@ -37,6 +40,7 @@ NUM_NPU=8
 NPU_PER_EXP=1
 EMBEDDING_SAMPLE_SIZE=2000
 EVAL_BENCHMARKS="stem"
+STEM_RATIO="${STEM_RATIO:-0.7}"
 PROXY_TARGET_TOKENS=10M
 TARGET_TOKENS=10M
 
@@ -101,7 +105,8 @@ python3 "$CLIMBMIX_DIR/scripts/run_climb.py" \
     --data-dir "$SPEED_DATA" \
     --nanochat-dir "$NANOCHAT_DIR" \
     --nanochat-base-dir "$NANOCHAT_BASE_DIR" \
-    --stem-ratio 1.0 \
+    --general-data-dir "$GENERAL_DATA_DIR" \
+    --stem-ratio "$STEM_RATIO" \
     --eval-benchmarks "$EVAL_BENCHMARKS" \
     --proxy-depth "$PROXY_DEPTH" \
     --proxy-num-iterations "$PROXY_NUM_ITERATIONS" \
@@ -141,10 +146,20 @@ python3 "$CLIMBMIX_DIR/scripts/prepare_shards.py" \
 echo "✓ Shards prepared: $(ls "$CLIMB_SHARDS"/shard_*.parquet 2>/dev/null | wc -l) files"
 
 # ═══════════════════════════════════════════════════════════════════════
-#  Step 5: Skip general data mixing (STEM only, stem_ratio=1.0)
+#  Step 5: Mix STEM + General Data (anti-forgetting, ratio=$STEM_RATIO)
+#  Tests: mix_general_data.py CLI (download cache + stream mixing + val 透传)
+#  输出 shard 的 row group 按 NUM_NPU 自适应 (DDP 安全)
 # ═══════════════════════════════════════════════════════════════════════
-echo -e "\n===== Step 5: Skip general data mixing (STEM only) =====\n"
-CLIMB_DATA="$CLIMB_SHARDS"
+echo -e "\n===== Step 5: Mix STEM + General Data (ratio=$STEM_RATIO) =====\n"
+
+CLIMB_MIXED="$OUTPUT_DIR/climb_mixed"
+NANOCHAT_REPO="$NANOCHAT_DIR" python3 "$CLIMBMIX_DIR/scripts/mix_general_data.py" \
+    --stem-dir "$CLIMB_SHARDS" --output-dir "$CLIMB_MIXED" \
+    --climbmix-dir "$GENERAL_DATA_DIR" \
+    --stem-ratio "$STEM_RATIO" --num-workers "$NUM_NPU" --num-npu "$NUM_NPU" \
+    || { echo "✗ Mix failed"; exit 1; }
+
+CLIMB_DATA="$CLIMB_MIXED"
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Step 6: Target Training (d28 mid_train, ${TARGET_STEPS} steps)
@@ -195,9 +210,10 @@ echo ""
 echo "  Verified code paths:"
 echo "    ✓ Embedding (fallback path, 0% NaN)"
 echo "    ✓ Clustering (FAISS K-means + merge)"
-echo "    ✓ Proxy search (ProxyRunner: mid_train + eval × 7 configs)"
+echo "    ✓ Proxy search (ProxyRunner: mix + mid_train + eval × 7 configs)"
 echo "    ✓ Data selection (mixture weights → sampled_dataset)"
 echo "    ✓ Shard preparation (prepare_shards.py)"
+echo "    ✓ General data mixing (mix_general_data.py, stem_ratio=$STEM_RATIO)"
 echo "    ✓ Target training (d${TARGET_DEPTH} mid_train, ${TARGET_STEPS} steps)"
 echo "    ✓ Target evaluation (base_eval)"
 echo ""

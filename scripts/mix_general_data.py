@@ -25,14 +25,25 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from tqdm import tqdm
 
-NANOCHAT_REPO = os.environ.get("NANOCHAT_REPO", "/home/liujin99/nanochat-npu")
-sys.path.insert(0, NANOCHAT_REPO)
-from nanochat.dataset import (
-    download_single_file,
-    stream_texts_uniform,
-    index_to_filename,
-    MAX_SHARD,
-)
+try:
+    from nanochat.dataset import (
+        download_single_file,
+        stream_texts_uniform,
+        index_to_filename,
+        MAX_SHARD,
+    )
+except ImportError:
+    # Direct CLI invocation (not imported by proxy/target runner): nanochat is
+    # not on sys.path yet. NANOCHAT_REPO must point at the nanochat-npu checkout
+    # (run scripts set it to $NANOCHAT_DIR on the NPU server).
+    NANOCHAT_REPO = os.environ.get("NANOCHAT_REPO", "/home/liujin99/nanochat-npu")
+    sys.path.insert(0, NANOCHAT_REPO)
+    from nanochat.dataset import (
+        download_single_file,
+        stream_texts_uniform,
+        index_to_filename,
+        MAX_SHARD,
+    )
 
 STEM_RATIO = 0.7
 BATCH_PER_FILE = 10000

@@ -12,7 +12,7 @@
 - **auto_detect_depth_info**: 3-tier fallback (GPTConfig from meta_*.json → _approx_scaling_params formula → DEPTH_INFO table)
 - **NPU support**: device_type=npu, embedding_cluster tries torch_npu first with CPU fallback (192 threads)
 - **Parallel proxy search**: --npu-per-exp 1 → 8 experiments concurrently on 8 NPUs
-- **Token caps**: --proxy-target-tokens / --target-tokens (default 2B in production, 10M in speedrun; human-readable "2B/10M/500K" syntax) — cuts per-experiment I/O ~145× in speedrun
+- **Token caps**: --proxy-target-tokens / --target-tokens (default 200M proxy / 1B target in production, 10M in speedrun; human-readable "2B/10M/500K" syntax) — caps per-experiment I/O and peak RAM (8 parallel read_texts)
 - **Seeded data selection**: cluster docs randomly permuted (seed = exp_id + 42) before token-budget prefix cut
 - **Val split hygiene**: last shard_*.parquet = held-out validation (train shards exclude val docs); DDP row-group sizing mirrors prepare_shards.py
 - **Eval CSV location**: 3-tier strategy (filename contains model_tag → mtime within eval window → global newest); failed evals skip parsing instead of reading stale CSVs
@@ -35,7 +35,7 @@
 - Confirm on remote: how nanochat base_eval.py names its CSV files (tag vs timestamp) — 3-tier fallback handles both, but tier-1 confirmation removes ambiguity under parallel experiments
 - Confirm on remote: mid_train val-shard convention (last shard = val, minimum val size)
 - Pull latest code on remote and run `bash runs/speedrun_climbmix.sh` (watch: NaN=0, K=100 clustering, 50-step train+eval)
-- Speedrun passes → run production `bash runs/run_climbmix.sh` (d20 search, 2B token caps)
+- Speedrun passes → run production `bash runs/run_climbmix.sh` (d20 search, 200M proxy / 1B target token caps)
 - Analyze results, write final report
 
 ## Known Limitations

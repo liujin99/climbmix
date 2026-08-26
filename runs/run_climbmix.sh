@@ -24,10 +24,15 @@ PROXY_DEPTH="${PROXY_DEPTH:-20}"
 TARGET_DEPTH="${TARGET_DEPTH:-28}"
 PROXY_NUM_ITERATIONS="${PROXY_NUM_ITERATIONS:-1000}"
 TARGET_STEPS="${TARGET_STEPS:-1000}"
-# Token caps for data selection. Pool ≈ 524M STEM tokens; production consumes
-# ~367M (70% of it), so 2B leaves ~5x headroom while cutting disk/IO ~50x.
-PROXY_TARGET_TOKENS="${PROXY_TARGET_TOKENS:-2B}"
-TARGET_TOKENS="${TARGET_TOKENS:-2B}"
+# Token caps for data selection (full pool ≈ 100B tokens / 116M docs — NOT capped means
+# every proxy exp would select the whole pool; that's the default 0, so always set these).
+# Proxy: 200M tokens/exp (~80-230K docs, ~1-2GB). 35 exps × 8 parallel: peak RAM ~18GB
+# (read_texts) and ~35-80GB disk total. Proxy trains 1000 iters × ~0.5-1M tokens ≈ 0.5-1B
+# tokens, so 200M data cycles 2.5-5x — same data:train ratio as the speedrun (10M/52M).
+# 2B/exp instead would peak 8×~23GB RAM (OOM risk) and churn 280-800GB of parquet.
+# Target: 1B tokens ≈ d28 anneal budget (1000 iters × ~1M) ≈ 1 epoch, no repetition.
+PROXY_TARGET_TOKENS="${PROXY_TARGET_TOKENS:-200M}"
+TARGET_TOKENS="${TARGET_TOKENS:-1B}"
 CONFIGS_PER_ITER="${CONFIGS_PER_ITER:-20,10,5}"
 K_ENHANCED="${K_ENHANCED:-10}"
 DISCOVERY_METHOD="${DISCOVERY_METHOD:-embedding_cluster}"
@@ -134,7 +139,7 @@ mix_one() {
     local stem_dir="$1" out_dir="$2" label="$3"
     [ -d "$stem_dir" ] || return 0
     [ "$(ls "$out_dir"/shard_*.parquet 2>/dev/null | wc -l)" -gt 0 ] && { echo "  $label: already mixed, skip"; return; }
-    python3 "$CLIMBMIX_DIR/scripts/mix_general_data.py" \
+    NANOCHAT_REPO="$NANOCHAT_DIR" python3 "$CLIMBMIX_DIR/scripts/mix_general_data.py" \
         --stem-dir "$stem_dir" --output-dir "$out_dir" \
         --climbmix-dir "$GENERAL_DATA_DIR" \
         --stem-ratio "$STEM_RATIO" --num-workers "$NUM_NPU" --num-npu "$NUM_NPU" \

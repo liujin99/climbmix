@@ -342,6 +342,13 @@ class ProxyRunner:
         val_texts = stem_texts[n_stem - n_val:]
 
         n_train = len(train_texts)
+        if n_train < 2 * nproc:
+            raise ValueError(
+                f"Exp {experiment_id}: only {n_train} train docs < 2*nproc ({2 * nproc}). "
+                f"The DDP dataloader assigns row groups round-robin per rank; some ranks "
+                f"would starve and hang before the first all_reduce. "
+                f"Raise --proxy-target-tokens (currently {self.proxy_target_tokens} tokens)."
+            )
         n_shards = max(1, (n_train + batch_per_file - 1) // batch_per_file)
         # Absorb a tiny remainder into the previous shard: a last shard with
         # < 2*nproc docs cannot provide one row group per rank -> DDP starvation.

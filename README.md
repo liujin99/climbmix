@@ -27,7 +27,7 @@ Iterative Bootstrapping Search:
   Iteration 1: Dirichlet sample 20 configs → d20 proxy train+eval → fit predictor
   Iteration 2: Predictor-guided 10 configs → d20 proxy train+eval → update predictor
   Iteration 3: Predictor-guided  5 configs → d20 proxy train+eval → final predictor
-  (8 experiments in parallel, 1 NPU each; token-capped data selection, default 2B)
+  (8 experiments in parallel, 1 NPU each; token-capped data selection, default 200M/exp)
   ↓
 Each proxy experiment: 70% STEM (by cluster weights) + 30% ClimbMix general
   (adaptive 3-50 shards, reverse download from shard 6542 → avoids pretrain overlap)
@@ -47,7 +47,7 @@ Output: report + sampled_dataset.parquet + target_result.json
 - **method A**: ProxyRunner/TargetRunner call nanochat `mid_train.py` + `base_eval.py` as subprocesses
 - **d20 proxy** (435.2M scaling, 1000 iterations) → **d28 target** (auto-detected from `meta_*.json`)
 - **8 parallel experiments**: `--npu-per-exp 1` runs 8 proxy experiments concurrently on 8 NPUs (set 0 = sequential, all NPUs per experiment)
-- **Token caps**: `--proxy-target-tokens 2B` / `--target-tokens 2B` cap per-experiment data selection (0 = all available; suffix syntax `2B/10M/500K` supported)
+- **Token caps**: `--proxy-target-tokens 200M` / `--target-tokens 1B` cap data selection (0 = all available — never leave 0 on the full 100B-token pool; suffix syntax `2B/10M/500K` supported)
 - **70% STEM + 30% ClimbMix**: adaptive shard count (`calc_climbmix_count`, clamped [3, 50]), not full 400B
 - **Reverse-order download**: shards from MAX_SHARD (6542) backwards, avoids overlap with pretrain (shards 0-999)
 - **Stream-based mixing**: `stream_texts_uniform` + `endless_generator`, memory-efficient
@@ -139,8 +139,8 @@ python scripts/run_climb.py --help
 --proxy-lr-scale 1.0      # Annealing LR scale (1.0 = continue from base)
 --proxy-warmup 0.0        # No re-warmup (CLIMB annealing)
 --proxy-warmdown 0.9      # 90% warmdown for annealing
---proxy-target-tokens 2B  # Per-experiment data cap (0 = all; accepts 2B/10M/500K/1.5B)
---target-tokens 2B        # Cap for final target data selection (0 = all)
+--proxy-target-tokens 200M # Per-experiment data cap (0 = all; accepts 2B/10M/500K/1.5B)
+--target-tokens 1B        # Cap for final target data selection (0 = all)
 --K-init 1000             # Initial K-means clusters before prune+merge
 --K-enhanced 10           # Target K after prune+merge (lower bound; distance-guarded)
 --configs-per-iter 20,10,5  # Search: 20 random + 10+5 predictor-guided
