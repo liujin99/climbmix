@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Minimal embedding test — called by diagnose_env_vars.sh with different env vars.
+"""Minimal embedding regression test — loads model, encodes 200 docs, reports NaN count.
 
-Loads model, encodes 200 docs, reports NaN count. Designed to be fast (~30s).
+Verifies _repair_stella_buffers fixes the position_ids buffer corruption that
+caused 100% NaN embeddings on torch_npu. Run after any change to model loading.
 """
 import os, sys, warnings
 warnings.filterwarnings("ignore")

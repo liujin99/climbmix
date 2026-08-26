@@ -7,7 +7,7 @@
 
 ## 1. 背景
 
-ClimbMix 流水线中，embedding 聚类阶段需要对 116M 文档进行向量化，使用 8×Ascend 910B4 NPU（32GB HBM/卡）并行推理 stella-base-uncased 模型。
+ClimbMix 流水线中，embedding 聚类阶段需要对 116M 文档进行向量化，使用 8×Ascend 910B4 NPU（32GB HBM/卡）并行推理 stella_en_400M_v5 模型。
 
 **性能目标**: 750 docs/s（ETA ~43h）
 
@@ -20,7 +20,7 @@ ClimbMix 流水线中，embedding 聚类阶段需要对 116M 文档进行向量�
 - **PyTorch**: 2.9.1 + torch_npu 2.9.0.post1
 - **CPU**: 192 vCPUs
 - **内存**: 1.5TB
-- **模型**: stella-base-uncased（768维, fp16, max_seq_len=512）
+- **模型**: stella_en_400M_v5（1024维, fp16, max_seq_len=512）
 - **数据**: 1000 个 parquet 文件，116M 文档，4 个 domain
 
 ---

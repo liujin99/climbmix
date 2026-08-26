@@ -86,7 +86,7 @@ equals_arange= False    # ← 应为 True
 
 ### 4.1 环境变量（排除）
 
-**脚本**: `scripts/diagnostics/diagnose_env_vars.sh`
+**脚本**: 环境变量二分法测试（脚本已删除，13 种配置全部 100% NaN）
 
 测试了 13 种环境变量配置（`ASCEND_FUSION_ENABLE`, `ASCEND_LAUNCH_BLOCKING`, `TASK_QUEUE_ENABLE` 等），全部 100% NaN。
 
@@ -225,7 +225,6 @@ RESULT: NaN=0/200 (0.0%) [PASS]
 | 文件 | 说明 |
 |------|------|
 | `src/climbmix/core/embedding_cluster.py` | `_repair_stella_buffers` (line 120), fake xformers (lines 21-117), `embed_documents` NPU/CPU 路径 (lines 229, 254), `_embed_streaming_worker` (line 344), NaN retry (lines 272-282) |
-| `scripts/diagnostics/diagnose_env_test.py` | 最小验证脚本（200 docs），已更新调用 `_repair_stella_buffers` |
-| `scripts/diagnostics/diagnose_env_vars.sh` | 环境变量二分法脚本（已完成，排除环境因素） |
+| `scripts/diagnostics/diagnose_env_test.py` | 最小验证脚本（200 docs），已调用 `_repair_stella_buffers`，用于回归测试 |
 | `runs/speedrun_climbmix.sh` | Speedrun 脚本（已验证 0 NaN 端到端通过） |
 | stella `modeling.py` (remote HF cache) | `NewEmbeddings.__init__` (register_buffer position_ids, persistent=False), `NewEmbeddings.forward` (rope_cos[position_ids]), `RotaryEmbedding.__init__` (register_buffer inv_freq/cos_cached/sin_cached, persistent=False) |
