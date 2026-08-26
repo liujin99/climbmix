@@ -74,8 +74,9 @@ with torch.no_grad():
 # Step 1b: Check what ST's Transformer module does
 print(f"\nStep 1b: ST Transformer module forward")
 with torch.no_grad():
-    # The ST Transformer module calls auto_model and processes output
-    st_trans_out = mod0(input_ids)
+    # ST Transformer module expects a features dict
+    features_in = {"input_ids": input_ids, "attention_mask": attention_mask}
+    st_trans_out = mod0(features_in)
     if isinstance(st_trans_out, dict):
         for k, v in st_trans_out.items():
             if isinstance(v, torch.Tensor):
@@ -92,11 +93,7 @@ print(f"  Pooling attrs: {[a for a in dir(pooling) if not a.startswith('_') and 
 # Simulate what ST does: pass transformer output to pooling
 with torch.no_grad():
     # ST passes features dict between modules
-    features = {}
-    if isinstance(st_trans_out, dict):
-        features = st_trans_out
-    else:
-        features['token_embeddings'] = st_trans_out
+    features = st_trans_out if isinstance(st_trans_out, dict) else {"token_embeddings": st_trans_out}
     features['attention_mask'] = attention_mask
     
     print(f"  Input to pooling:")
