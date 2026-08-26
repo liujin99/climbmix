@@ -157,6 +157,27 @@ def _repair_stella_buffers(model):
         "position_ids repair failed — still not arange"
 
 
+def _flush_device_cache(device: str, tag: str) -> None:
+    """Run gc and return the torch caching-allocator pool to the NPU driver.
+
+    torch's caching allocator never hands freed blocks back to the driver on
+    its own: without empty_cache() the HBM used by an fp16 bs=512 stella encode
+    stays attached to THIS process after the model goes out of scope. When the
+    caller is the long-lived pipeline main process, that pool (observed ~20GB
+    on device 0, 2026-08-26) starves every later mid_train/base_eval subprocess
+    on the same device — kernel loads fail with aclnnMean 207001 / EL0004
+    while the child itself reports only a few GB allocated. Callers must
+    `del model` (drop the last reference) BEFORE calling this.
+    """
+    import gc
+    gc.collect()
+    if device == "npu":
+        import torch
+        import torch_npu  # noqa: F401  (registers torch.npu)
+        torch.npu.empty_cache()
+        print(f"{tag} Embedding model released, NPU cache returned to driver")
+
+
 def embed_documents(
     texts: List[str],
     model_name: str = "NovaSearch/stella_en_400M_v5",
@@ -260,38 +281,46 @@ def embed_documents(
 
     safe_texts = [t if t and len(t.strip()) > 0 else "empty" for t in texts]
 
-    print(f"[Embed] Encoding {len(safe_texts)} documents (batch_size={batch_size})...")
-    t1 = time.time()
-    embeddings = model.encode(
-        safe_texts,
-        batch_size=batch_size,
-        show_progress_bar=True,
-        normalize_embeddings=True,
-    )
-    embeddings = np.array(embeddings, dtype=np.float32)
-    print(f"[Embed] Encoded {len(safe_texts)} docs in {time.time() - t1:.1f}s, dim={embeddings.shape[1]}")
+    try:
+        print(f"[Embed] Encoding {len(safe_texts)} documents (batch_size={batch_size})...")
+        t1 = time.time()
+        embeddings = model.encode(
+            safe_texts,
+            batch_size=batch_size,
+            show_progress_bar=True,
+            normalize_embeddings=True,
+        )
+        embeddings = np.array(embeddings, dtype=np.float32)
+        print(f"[Embed] Encoded {len(safe_texts)} docs in {time.time() - t1:.1f}s, dim={embeddings.shape[1]}")
 
-    n_nan = np.isnan(embeddings).any(axis=1).sum()
-    if n_nan > 0:
-        nan_indices = np.where(np.isnan(embeddings).any(axis=1))[0]
-        print(f"[Embed] {n_nan}/{len(safe_texts)} docs produced NaN, retrying with bs=1...")
-        for idx in nan_indices:
-            single = model.encode(
-                [safe_texts[idx]], batch_size=1, show_progress_bar=False,
-                normalize_embeddings=True)
-            embeddings[idx] = np.array(single[0], dtype=np.float32)
-        still_nan = np.isnan(embeddings).any(axis=1).sum()
-        if still_nan > 0:
-            raise RuntimeError(
-                f"{still_nan} docs still produce NaN after bs=1 retry — "
-                f"cannot recover, aborting to prevent data loss")
-        print(f"[Embed] All {n_nan} NaN docs recovered via bs=1 retry")
-    else:
-        print(f"[Embed] No NaN detected ({len(safe_texts)} docs)")
+        n_nan = np.isnan(embeddings).any(axis=1).sum()
+        if n_nan > 0:
+            nan_indices = np.where(np.isnan(embeddings).any(axis=1))[0]
+            print(f"[Embed] {n_nan}/{len(safe_texts)} docs produced NaN, retrying with bs=1...")
+            for idx in nan_indices:
+                single = model.encode(
+                    [safe_texts[idx]], batch_size=1, show_progress_bar=False,
+                    normalize_embeddings=True)
+                embeddings[idx] = np.array(single[0], dtype=np.float32)
+            still_nan = np.isnan(embeddings).any(axis=1).sum()
+            if still_nan > 0:
+                raise RuntimeError(
+                    f"{still_nan} docs still produce NaN after bs=1 retry — "
+                    f"cannot recover, aborting to prevent data loss")
+            print(f"[Embed] All {n_nan} NaN docs recovered via bs=1 retry")
+        else:
+            print(f"[Embed] No NaN detected ({len(safe_texts)} docs)")
 
-    if cache_path:
-        atomic_savez(cache_path, embeddings=embeddings)
-        print(f"[Embed] Cached embeddings to: {cache_path}")
+        if cache_path:
+            atomic_savez(cache_path, embeddings=embeddings)
+            print(f"[Embed] Cached embeddings to: {cache_path}")
+    finally:
+        # Release the model AND the allocator pool: this function runs inside
+        # the long-lived pipeline main process (2000-doc discovery sample);
+        # skipping the flush leaks ~20GB HBM on device 0 for the rest of the
+        # run (see _flush_device_cache).
+        del model
+        _flush_device_cache(actual_device, "[Embed]")
 
     return embeddings
 
@@ -591,10 +620,7 @@ def embed_texts_streaming(
     if n_npus > 1:
         print(f"[Embed-Stream] {n_npus} NPUs detected, using process-based parallelism")
         del model, dummy_emb
-        import gc
-        gc.collect()
-        import torch_npu
-        torch.npu.empty_cache()
+        _flush_device_cache(actual_device, "[Embed-Stream]")
 
         import multiprocessing as mp
         import threading
@@ -716,56 +742,62 @@ def embed_texts_streaming(
         except (json.JSONDecodeError, OSError, ValueError, TypeError):
             completed_ledger = []
 
-    print(f"[Embed-Stream] Streaming {n_shards} shards, batch_size={batch_size} "
-          f"({len(completed)} already embedded)")
-    docs_done = 0
-    batch_num = 0
-    for si, sinfo in enumerate(shard_infos):
-        if si in completed:
-            continue
-        shard_path = sinfo["path"]
-        start_idx = sinfo["start_idx"]
-        num_docs = sinfo["num_docs"]
+    try:
+        print(f"[Embed-Stream] Streaming {n_shards} shards, batch_size={batch_size} "
+              f"({len(completed)} already embedded)")
+        docs_done = 0
+        batch_num = 0
+        for si, sinfo in enumerate(shard_infos):
+            if si in completed:
+                continue
+            shard_path = sinfo["path"]
+            start_idx = sinfo["start_idx"]
+            num_docs = sinfo["num_docs"]
 
-        table = pq.read_table(shard_path, columns=[text_col], use_threads=True)
-        col = table.column(text_col)
-        shard_texts = [str(v) if v is not None else "" for v in col.to_pylist()]
-        del table, col
+            table = pq.read_table(shard_path, columns=[text_col], use_threads=True)
+            col = table.column(text_col)
+            shard_texts = [str(v) if v is not None else "" for v in col.to_pylist()]
+            del table, col
 
-        for j in range(0, len(shard_texts), batch_size):
-            batch = shard_texts[j:j + batch_size]
-            emb = model.encode(batch, show_progress_bar=False, normalize_embeddings=True)
-            all_embeddings[start_idx + j:start_idx + j + len(batch)] = emb
+            for j in range(0, len(shard_texts), batch_size):
+                batch = shard_texts[j:j + batch_size]
+                emb = model.encode(batch, show_progress_bar=False, normalize_embeddings=True)
+                all_embeddings[start_idx + j:start_idx + j + len(batch)] = emb
 
-            batch_num += 1
-            if batch_num <= 5 or batch_num % 50 == 0:
-                elapsed = time.time() - t1
-                done = docs_done + j + len(batch)
-                speed = done / elapsed if elapsed > 0 else 0
-                eta = (total_docs - done) / speed if speed > 0 else 0
-                print(f"  [Embed-Stream] batch {batch_num}: {done:,}/{total_docs:,} docs "
-                      f"({done / total_docs * 100:.1f}%), {speed:.0f} docs/s, "
+                batch_num += 1
+                if batch_num <= 5 or batch_num % 50 == 0:
+                    elapsed = time.time() - t1
+                    done = docs_done + j + len(batch)
+                    speed = done / elapsed if elapsed > 0 else 0
+                    eta = (total_docs - done) / speed if speed > 0 else 0
+                    print(f"  [Embed-Stream] batch {batch_num}: {done:,}/{total_docs:,} docs "
+                          f"({done / total_docs * 100:.1f}%), {speed:.0f} docs/s, "
+                          f"elapsed {elapsed:.0f}s, ETA {eta:.0f}s")
+
+            docs_done += num_docs
+            del shard_texts
+            _write_worker_progress(progress_path, completed_ledger, si)
+            elapsed = time.time() - t1
+            speed = docs_done / elapsed if elapsed > 0 else 0
+            eta = (total_docs - docs_done) / speed if speed > 0 else 0
+            if si % 10 == 0 or si == n_shards - 1:
+                print(f"[Embed-Stream] Shard {si + 1}/{n_shards}: {docs_done:,}/{total_docs:,} docs "
+                      f"({docs_done / total_docs * 100:.1f}%), {speed:.0f} docs/s, "
                       f"elapsed {elapsed:.0f}s, ETA {eta:.0f}s")
 
-        docs_done += num_docs
-        del shard_texts
-        _write_worker_progress(progress_path, completed_ledger, si)
         elapsed = time.time() - t1
-        speed = docs_done / elapsed if elapsed > 0 else 0
-        eta = (total_docs - docs_done) / speed if speed > 0 else 0
-        if si % 10 == 0 or si == n_shards - 1:
-            print(f"[Embed-Stream] Shard {si + 1}/{n_shards}: {docs_done:,}/{total_docs:,} docs "
-                  f"({docs_done / total_docs * 100:.1f}%), {speed:.0f} docs/s, "
-                  f"elapsed {elapsed:.0f}s, ETA {eta:.0f}s")
+        print(f"[Embed-Stream] Encoded {total_docs:,} docs in {elapsed:.1f}s "
+              f"({total_docs / elapsed:.0f} docs/s), dim={emb_dim}")
 
-    elapsed = time.time() - t1
-    print(f"[Embed-Stream] Encoded {total_docs:,} docs in {elapsed:.1f}s "
-          f"({total_docs / elapsed:.0f} docs/s), dim={emb_dim}")
-
-    if cache_path:
-        atomic_savez(cache_path, embeddings=all_embeddings)
-        print(f"[Embed-Stream] Cached embeddings to: {cache_path}")
-    _clear_partial_embedding_state(cache_dir, memmap_path)
+        if cache_path:
+            atomic_savez(cache_path, embeddings=all_embeddings)
+            print(f"[Embed-Stream] Cached embeddings to: {cache_path}")
+        _clear_partial_embedding_state(cache_dir, memmap_path)
+    finally:
+        # Same leak as embed_documents: the model's HBM pool must go back to
+        # the driver before this (long-lived) process spawns training jobs.
+        del model
+        _flush_device_cache(actual_device, "[Embed-Stream]")
 
     return np.array(all_embeddings)
 
