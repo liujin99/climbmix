@@ -188,6 +188,15 @@ class ProxyRunner:
         print(f"  [Exp {experiment_id}] mid_train: {' '.join(mid_cmd)}")
         mid_rc = self._run_subprocess(mid_cmd, exp_dir, "mid_train",
                                       device_ids=device_ids, master_port=master_port)
+        if mid_rc != 0:
+            # Fail-fast: a failed proxy training must never enter the search
+            # as a fake score (0.0 looks like a real measurement and silently
+            # poisons the predictor — observed in speedrun 2026-08-26 17:35).
+            # run_batch converts this raise into an inf result with the error
+            # recorded; resume re-runs the experiment.
+            raise RuntimeError(
+                f"mid_train failed (rc={mid_rc}) for experiment {experiment_id}, "
+                f"see {os.path.join(exp_dir, 'mid_train.log')}")
 
         eval_cmd = self._build_eval_cmd(model_tag,
                                         nproc_per_node=nproc_per_node,
@@ -197,16 +206,16 @@ class ProxyRunner:
         eval_rc = self._run_subprocess(eval_cmd, exp_dir, "eval",
                                        device_ids=device_ids, master_port=master_port)
         eval_end_time = time.time()
+        if eval_rc != 0:
+            raise RuntimeError(
+                f"base_eval failed (rc={eval_rc}) for experiment {experiment_id}, "
+                f"see {os.path.join(exp_dir, 'eval.log')}")
 
         self._copy_mid_checkpoint(model_tag, exp_dir)
-        if eval_rc == 0:
-            per_task, val_accuracy, stem_metric, per_task_nlls, stem_nll = \
-                self._parse_eval_results(model_tag, exp_dir,
-                                         eval_start=eval_start_time,
-                                         eval_end=eval_end_time)
-        else:
-            print(f"  [Exp {experiment_id}] Eval failed (rc={eval_rc}), skipping result parsing")
-            per_task, val_accuracy, stem_metric, per_task_nlls, stem_nll = None, 0.0, None, None, 0.0
+        per_task, val_accuracy, stem_metric, per_task_nlls, stem_nll = \
+            self._parse_eval_results(model_tag, exp_dir,
+                                     eval_start=eval_start_time,
+                                     eval_end=eval_end_time)
 
         elapsed = time.time() - t_start
 

@@ -259,6 +259,26 @@ class IterativeBootstrapper:
             offset += n
         return results
 
+    @staticmethod
+    def _raise_if_all_failed(results, iteration: int) -> None:
+        """Fail-fast when every experiment of a batch errored.
+
+        A batch whose experiments run on different NPUs with independent
+        configs cannot fail 100% for data reasons — an all-error batch means
+        the environment is broken (leaked NPU memory, missing checkpoint,
+        vanished data dir, ...). Fitting the predictor on that garbage and
+        'completing' the search anyway (observed in speedrun 2026-08-26 17:35:
+        7/7 mid_train failures silently scored 0.0) wastes hours and produces
+        a confident-looking but meaningless result. The pending-configs state
+        saved before the batch makes the resume re-run exactly these configs.
+        """
+        if results and all(r.metadata.get("error") for r in results):
+            raise RuntimeError(
+                f"All {len(results)} proxy experiments of iteration {iteration} "
+                f"failed — environment failure? Check result/*/exp_*/mid_train.log "
+                f"and 'npu-smi info' (leaked HBM shows as used memory with no "
+                f"process). Resume re-runs this iteration.")
+
     def run_iteration(
         self,
         iteration: int,
@@ -333,6 +353,7 @@ class IterativeBootstrapper:
             except (ValueError, TypeError):
                 pass
             results = proxy_runner.run_batch(new_configs, **run_kwargs)
+            self._raise_if_all_failed(results, iteration)
             for r in results:
                 trained_configs.append(r.mixture_config)
                 self._accumulated_configs.append(r.mixture_config)

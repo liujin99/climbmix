@@ -95,22 +95,30 @@ class TargetRunner:
         mid_cmd = self._build_mid_train_cmd(model_tag, mixture_data_dir)
         print(f"  [Target] mid_train: {' '.join(mid_cmd)}")
         mid_rc = self._run_subprocess(mid_cmd, target_dir, "mid_train")
+        if mid_rc != 0:
+            # Fail-fast: target training is the single most expensive stage;
+            # a silent rc!=0 here would leave the run "completing" without a
+            # trained model. Established semantics: target failure kills the
+            # run loudly (resume restarts the whole target stage).
+            raise RuntimeError(
+                f"target mid_train failed (rc={mid_rc}), "
+                f"see {os.path.join(target_dir, 'mid_train.log')}")
 
         eval_cmd = self._build_eval_cmd(model_tag)
         print(f"  [Target] base_eval: {' '.join(eval_cmd)}")
         eval_start_time = time.time()
         eval_rc = self._run_subprocess(eval_cmd, target_dir, "eval")
         eval_end_time = time.time()
+        if eval_rc != 0:
+            raise RuntimeError(
+                f"target base_eval failed (rc={eval_rc}), "
+                f"see {os.path.join(target_dir, 'eval.log')}")
 
         self._copy_mid_checkpoint(model_tag, target_dir)
-        if eval_rc == 0:
-            per_task, stem_metric, per_task_nlls, stem_nll = \
-                self._parse_eval_results(model_tag, target_dir,
-                                         eval_start=eval_start_time,
-                                         eval_end=eval_end_time)
-        else:
-            print(f"  [Target] Eval failed (rc={eval_rc}), skipping result parsing")
-            per_task, stem_metric, per_task_nlls, stem_nll = None, None, None, 0.0
+        per_task, stem_metric, per_task_nlls, stem_nll = \
+            self._parse_eval_results(model_tag, target_dir,
+                                     eval_start=eval_start_time,
+                                     eval_end=eval_end_time)
 
         elapsed = time.time() - t_start
 
