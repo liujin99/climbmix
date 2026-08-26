@@ -20,12 +20,14 @@ training backend via **method A** (subprocess calls).
 ```
 STEM Data Pool (100B parquet, 116M docs, 1000 shards)
   ↓
-Embedding Cluster (stella_en_400M_v5 → K-means K=21 → merge small clusters)
+Embedding Cluster (stella_en_400M_v5 → FAISS K-means K_init=1000 →
+  prune (threshold 3.0) + merge (distance 1.5) → K_enhanced=10)
   ↓
 Iterative Bootstrapping Search:
-  Iteration 1: Dirichlet sample 64 configs → d14 proxy train+eval → fit predictor
-  Iteration 2: Predictor-guided 32 configs → d14 proxy train+eval → update predictor
-  Iteration 3: Predictor-guided 16 configs → d14 proxy train+eval → final predictor
+  Iteration 1: Dirichlet sample 20 configs → d20 proxy train+eval → fit predictor
+  Iteration 2: Predictor-guided 10 configs → d20 proxy train+eval → update predictor
+  Iteration 3: Predictor-guided  5 configs → d20 proxy train+eval → final predictor
+  (8 experiments in parallel, 1 NPU each; token-capped data selection, default 2B)
   ↓
 Each proxy experiment: 70% STEM (by cluster weights) + 30% ClimbMix general
   (adaptive 3-50 shards, reverse download from shard 6542 → avoids pretrain overlap)
@@ -35,6 +37,7 @@ Predictor ranks candidates → optimal mixture α*
 Target training: d28 mid-train with α* + 30% ClimbMix (same mixing)
   ↓
 STEM benchmark eval (arc_easy, arc_challenge, mmlu_stem, gpqa_diamond, gsm8k_cot, math_cot_500)
+  + random-baseline comparison (same doc count, seed 42)
   ↓
 Output: report + sampled_dataset.parquet + target_result.json
 ```
@@ -42,10 +45,13 @@ Output: report + sampled_dataset.parquet + target_result.json
 ## Key Design Choices
 
 - **method A**: ProxyRunner/TargetRunner call nanochat `mid_train.py` + `base_eval.py` as subprocesses
-- **d14 proxy** (164.2M scaling, 500 iterations) → **d28 target** (auto-detected from `meta_*.json`)
+- **d20 proxy** (435.2M scaling, 1000 iterations) → **d28 target** (auto-detected from `meta_*.json`)
+- **8 parallel experiments**: `--npu-per-exp 1` runs 8 proxy experiments concurrently on 8 NPUs (set 0 = sequential, all NPUs per experiment)
+- **Token caps**: `--proxy-target-tokens 2B` / `--target-tokens 2B` cap per-experiment data selection (0 = all available; suffix syntax `2B/10M/500K` supported)
 - **70% STEM + 30% ClimbMix**: adaptive shard count (`calc_climbmix_count`, clamped [3, 50]), not full 400B
 - **Reverse-order download**: shards from MAX_SHARD (6542) backwards, avoids overlap with pretrain (shards 0-999)
 - **Stream-based mixing**: `stream_texts_uniform` + `endless_generator`, memory-efficient
+- **Val split convention**: last `shard_*.parquet` is validation (held out from train, DDP row-group safe)
 - **STEM benchmark**: `--eval-benchmarks=stem` → CSV "STEM" row parsed as `stem_metric`
 - **Annealing semantics**: lr_scale=1.0, warmup=0.0, warmdown=0.9 (CLIMB = annealing, not re-warmup)
 - **NPU support**: `device_type=npu`, embedding tries `torch_npu` first, fallback to CPU (192 threads)
@@ -55,7 +61,7 @@ Output: report + sampled_dataset.parquet + target_result.json
 
 | depth | scaling(M) | total(M) | VE占比 | CLIMB对标 |
 |-------|-----------|---------|--------|----------|
-| 14 | 164.2 | 399.1 | 51.5% | ≈132M proxy |
+| 20 | 435.2 | 896.5 | 51.5% | proxy (production) |
 | 24 | 729.8 | 1384.1 | 43.6% | 56% of CLIMB 1.3B |
 | 28 | auto-detect | auto-detect | — | target (from meta_*.json) |
 
@@ -69,12 +75,14 @@ climbmix/
 ├── docs/
 │   └── proxy_and_model_analysis.md     # 分析文档
 ├── runs/                                # Shell scripts
-│   ├── search_d14.sh                    # Main entry: d14 search + d28 target (NPU)
-│   ├── midtrain_validate.sh             # CLIMB vs random validation (NPU)
+│   ├── run_climbmix.sh                  # Main entry: full pipeline d20 search + d28 target (NPU)
+│   ├── speedrun_climbmix.sh             # End-to-end validation (minimal data + steps)
+│   ├── smoke_test.sh                    # Logic smoke test (CPU)
 │   └── train_base_model.sh             # Generate base checkpoint (NPU)
 ├── scripts/
 │   ├── run_climb.py                     # CLI entry point
 │   ├── mix_general_data.py             # Adaptive shard download + stream mixing
+│   ├── prepare_shards.py               # parquet → nanochat shards (val = last shard)
 │   ├── get_model_info.py               # Auto-detect scaling params from meta_*.json
 │   └── prepare_random_baseline.py       # Random baseline data prep
 └── src/climbmix/
@@ -84,22 +92,22 @@ climbmix/
     │   ├── dirichlet_sampler.py         # Dirichlet exploration
     │   ├── predictor.py                 # LightGBM predictor
     │   ├── discovery.py                 # EmbeddingClusterDiscovery only
-    │   ├── embedding_cluster.py         # Embed + K-means (NPU/CPU dual mode)
+    │   ├── embedding_cluster.py         # Embed + FAISS K-means (NPU/CPU dual mode)
     │   ├── cluster_merge.py             # Prune + merge
     │   ├── quality_filter.py            # Quality filtering
     │   └── protocols.py
     ├── pipeline/
     │   ├── climb_pipeline.py            # 7-stage pipeline (Stage 0-6)
-    │   ├── proxy_runner.py              # d14 proxy: train + eval + mix
+    │   ├── proxy_runner.py              # d20 proxy: train + eval + mix (parallel)
     │   ├── target_runner.py             # d28 target: train + eval + mix
     │   └── report_generator.py          # Markdown + matplotlib
     ├── data/
     │   ├── metadata_manager.py          # ShardMetadataManager (parquet)
     │   └── column_schema.py             # Column name mapping
     ├── sampling/
-    │   └── data_selector.py             # Mixture-weighted doc sampling
+    │   └── data_selector.py             # Mixture-weighted doc sampling (seeded permutation)
     └── utils/
-        ├── token_estimate.py
+        ├── token_estimate.py            # chars→tokens heuristic + "2B"/"10M" parser
         └── perf_timer.py
 ```
 
@@ -107,14 +115,14 @@ climbmix/
 
 ```bash
 # Step 1: Generate base checkpoints (NPU)
-DEPTH=14  bash runs/train_base_model.sh   # d14, ~4h
-DEPTH=28  bash runs/train_base_model.sh   # d28
+DEPTH=20  bash runs/train_base_model.sh   # d20 proxy checkpoint
+DEPTH=28  bash runs/train_base_model.sh   # d28 target checkpoint
 
-# Step 2: Run full pipeline — d14 proxy search + d28 target (NPU)
-bash runs/search_d14.sh
+# Step 2: End-to-end validation first (minimal data, ~minutes)
+bash runs/speedrun_climbmix.sh
 
-# Step 3: Validate CLIMB vs random (NPU)
-CLIMBMIX_RESULT=result/stage1_xxx bash runs/midtrain_validate.sh
+# Step 3: Run full pipeline — d20 proxy search + d28 target + report (NPU)
+bash runs/run_climbmix.sh
 ```
 
 Each script auto-checks dependencies, NPU availability, disk space, and exits with instructions if anything is missing.
@@ -125,12 +133,18 @@ Each script auto-checks dependencies, NPU availability, disk space, and exits wi
 python scripts/run_climb.py --help
 
 # Key options:
---proxy-depth 14          # nanochat model depth (14=164M scaling)
+--proxy-depth 20          # nanochat model depth (20=435M scaling, production default)
 --target-depth 28         # Target model depth (auto-detected from meta_*.json)
---proxy-num-iterations 500  # Fixed training steps (not ratio-based)
+--proxy-num-iterations 1000  # Fixed training steps (not ratio-based)
 --proxy-lr-scale 1.0      # Annealing LR scale (1.0 = continue from base)
 --proxy-warmup 0.0        # No re-warmup (CLIMB annealing)
 --proxy-warmdown 0.9      # 90% warmdown for annealing
+--proxy-target-tokens 2B  # Per-experiment data cap (0 = all; accepts 2B/10M/500K/1.5B)
+--target-tokens 2B        # Cap for final target data selection (0 = all)
+--K-init 1000             # Initial K-means clusters before prune+merge
+--K-enhanced 10           # Target K after prune+merge (lower bound; distance-guarded)
+--configs-per-iter 20,10,5  # Search: 20 random + 10+5 predictor-guided
+--npu-per-exp 1           # NPUs per proxy experiment (0=all sequential; 1=8 parallel)
 --device-type npu          # NPU (default) or cpu
 --nanochat-base-dir /path  # Checkpoint storage (default: /home/ma-user/work/nanochat_model_dir)
 --general-data-dir /path   # ClimbMix shard cache dir

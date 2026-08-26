@@ -110,7 +110,8 @@ class ProxyRunner:
 
         print(f"  [Exp {experiment_id}] Preparing mixture-weighted data "
               f"({self.stem_ratio*100:.0f}% STEM + {(1-self.stem_ratio)*100:.0f}% general)...")
-        self._prepare_mixture_data(mixture_config, experiment_id, mixture_data_dir)
+        self._prepare_mixture_data(mixture_config, experiment_id, mixture_data_dir,
+                                   nproc_per_node=nproc_per_node)
 
         mid_cmd = self._build_mid_train_cmd(model_tag, mixture_data_dir,
                                             nproc_per_node=nproc_per_node,
@@ -123,11 +124,20 @@ class ProxyRunner:
                                         nproc_per_node=nproc_per_node,
                                         master_port=master_port)
         print(f"  [Exp {experiment_id}] base_eval: {' '.join(eval_cmd)}")
+        eval_start_time = time.time()
         eval_rc = self._run_subprocess(eval_cmd, exp_dir, "eval",
                                        device_ids=device_ids, master_port=master_port)
+        eval_end_time = time.time()
 
         self._copy_mid_checkpoint(model_tag, exp_dir)
-        per_task, val_accuracy, stem_metric, per_task_nlls, stem_nll = self._parse_eval_results(model_tag, exp_dir)
+        if eval_rc == 0:
+            per_task, val_accuracy, stem_metric, per_task_nlls, stem_nll = \
+                self._parse_eval_results(model_tag, exp_dir,
+                                         eval_start=eval_start_time,
+                                         eval_end=eval_end_time)
+        else:
+            print(f"  [Exp {experiment_id}] Eval failed (rc={eval_rc}), skipping result parsing")
+            per_task, val_accuracy, stem_metric, per_task_nlls, stem_nll = None, 0.0, None, None, 0.0
 
         elapsed = time.time() - t_start
 
@@ -280,11 +290,15 @@ class ProxyRunner:
         spec.loader.exec_module(mod)
         return mod
 
+    def _effective_nproc(self, nproc_per_node: Optional[int] = None) -> int:
+        return nproc_per_node or self.npu_devices
+
     def _prepare_mixture_data(
         self,
         mixture_config: MixtureConfig,
         experiment_id: int,
         mixture_data_dir: str,
+        nproc_per_node: Optional[int] = None,
     ):
         if self.cluster_labels is None or self.metadata_manager is None:
             print(f"  [Exp {experiment_id}] WARNING: No cluster labels or metadata_manager, "
@@ -304,29 +318,52 @@ class ProxyRunner:
 
         stem_texts = self.metadata_manager.read_texts(selected_indices)
 
-        # Write STEM texts to temp parquet shards (mix_general_data expects shard_*.parquet)
+        # Write STEM texts to temp parquet shards (mix_general_data expects shard_*.parquet).
+        # Convention (same as prepare_shards.py / mix_general_data.py): the LAST
+        # shard_*.parquet is the val split; train shards must NOT contain val docs.
         stem_temp_dir = os.path.join(mixture_data_dir, "_stem_temp")
         os.makedirs(stem_temp_dir, exist_ok=True)
 
         import pyarrow as pa
         import pyarrow.parquet as pq
 
+        nproc = self._effective_nproc(nproc_per_node)
         batch_per_file = 10000
         n_stem = len(stem_texts)
-        n_shards = max(1, (n_stem + batch_per_file - 1) // batch_per_file)
+
+        # Hold out a real val split (tail of the data): ~1% of docs, capped at 256,
+        # at least 2 docs per NPU so every rank owns >= 2 val row groups (rg_size=1).
+        n_val = min(256, max(2 * nproc, n_stem // 100))
+        if n_stem >= 2:
+            n_val = max(1, min(n_val, n_stem - 1))
+        else:
+            n_val = min(n_val, n_stem)
+        train_texts = stem_texts[:n_stem - n_val]
+        val_texts = stem_texts[n_stem - n_val:]
+
+        n_train = len(train_texts)
+        n_shards = max(1, (n_train + batch_per_file - 1) // batch_per_file)
+        # Absorb a tiny remainder into the previous shard: a last shard with
+        # < 2*nproc docs cannot provide one row group per rank -> DDP starvation.
+        while n_shards > 1 and n_train - (n_shards - 1) * batch_per_file < 2 * nproc:
+            n_shards -= 1
+        # Row groups sized from the ACTUAL doc count of the last (smallest) shard,
+        # guaranteeing every shard has >= nproc*2 row groups (DDP round-robin safety).
+        last_shard_docs = n_train - (n_shards - 1) * batch_per_file
+        rg_size = max(1, last_shard_docs // (nproc * 2))
 
         for i in range(n_shards):
             start = i * batch_per_file
-            end = min(start + batch_per_file, n_stem)
-            shard_table = pa.table({"text": stem_texts[start:end]})
+            end = min(start + batch_per_file, n_train)
+            shard_table = pa.table({"text": train_texts[start:end]})
             shard_path = os.path.join(stem_temp_dir, f"shard_{i:05d}.parquet")
-            pq.write_table(shard_table, shard_path, row_group_size=1024)
+            pq.write_table(shard_table, shard_path, row_group_size=rg_size)
 
-        val_table = pa.table({"text": stem_texts[:max(1, n_stem // 100)]})
         val_path = os.path.join(stem_temp_dir, f"shard_{n_shards:05d}.parquet")
-        pq.write_table(val_table, val_path, row_group_size=1)
+        pq.write_table(pa.table({"text": val_texts}), val_path, row_group_size=1)
 
-        print(f"  [Exp {experiment_id}] Wrote {n_stem} STEM docs to {n_shards} temp shards")
+        print(f"  [Exp {experiment_id}] Wrote {n_train} train docs ({n_shards} shards, "
+              f"rg_size={rg_size}) + {n_val} val docs")
 
         # Mix with ClimbMix general data via mix_general_data.py module
         if self.stem_ratio < 1.0 and self.general_data_dir:
@@ -362,7 +399,7 @@ class ProxyRunner:
                 num_output_files = len(stem_train_files)
                 mix_mod.mix_data(
                     stem_temp_dir, climb_files, mixture_data_dir,
-                    num_output_files, detected_batch,
+                    num_output_files, detected_batch, num_npu=nproc,
                 )
                 print(f"  [Exp {experiment_id}] Mixed {stem_docs:,} STEM + "
                       f"~{int(stem_docs * (1-self.stem_ratio) / self.stem_ratio):,} general")
@@ -427,7 +464,6 @@ class ProxyRunner:
             "--eval-benchmarks", self.eval_benchmarks,
             "--model-tag", model_tag,
             "--model-type", "mid",
-            "--max-per-task", "500",
             "--device-type", self.device_type,
         ]
         return cmd
@@ -468,10 +504,54 @@ class ProxyRunner:
 
         return proc.returncode
 
+    @staticmethod
+    def _locate_eval_csv(
+        csv_dir: str,
+        model_tag: str,
+        eval_start: Optional[float] = None,
+        eval_end: Optional[float] = None,
+    ) -> Optional[str]:
+        """Locate the base_eval CSV produced by this experiment (3-tier strategy).
+
+        1. mid_model_* files whose filename contains model_tag (newest by mtime)
+        2. mid_model_* files modified within our eval window [start-60s, end+60s]
+           (newest by mtime)
+        3. globally newest mid_model_* file (last-resort fallback)
+
+        Only considers nanochat's own ``mid_model_*`` outputs, so archive copies
+        named ``{model_tag}.csv`` never shadow a fresh result.
+        """
+        try:
+            names = [f for f in os.listdir(csv_dir)
+                     if f.endswith(".csv") and f.startswith("mid_model_")]
+        except OSError:
+            return None
+        if not names:
+            return None
+
+        paths = [os.path.join(csv_dir, f) for f in names]
+        mtimes = {p: os.path.getmtime(p) for p in paths}
+
+        tagged = [p for p in paths if model_tag in os.path.basename(p)]
+        if tagged:
+            return max(tagged, key=lambda p: mtimes[p])
+
+        if eval_start is not None:
+            slack = 60.0
+            end = eval_end if eval_end is not None else float("inf")
+            window = [p for p in paths
+                      if mtimes[p] >= eval_start - slack and mtimes[p] <= end + slack]
+            if window:
+                return max(window, key=lambda p: mtimes[p])
+
+        return max(paths, key=lambda p: mtimes[p])
+
     def _parse_eval_results(
         self,
         model_tag: str,
         exp_dir: str,
+        eval_start: Optional[float] = None,
+        eval_end: Optional[float] = None,
     ) -> tuple:
         per_task: Optional[Dict[str, float]] = None
         per_task_nlls: Optional[Dict[str, float]] = None
@@ -481,50 +561,42 @@ class ProxyRunner:
 
         csv_dir = os.path.join(self.nanochat_base_dir, "base_eval")
 
-        if os.path.isdir(csv_dir):
-            csv_files = sorted(os.listdir(csv_dir))
-            csv_files = [f for f in csv_files if f.endswith(".csv") and f.startswith("mid_model_")]
-            if csv_files:
-                latest_csv = csv_files[-1]
-                latest_csv_path = os.path.join(csv_dir, latest_csv)
+        csv_path = self._locate_eval_csv(csv_dir, model_tag, eval_start, eval_end)
+        if csv_path is not None:
+            import shutil
+            local_copy = os.path.join(exp_dir, f"eval_{model_tag}.csv")
+            shutil.copy2(csv_path, local_copy)
+            print(f"  [Eval] Using {os.path.basename(csv_path)}")
 
-                tagged_csv = f"{model_tag}.csv"
-                tagged_path = os.path.join(csv_dir, tagged_csv)
-                if os.path.exists(latest_csv_path):
-                    import shutil
-                    shutil.copy2(latest_csv_path, tagged_path)
-                    local_copy = os.path.join(exp_dir, f"eval_{tagged_csv}")
-                    shutil.copy2(latest_csv_path, local_copy)
-
-                per_task = {}
-                per_task_nlls = {}
-                with open(tagged_path if os.path.exists(tagged_path) else latest_csv_path) as f:
-                    for line in f:
-                        parts = [p.strip() for p in line.strip().split(",")]
-                        if len(parts) >= 3:
-                            task_name = parts[0]
-                            centered_val = parts[2]
-                            nll_val = parts[3] if len(parts) >= 4 else "0.0"
-                            if task_name == "STEM":
-                                try:
-                                    stem_metric = float(centered_val)
-                                except ValueError:
-                                    pass
-                                try:
-                                    stem_nll = float(nll_val)
-                                except ValueError:
-                                    stem_nll = 0.0
-                                continue
-                            if task_name == "CORE":
-                                continue
+            per_task = {}
+            per_task_nlls = {}
+            with open(csv_path) as f:
+                for line in f:
+                    parts = [p.strip() for p in line.strip().split(",")]
+                    if len(parts) >= 3:
+                        task_name = parts[0]
+                        centered_val = parts[2]
+                        nll_val = parts[3] if len(parts) >= 4 else "0.0"
+                        if task_name == "STEM":
                             try:
-                                per_task[task_name] = float(centered_val)
+                                stem_metric = float(centered_val)
                             except ValueError:
-                                continue
+                                pass
                             try:
-                                per_task_nlls[task_name] = float(nll_val)
+                                stem_nll = float(nll_val)
                             except ValueError:
-                                per_task_nlls[task_name] = 0.0
+                                stem_nll = 0.0
+                            continue
+                        if task_name == "CORE":
+                            continue
+                        try:
+                            per_task[task_name] = float(centered_val)
+                        except ValueError:
+                            continue
+                        try:
+                            per_task_nlls[task_name] = float(nll_val)
+                        except ValueError:
+                            per_task_nlls[task_name] = 0.0
 
         if stem_metric is not None:
             val_accuracy = stem_metric

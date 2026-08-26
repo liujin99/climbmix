@@ -24,6 +24,10 @@ PROXY_DEPTH="${PROXY_DEPTH:-20}"
 TARGET_DEPTH="${TARGET_DEPTH:-28}"
 PROXY_NUM_ITERATIONS="${PROXY_NUM_ITERATIONS:-1000}"
 TARGET_STEPS="${TARGET_STEPS:-1000}"
+# Token caps for data selection. Pool ≈ 524M STEM tokens; production consumes
+# ~367M (70% of it), so 2B leaves ~5x headroom while cutting disk/IO ~50x.
+PROXY_TARGET_TOKENS="${PROXY_TARGET_TOKENS:-2B}"
+TARGET_TOKENS="${TARGET_TOKENS:-2B}"
 CONFIGS_PER_ITER="${CONFIGS_PER_ITER:-20,10,5}"
 K_ENHANCED="${K_ENHANCED:-10}"
 DISCOVERY_METHOD="${DISCOVERY_METHOD:-embedding_cluster}"
@@ -84,9 +88,11 @@ python3 "$CLIMBMIX_DIR/scripts/run_climb.py" \
     --eval-benchmarks "$EVAL_BENCHMARKS" \
     --proxy-depth "$PROXY_DEPTH" \
     --proxy-num-iterations "$PROXY_NUM_ITERATIONS" \
+    --proxy-target-tokens "$PROXY_TARGET_TOKENS" \
     --proxy-lr-scale 1.0 --proxy-warmup 0.0 --proxy-warmdown 0.9 \
     --phase1-checkpoint-path "$NANOCHAT_BASE_DIR/base_checkpoints/d${PROXY_DEPTH}" \
     --target-depth "$TARGET_DEPTH" \
+    --target-tokens "$TARGET_TOKENS" \
     --target-phase1-checkpoint-path "$NANOCHAT_BASE_DIR/base_checkpoints/d${TARGET_DEPTH}" \
     --K-enhanced "$K_ENHANCED" \
     --discovery-method "$DISCOVERY_METHOD" \
@@ -131,7 +137,7 @@ mix_one() {
     python3 "$CLIMBMIX_DIR/scripts/mix_general_data.py" \
         --stem-dir "$stem_dir" --output-dir "$out_dir" \
         --climbmix-dir "$GENERAL_DATA_DIR" \
-        --stem-ratio "$STEM_RATIO" --num-workers "$NUM_NPU" \
+        --stem-ratio "$STEM_RATIO" --num-workers "$NUM_NPU" --num-npu "$NUM_NPU" \
         || { echo "✗ Mix failed for $label"; exit 1; }
 }
 

@@ -50,6 +50,10 @@ def main():
 
     n_train = len(train_texts)
     n_shards = max(1, math.ceil(n_train / args.shard_size))
+    # Absorb a tiny remainder into the previous shard: a last shard with
+    # < 2*num_npu docs cannot provide one row group per rank -> DDP starvation.
+    while n_shards > 1 and n_train - (n_shards - 1) * args.shard_size < 2 * args.num_npu:
+        n_shards -= 1
     # Row groups sized from the ACTUAL doc count of the last (smallest) shard,
     # guaranteeing every shard has >= num_npu*2 row groups.
     last_shard_docs = n_train - (n_shards - 1) * args.shard_size

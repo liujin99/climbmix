@@ -7,8 +7,8 @@ QuaDMix's quality-based sigmoid sampling.
 
 For cluster k with weight α_k:
   - Sample α_k * total_target_tokens tokens from cluster k
-  - Within each cluster, sample documents uniformly
-    (no quality-based selection within clusters)
+  - Within each cluster, documents are randomly permuted (seeded) and a
+    token-budget prefix is taken (no quality-based selection within clusters)
 """
 
 import numpy as np
@@ -79,12 +79,16 @@ def select_data_by_mixture(
             selected_all.extend(indices.tolist())
             sampling_probs[indices] = 1.0
         else:
-            c_token_counts = token_counts[indices]
+            # Random permutation (seeded) before the token-budget prefix cut:
+            # otherwise the head of the dataset order would always be selected
+            # and the seed would have no effect.
+            shuffled = indices[rng.permutation(len(indices))]
+            c_token_counts = token_counts[shuffled]
             cum_tokens = np.cumsum(c_token_counts)
             cutoff = np.searchsorted(cum_tokens, cluster_target_tokens, side='left')
-            cutoff = min(cutoff + 1, len(indices))
-            selected_all.extend(indices[:cutoff].tolist())
-            sampling_probs[indices[:cutoff]] = alpha_k * target_tokens / cluster_tokens
+            cutoff = min(cutoff + 1, len(shuffled))
+            selected_all.extend(shuffled[:cutoff].tolist())
+            sampling_probs[shuffled[:cutoff]] = alpha_k * target_tokens / cluster_tokens
 
     if len(selected_all) == 0:
         selected_all = rng.choice(len(cluster_labels), size=min(100, len(cluster_labels)), replace=False).tolist()

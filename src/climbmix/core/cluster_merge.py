@@ -188,7 +188,14 @@ def merge_clusters_by_distance(
         i, j = divmod(min_idx, K_current)
         min_dist = sub[i, j]
 
-        if min_dist > merge_distance and target_K is None:
+        if min_dist > merge_distance:
+            # Distance guard is unconditional: never merge clusters farther
+            # apart than merge_distance, even if target_K has not been reached
+            # (K_enhanced then becomes a lower bound, per paper §2.1).
+            if target_K is not None and K_current > target_K:
+                print(f"[Merge] Closest pair distance {min_dist:.4f} > merge_distance "
+                      f"{merge_distance:.4f}: stopping at K={K_current} "
+                      f"(target_K={target_K} not reached, K is a lower bound)")
             break
 
         id_i = int(active_ids[i])

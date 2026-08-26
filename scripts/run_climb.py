@@ -19,6 +19,7 @@ try:
         DeviceConfig, STEM_BENCHMARK_LABELS, DEFAULT_NANOCHAT_BASE_DIR,
     )
     from climbmix.pipeline.climb_pipeline import CLIMBPipeline
+    from climbmix.utils.token_estimate import parse_token_count
 except ImportError:
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'src'))
     from climbmix.core.types import (
@@ -27,6 +28,7 @@ except ImportError:
         DeviceConfig, STEM_BENCHMARK_LABELS, DEFAULT_NANOCHAT_BASE_DIR,
     )
     from climbmix.pipeline.climb_pipeline import CLIMBPipeline
+    from climbmix.utils.token_estimate import parse_token_count
 
 
 def main():
@@ -72,8 +74,9 @@ def main():
     parser.add_argument("--phase1-checkpoint-path", type=str, default=None)
     parser.add_argument("--validation-metric", type=str, default="accuracy",
                         choices=["accuracy", "loss"])
-    parser.add_argument("--proxy-target-tokens", type=int, default=0,
-                        help="Cap data selection per proxy experiment (0 = all available)")
+    parser.add_argument("--proxy-target-tokens", type=parse_token_count, default=0,
+                        help="Cap data selection per proxy experiment (0 = all available). "
+                             "Accepts human-readable suffixes: 2B, 10M, 500K, 1.5B")
 
     # ── Target ──
     parser.add_argument("--target-depth", type=int, default=28)
@@ -85,8 +88,9 @@ def main():
     parser.add_argument("--target-phase1-checkpoint-path", type=str, default=None)
     parser.add_argument("--skip-target", action="store_true",
                         help="Skip target training (only run proxy search)")
-    parser.add_argument("--target-tokens", type=int, default=0,
-                        help="Cap final data selection for target training (0 = all available)")
+    parser.add_argument("--target-tokens", type=parse_token_count, default=0,
+                        help="Cap final data selection for target training (0 = all available). "
+                             "Accepts human-readable suffixes: 2B, 10M, 500K, 1.5B")
 
     # ── Search ──
     parser.add_argument("--num-iterations", type=int, default=3)

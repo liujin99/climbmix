@@ -107,7 +107,7 @@ def endless_generator(gen_func, files):
         yield from gen
 
 
-def mix_data(stem_dir, climb_files, output_dir, num_output_files, batch_per_file=BATCH_PER_FILE):
+def mix_data(stem_dir, climb_files, output_dir, num_output_files, batch_per_file=BATCH_PER_FILE, num_npu=8):
     """Mix 70% STEM + 30% ClimbMix at document level."""
     if not climb_files:
         raise ValueError("No ClimbMix files available. Download failed?")
@@ -124,9 +124,13 @@ def mix_data(stem_dir, climb_files, output_dir, num_output_files, batch_per_file
     if not stem_files:
         raise ValueError(f"No train shards found in {stem_dir} (only val?)")
 
+    # DDP row-group safety: every output shard must contain at least num_npu
+    # row groups (dataloader assigns row groups round-robin per rank).
+    rg_size = max(1, batch_per_file // (num_npu * 2))
+
     print(f"  STEM: {len(stem_files)} train shards from {stem_dir}")
     print(f"  ClimbMix: {len(climb_files)} shards")
-    print(f"  Output: {num_output_files} files x {batch_per_file} docs each")
+    print(f"  Output: {num_output_files} files x {batch_per_file} docs each (rg_size={rg_size})")
     print(f"  Ratio: {STEM_RATIO*100:.0f}% STEM + {(1-STEM_RATIO)*100:.0f}% ClimbMix")
 
     stem_gen = endless_generator(stream_texts_uniform, stem_files)
@@ -150,13 +154,13 @@ def mix_data(stem_dir, climb_files, output_dir, num_output_files, batch_per_file
 
             if len(current) >= batch_per_file:
                 out_path = os.path.join(output_dir, f"shard_{file_idx:05d}.parquet")
-                pq.write_table(pa.table({"text": current}), out_path, row_group_size=1024)
+                pq.write_table(pa.table({"text": current}), out_path, row_group_size=rg_size)
                 current = []
                 file_idx += 1
     finally:
         if current and file_idx < num_output_files:
             out_path = os.path.join(output_dir, f"shard_{file_idx:05d}.parquet")
-            pq.write_table(pa.table({"text": current}), out_path)
+            pq.write_table(pa.table({"text": current}), out_path, row_group_size=rg_size)
             file_idx += 1
 
         del stem_gen
@@ -187,6 +191,8 @@ def main():
                         help="STEM ratio (default 0.7 = 70%%)")
     parser.add_argument("--num-workers", type=int, default=16,
                         help="Download workers (default 16)")
+    parser.add_argument("--num-npu", type=int, default=8,
+                        help="NPUs used for training the mixed data (row-group sizing, default 8)")
     args = parser.parse_args()
 
     global STEM_RATIO
@@ -226,7 +232,8 @@ def main():
         climb_files = existing_climb
         print(f"  ClimbMix already downloaded: {len(climb_files)} files")
 
-    mix_data(args.stem_dir, climb_files, args.output_dir, num_output_files, batch_per_file)
+    mix_data(args.stem_dir, climb_files, args.output_dir, num_output_files, batch_per_file,
+             num_npu=args.num_npu)
 
 
 if __name__ == "__main__":
