@@ -63,21 +63,23 @@ OUTPUT_DIR="${OUTPUT_DIR:-$CLIMBMIX_DIR/result/$EXP_NAME}"
 # Override to use the origin: HF_ENDPOINT=https://huggingface.co bash runs/...
 export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 
-# ── NPU Environment ──
+# ── NPU Environment (deliberately minimal — matches proven train_base_model.sh) ──
+# See runs/speedrun_climbmix.sh: the allocator block that used to live here
+# (memory_pool:True + PYTORCH_NPU_ALLOC_MAX_SIZE=60G + friends) filled device 0
+# outside torch_npu's allocator accounting → kernel-load OOMs (aclnnMean 207001
+# / EL0004) in every proxy exp and Step 6 on 2026-08-26. Do not re-add
+# allocator overrides unless a specific need is proven on this hardware.
 export OMP_NUM_THREADS=1 WANDB_MODE=offline NANOCHAT_BASE_DIR="$NANOCHAT_BASE_DIR"
 mkdir -p "$NANOCHAT_BASE_DIR"
 export ASCEND_HCCL_PATH=/usr/local/Ascend/ascend-toolkit/latest/hccl
 export LD_LIBRARY_PATH=${ASCEND_HCCL_PATH}/lib64:${LD_LIBRARY_PATH:-}
 export HCCL_CONNECT_TIMEOUT=1200 HCCL_WHITELIST_DISABLE=1
 export NCCL_IB_DISABLE=1 NCCL_SOCKET_IFNAME=eth0
-export PYTORCH_ALLOC_CONF=expandable_segments:True ASCEND_GLOBAL_LOG_LEVEL=3
+export ASCEND_GLOBAL_LOG_LEVEL=3
 export ASCEND_VISIBLE_DEVICES=$(seq -s, 0 $((NUM_NPU - 1)))
 export RANK_SIZE=$NUM_NPU MASTER_ADDR=127.0.0.1 MASTER_PORT=29500
-export HCCL_EXEC_TIMEOUT=1200 ASCEND_DISABLE_MEM_SWAP=1 ASCEND_LAUNCH_BLOCKING=0
-export NPU_DISABLE_RECORD=1 PYTHONUNBUFFERED=1 ASCEND_COMPILE_OPT_LEVEL=O3
-export TORCH_NPU_LAZY_COMPILE=1 PYTHONPRELOAD=torch_npu
-export TORCH_NPU_ALLOC_CONF="expandable_segments:True,max_split_size_mb:256,memory_pool:True"
-export PYTORCH_NPU_ALLOC_MAX_SIZE=60G ASCEND_ENABLE_CACHE=1
+export HCCL_EXEC_TIMEOUT=1200
+export PYTHONUNBUFFERED=1
 export NANOCHAT_DTYPE=bfloat16 PYTHONWARNINGS="ignore::UserWarning:torch_npu"
 
 # ── Fingerprint: code + semantic params → auto-reset on change ──

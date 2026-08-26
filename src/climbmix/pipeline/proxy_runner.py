@@ -599,6 +599,12 @@ class ProxyRunner:
         env["NANOCHAT_BASE_DIR"] = self.nanochat_base_dir
 
         if device_ids is not None:
+            # ASCEND_RT_VISIBLE_DEVICES is the torch_npu-documented pinning var
+            # (logical npu:k = k-th entry of the mask). ASCEND_VISIBLE_DEVICES
+            # alone may be ignored by the runtime, which would pile every exp
+            # of a parallel batch onto physical device 0. Set both (the
+            # embedding workers pin with the RT var for the same reason).
+            env["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(str(d) for d in device_ids)
             env["ASCEND_VISIBLE_DEVICES"] = ",".join(str(d) for d in device_ids)
             env["RANK_SIZE"] = str(len(device_ids))
         if master_port is not None:
