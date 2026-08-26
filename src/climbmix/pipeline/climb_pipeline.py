@@ -34,6 +34,7 @@ from climbmix.core.quality_filter import get_filter
 from climbmix.core.iterative_bootstrapper import IterativeBootstrapper
 from climbmix.sampling.data_selector import select_data_by_mixture, compute_mixture_dataset_stats
 from climbmix.utils.token_estimate import estimate_tokens_from_text
+from climbmix.utils.io_utils import atomic_savez, atomic_write_json, atomic_write_parquet
 
 
 class CLIMBPipeline:
@@ -101,14 +102,21 @@ class CLIMBPipeline:
         # Stage 1: Cluster discovery (cacheable)
         cluster_cache_npz = os.path.join(cluster_cache_dir, "cluster_cache.npz")
         cluster_cache_json = os.path.join(cluster_cache_dir, "cluster_info_cache.json")
+        cluster_cache_ok = False
         if os.path.exists(cluster_cache_npz) and os.path.exists(cluster_cache_json):
+            try:
+                cache = np.load(cluster_cache_npz, allow_pickle=False)
+                final_labels = cache["final_labels"]
+                cluster_info = self._load_cluster_cache(cluster_cache_json)
+                cluster_cache_ok = len(cluster_info) > 0
+            except Exception as e:
+                print(f"[Stage 1] Cluster cache unreadable ({e}), recomputing")
+        if cluster_cache_ok:
             _t = time.time()
             print("[Stage 1] Loading cached clusters...")
-            cache = np.load(cluster_cache_npz, allow_pickle=False)
-            final_labels = cache["final_labels"]
-            cluster_info = self._load_cluster_cache(cluster_cache_json)
             num_clusters = len(cluster_info)
             print(f"[Stage 1] {num_clusters} clusters (from cache), {len(final_labels):,} documents")
+            self._print_cluster_sizes(cluster_info)
             stage_times["stage1_discovery"] = time.time() - _t
         else:
             _t = time.time()
@@ -123,6 +131,7 @@ class CLIMBPipeline:
             )
             num_clusters = len(cluster_info)
             print(f"[Stage 1] {num_clusters} clusters, {len(final_labels):,} documents")
+            self._print_cluster_sizes(cluster_info)
             stage_times["stage1_discovery"] = time.time() - _t
             self._save_cluster_cache(cluster_cache_npz, cluster_cache_json, final_labels, cluster_info)
             print(f"[Stage 1] Cached → {cluster_cache_npz}")
@@ -268,8 +277,31 @@ class CLIMBPipeline:
         raise ValueError("Must provide data_dir, texts, or metadata_manager")
 
     @staticmethod
+    def _print_cluster_sizes(cluster_info, top_n=20):
+        """Log per-cluster doc/token distribution (observation only).
+
+        Paper §2.1 has no cluster-size filtering: small clusters are handled
+        implicitly via token-count-weighted Dirichlet init and distance merging.
+        This log just makes the size distribution visible for inspection.
+        """
+        if not cluster_info:
+            return
+        docs = [c.num_docs for c in cluster_info]
+        toks = [c.num_tokens for c in cluster_info]
+        order = sorted(range(len(cluster_info)), key=lambda i: toks[i], reverse=True)
+        print(f"[Stage 1] Cluster sizes: {len(cluster_info)} clusters, "
+              f"docs min/median/max = {min(docs):,}/{sorted(docs)[len(docs)//2]:,}/{max(docs):,}, "
+              f"tokens total = {sum(toks):,}")
+        show = order[:top_n] if len(order) > top_n else order
+        lines = ", ".join(
+            f"C{cluster_info[i].cluster_id}:{toks[i]:,}t/{docs[i]:,}d" for i in show
+        )
+        print(f"[Stage 1] Top clusters (tokens): {lines}"
+              + (f" ... +{len(order) - top_n} more" if len(order) > top_n else ""))
+
+    @staticmethod
     def _save_cluster_cache(npz_path: str, json_path: str, labels: np.ndarray, cluster_info):
-        np.savez(npz_path, final_labels=labels)
+        atomic_savez(npz_path, final_labels=labels)
         data = [
             {
                 "cluster_id": c.cluster_id,
@@ -281,8 +313,7 @@ class CLIMBPipeline:
             }
             for c in cluster_info
         ]
-        with open(json_path, "w") as f:
-            json.dump(data, f)
+        atomic_write_json(json_path, data)
 
     @staticmethod
     def _load_cluster_cache(json_path: str):
@@ -312,8 +343,7 @@ class CLIMBPipeline:
             cluster_labels=[c.label for c in cluster_info]
         )
         weights_path = os.path.join(output_dir, "optimal_mixture_weights.json")
-        with open(weights_path, "w") as f:
-            json.dump(weights_dict, f, indent=2)
+        atomic_write_json(weights_path, weights_dict)
         print(f"[Save] Optimal weights -> {weights_path}")
 
         elapsed = time.time() - t_start
@@ -345,9 +375,8 @@ class CLIMBPipeline:
             "stage_times": {k: round(v, 1) for k, v in stage_times.items()},
         }
         summary_path = os.path.join(output_dir, "pipeline_summary.json")
-        with open(summary_path, "w") as f:
-            json.dump(summary, f, indent=2,
-                      default=lambda x: float(x) if isinstance(x, np.floating) else x)
+        atomic_write_json(summary_path, summary, indent=2,
+                          default=lambda x: float(x) if isinstance(x, np.floating) else x)
 
         sampled_path = os.path.join(output_dir, "sampled_dataset.parquet")
         if metadata_manager is not None:
@@ -358,11 +387,14 @@ class CLIMBPipeline:
             sampled_texts = []
 
         if sampled_texts:
-            pd.DataFrame({
-                "text": sampled_texts,
-                "doc_id": selected_indices.tolist(),
-                "cluster": cluster_labels[selected_indices].tolist(),
-            }).to_parquet(sampled_path, index=False)
+            atomic_write_parquet(
+                sampled_path,
+                pd.DataFrame({
+                    "text": sampled_texts,
+                    "doc_id": selected_indices.tolist(),
+                    "cluster": cluster_labels[selected_indices].tolist(),
+                }),
+            )
             print(f"[Save] Sampled dataset ({len(selected_indices)} docs) -> {sampled_path}")
 
         cluster_path = os.path.join(output_dir, "cluster_info.json")
@@ -376,8 +408,7 @@ class CLIMBPipeline:
             }
             for c in cluster_info
         ]
-        with open(cluster_path, "w") as f:
-            json.dump(cluster_json, f, indent=2)
+        atomic_write_json(cluster_path, cluster_json, indent=2)
 
         from climbmix.pipeline.report_generator import (
             generate_markdown_report,

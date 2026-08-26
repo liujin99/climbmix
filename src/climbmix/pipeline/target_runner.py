@@ -254,10 +254,10 @@ class TargetRunner:
             try:
                 mix_mod = self._load_mix_module()
             except FileNotFoundError as e:
-                print(f"  [Target] WARNING: {e}, using STEM only")
-                self._copy_stem_only(stem_temp_dir, mixture_data_dir)
-                shutil.rmtree(stem_temp_dir, ignore_errors=True)
-                return
+                raise FileNotFoundError(
+                    f"Target run requires stem_ratio={self.stem_ratio} mixing, "
+                    f"but mix_general_data.py could not be loaded: {e}"
+                ) from e
 
             stem_train_files = sorted(
                 os.path.join(stem_temp_dir, f)
@@ -275,18 +275,14 @@ class TargetRunner:
                 self.general_data_dir, needed_shards, self.npu_devices
             )
 
-            if not climb_files:
-                print(f"  [Target] WARNING: No ClimbMix data available, using STEM only")
-                self._copy_stem_only(stem_temp_dir, mixture_data_dir)
-            else:
-                detected_batch = mix_mod.detect_shard_size(stem_train_files)
-                num_output_files = len(stem_train_files)
-                mix_mod.mix_data(
-                    stem_temp_dir, climb_files, mixture_data_dir,
-                    num_output_files, detected_batch, num_npu=nproc,
-                )
-                print(f"  [Target] Mixed {stem_docs:,} STEM + "
-                      f"~{int(stem_docs * (1-self.stem_ratio) / self.stem_ratio):,} general")
+            detected_batch = mix_mod.detect_shard_size(stem_train_files)
+            num_output_files = len(stem_train_files)
+            mix_mod.mix_data(
+                stem_temp_dir, climb_files, mixture_data_dir,
+                num_output_files, detected_batch, num_npu=nproc,
+            )
+            print(f"  [Target] Mixed {stem_docs:,} STEM + "
+                  f"~{int(stem_docs * (1-self.stem_ratio) / self.stem_ratio):,} general")
         else:
             self._copy_stem_only(stem_temp_dir, mixture_data_dir)
             print(f"  [Target] No general data, using {n_stem} STEM docs only")

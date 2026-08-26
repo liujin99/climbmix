@@ -10,6 +10,8 @@ Paper details (Section 2.1):
   - Output: cluster labels for each document
 """
 
+import glob as _glob
+import json
 import os
 import sys
 import types
@@ -17,6 +19,8 @@ import time
 import numpy as np
 import numpy.typing as npt
 from typing import List, Optional, Tuple
+
+from climbmix.utils.io_utils import atomic_savez
 
 try:
     import xformers  # noqa: F401
@@ -286,8 +290,7 @@ def embed_documents(
         print(f"[Embed] No NaN detected ({len(safe_texts)} docs)")
 
     if cache_path:
-        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-        np.savez(cache_path, embeddings=embeddings)
+        atomic_savez(cache_path, embeddings=embeddings)
         print(f"[Embed] Cached embeddings to: {cache_path}")
 
     return embeddings
@@ -317,9 +320,62 @@ def _load_model_stream(model_name, dev):
     raise RuntimeError("Failed to load model: no compatible attention implementation")
 
 
+def _progress_files(cache_dir: str) -> List[str]:
+    if not cache_dir:
+        return []
+    return _glob.glob(os.path.join(cache_dir, "embedding_progress_w*.json"))
+
+
+def _load_completed_shards(cache_dir: str) -> set:
+    """Union of shard indices recorded as embedded by any worker ledger file.
+
+    A ledger entry is written only AFTER the worker finished that shard and
+    flushed it to the shared memmap, so the union is a safe lower bound of
+    completed work: at worst a shard gets re-embedded (idempotent overwrite
+    at the same offset), never left stale.
+    """
+    completed = set()
+    for p in _progress_files(cache_dir):
+        try:
+            with open(p) as f:
+                data = json.load(f)
+            completed.update(int(i) for i in data.get("completed", []))
+        except (json.JSONDecodeError, OSError, ValueError, TypeError):
+            continue
+    return completed
+
+
+def _clear_partial_embedding_state(cache_dir: str, memmap_path: str) -> None:
+    for p in _progress_files(cache_dir):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    try:
+        if os.path.exists(memmap_path):
+            os.remove(memmap_path)
+    except OSError:
+        pass
+
+
+def _write_worker_progress(progress_path: Optional[str], completed: list, shard_idx: int) -> None:
+    """Atomically record shard_idx into this worker's ledger (tmp + replace)."""
+    if not progress_path:
+        return
+    completed.append(shard_idx)
+    tmp = progress_path + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump({"completed": completed}, f)
+        os.replace(tmp, progress_path)
+    except OSError:
+        pass  # ledger is best-effort; the memmap write itself already happened
+
+
 def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
                             model_name, batch_size, emb_dim,
-                            memmap_path, total_docs, shared_done, truncate_len):
+                            memmap_path, total_docs, shared_done, truncate_len,
+                            progress_path=None):
     """Worker process: embed assigned shards on NPU worker_id, write to shared memmap."""
     import os
     os.environ["ASCEND_RT_VISIBLE_DEVICES"] = str(worker_id)
@@ -368,6 +424,19 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
 
     io_pool = ThreadPoolExecutor(max_workers=1)
     tok_pool = ThreadPoolExecutor(max_workers=1)
+
+    if not shard_indices:
+        print(f"[NPU {worker_id}] No shards assigned (already embedded on resume), exiting", flush=True)
+        return
+
+    # Ledger keeps this worker's historical completions (merge, not replace)
+    completed_ledger = []
+    if progress_path and os.path.exists(progress_path):
+        try:
+            with open(progress_path) as f:
+                completed_ledger = list(json.load(f).get("completed", []))
+        except (json.JSONDecodeError, OSError, ValueError, TypeError):
+            completed_ledger = []
 
     shard_future = io_pool.submit(_read_shard_texts, shard_infos[shard_indices[0]])
 
@@ -435,6 +504,7 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
 
         docs_done += num_docs
         del texts
+        _write_worker_progress(progress_path, completed_ledger, si)
 
     io_pool.shutdown()
     tok_pool.shutdown()
@@ -550,16 +620,29 @@ def embed_texts_streaming(
         cache_dir = os.path.dirname(cache_path) if cache_path else "/tmp"
         os.makedirs(cache_dir, exist_ok=True)
         memmap_path = os.path.join(cache_dir, "embedding_memmap.tmp")
-        if os.path.exists(memmap_path):
-            os.remove(memmap_path)
-        memmap_init = np.memmap(memmap_path, dtype=np.float32, mode='w+',
-                                shape=(total_docs, emb_dim))
-        del memmap_init
 
-        print(f"[Embed-Stream] Preallocated ({total_docs:,}, {emb_dim}) memmap "
-              f"({total_docs * emb_dim * 4 / (1024**3):.1f} GB)")
+        # ── Resume support ─────────────────────────────────────────────
+        # Workers write embeddings into a shared memmap as they go and record
+        # finished shards in per-worker ledgers. If a previous attempt crashed,
+        # reuse the memmap (shape-checked) and skip already-embedded shards —
+        # only the ≤ n_workers in-flight shards are lost.
+        expected_bytes = total_docs * emb_dim * 4
+        resume = (os.path.exists(memmap_path)
+                  and os.path.getsize(memmap_path) == expected_bytes)
+        if resume:
+            completed = _load_completed_shards(cache_dir)
+            print(f"[Embed-Stream] Resuming: memmap intact, "
+                  f"{len(completed)}/{n_shards} shards already embedded")
+        else:
+            _clear_partial_embedding_state(cache_dir, memmap_path)
+            completed = set()
+            memmap_init = np.memmap(memmap_path, dtype=np.float32, mode='w+',
+                                    shape=(total_docs, emb_dim))
+            del memmap_init
+            print(f"[Embed-Stream] Preallocated ({total_docs:,}, {emb_dim}) memmap "
+                  f"({total_docs * emb_dim * 4 / (1024**3):.1f} GB)")
 
-        indices = list(range(n_shards))
+        indices = [si for si in range(n_shards) if si not in completed]
         chunks = np.array_split(indices, n_npus)
 
         procs = []
@@ -568,7 +651,8 @@ def embed_texts_streaming(
                 target=_embed_streaming_worker,
                 args=(wid, list(chunk), shard_infos, text_col,
                       model_name, batch_size, emb_dim,
-                      memmap_path, total_docs, shared_done, truncate_len),
+                      memmap_path, total_docs, shared_done, truncate_len,
+                      os.path.join(cache_dir, f"embedding_progress_w{wid}.json")),
             )
             p.start()
             procs.append(p)
@@ -594,22 +678,51 @@ def embed_texts_streaming(
               f"({total_docs / elapsed:.0f} docs/s), dim={emb_dim}")
 
         if cache_path:
-            cache_dir = os.path.dirname(cache_path) or "."
-            os.makedirs(cache_dir, exist_ok=True)
-            np.savez(cache_path, embeddings=np.array(all_embeddings))
+            atomic_savez(cache_path, embeddings=all_embeddings)
             print(f"[Embed-Stream] Cached embeddings to: {cache_path}")
-            os.remove(memmap_path)
+        _clear_partial_embedding_state(cache_dir, memmap_path)
 
         return np.array(all_embeddings)
 
-    # Single NPU / CPU path
-    all_embeddings = np.empty((total_docs, emb_dim), dtype=np.float32)
-    print(f"[Embed-Stream] Preallocated ({total_docs:,}, {emb_dim}) embeddings array "
+    # Single NPU / CPU path — same memmap + ledger resume semantics as the
+    # multi-NPU path (memmap-backed writes, per-shard progress ledger).
+    cache_dir = os.path.dirname(cache_path) if cache_path else "/tmp"
+    os.makedirs(cache_dir, exist_ok=True)
+    memmap_path = os.path.join(cache_dir, "embedding_memmap.tmp")
+    expected_bytes = total_docs * emb_dim * 4
+    resume = (os.path.exists(memmap_path)
+              and os.path.getsize(memmap_path) == expected_bytes)
+    if resume:
+        completed = _load_completed_shards(cache_dir)
+        print(f"[Embed-Stream] Resuming: memmap intact, "
+              f"{len(completed)}/{n_shards} shards already embedded")
+    else:
+        _clear_partial_embedding_state(cache_dir, memmap_path)
+        completed = set()
+        memmap_init = np.memmap(memmap_path, dtype=np.float32, mode='w+',
+                                shape=(total_docs, emb_dim))
+        del memmap_init
+
+    all_embeddings = np.memmap(memmap_path, dtype=np.float32, mode='r+',
+                               shape=(total_docs, emb_dim))
+    print(f"[Embed-Stream] Preallocated ({total_docs:,}, {emb_dim}) memmap "
           f"({total_docs * emb_dim * 4 / (1024**3):.1f} GB)")
-    print(f"[Embed-Stream] Streaming {n_shards} shards, batch_size={batch_size}")
+    progress_path = os.path.join(cache_dir, "embedding_progress_w0.json")
+    completed_ledger = []
+    if os.path.exists(progress_path):
+        try:
+            with open(progress_path) as f:
+                completed_ledger = list(json.load(f).get("completed", []))
+        except (json.JSONDecodeError, OSError, ValueError, TypeError):
+            completed_ledger = []
+
+    print(f"[Embed-Stream] Streaming {n_shards} shards, batch_size={batch_size} "
+          f"({len(completed)} already embedded)")
     docs_done = 0
     batch_num = 0
     for si, sinfo in enumerate(shard_infos):
+        if si in completed:
+            continue
         shard_path = sinfo["path"]
         start_idx = sinfo["start_idx"]
         num_docs = sinfo["num_docs"]
@@ -636,6 +749,7 @@ def embed_texts_streaming(
 
         docs_done += num_docs
         del shard_texts
+        _write_worker_progress(progress_path, completed_ledger, si)
         elapsed = time.time() - t1
         speed = docs_done / elapsed if elapsed > 0 else 0
         eta = (total_docs - docs_done) / speed if speed > 0 else 0
@@ -649,12 +763,11 @@ def embed_texts_streaming(
           f"({total_docs / elapsed:.0f} docs/s), dim={emb_dim}")
 
     if cache_path:
-        cache_dir = os.path.dirname(cache_path) or "."
-        os.makedirs(cache_dir, exist_ok=True)
-        np.savez(cache_path, embeddings=all_embeddings)
+        atomic_savez(cache_path, embeddings=all_embeddings)
         print(f"[Embed-Stream] Cached embeddings to: {cache_path}")
+    _clear_partial_embedding_state(cache_dir, memmap_path)
 
-    return all_embeddings
+    return np.array(all_embeddings)
 
 
 def cluster_embeddings_faiss(
@@ -734,8 +847,7 @@ def cluster_embeddings_faiss(
     print(f"[Cluster] Done in {elapsed:.1f}s, {n_unique} unique clusters, {n_zero} excluded")
 
     if cache_path:
-        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-        np.savez(cache_path, labels=labels, centroids=centroids)
+        atomic_savez(cache_path, labels=labels, centroids=centroids)
         print(f"[Cluster] Cached to: {cache_path}")
 
     return labels, centroids
@@ -784,8 +896,7 @@ def cluster_embeddings_sklearn(
     print(f"[Cluster] Done in {elapsed:.1f}s, {len(np.unique(labels))} clusters")
 
     if cache_path:
-        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-        np.savez(cache_path, labels=labels, centroids=centroids)
+        atomic_savez(cache_path, labels=labels, centroids=centroids)
 
     return labels, centroids
 

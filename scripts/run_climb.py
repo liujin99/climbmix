@@ -127,8 +127,16 @@ def main():
 
     # ── Output ──
     parser.add_argument("--output-dir", type=str, default="./climbmix_output")
+    parser.add_argument("--exp-name", type=str, default="main",
+                        help="Experiment name (like nanochat's model-tag): scopes proxy "
+                             "model tags (climbmix_{name}_{id}) and eval CSVs so parallel "
+                             "runs never overwrite each other. [A-Za-z0-9_-] only.")
 
     args = parser.parse_args()
+
+    import re
+    if not re.fullmatch(r"[A-Za-z0-9_\-]+", args.exp_name or ""):
+        parser.error(f"--exp-name must match [A-Za-z0-9_-]+ (got: {args.exp_name!r})")
 
     configs_per_iter = [int(x) for x in args.configs_per_iter.split(",")]
     val_tasks = STEM_BENCHMARK_LABELS.copy() if args.val_tasks is None else [x.strip() for x in args.val_tasks.split(",")]
@@ -191,6 +199,7 @@ def main():
         quality_config_path=args.quality_config_path,
         schema_path=args.schema,
         npu_per_exp=args.npu_per_exp,
+        experiment_name=args.exp_name,
     )
 
     print(f"\n{'=' * 70}")

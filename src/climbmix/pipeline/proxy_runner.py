@@ -9,8 +9,14 @@ Each proxy experiment:
   4. Parse evaluation results → ProxyResult
 
 Key design:
-  - Each experiment gets a unique model-tag (e.g. "climbmix_exp_0000")
+  - Each experiment gets a unique model-tag (e.g. "climbmix_main_0000");
+    the {experiment_name} part (CLIMBConfig.experiment_name) keeps parallel
+    runs with different names from overwriting each other's checkpoints
   - Each experiment gets a unique data-dir with mixture-weighted parquet shard
+  - Resume: run_experiment reuses a completed experiment (exp_XXXX/meta.json
+    with rc=0/0 and matching weights) instead of retraining; experiment ids
+    are GLOBAL (== config ids, passed via run_batch(experiment_id_base)) so
+    exp dirs never collide across iterations
   - Annealing semantics: lr_scale=1.0, warmup=0.0, warmdown=0.9
   - Fixed training via --num-iterations (not ratio-based)
   - Validation: STEM benchmarks → stem_metric (centered accuracy)
@@ -25,6 +31,7 @@ import json
 import shutil
 import importlib
 import subprocess
+import threading
 import time
 import numpy as np
 import numpy.typing as npt
@@ -63,10 +70,15 @@ class ProxyRunner:
         self.eval_benchmarks = config.eval_benchmarks
         self.npu_per_exp = getattr(config, 'npu_per_exp', 0)
         self.proxy_target_tokens = config.proxy.target_tokens
+        self.experiment_name = getattr(config, 'experiment_name', 'main') or "main"
 
         self.cluster_labels = cluster_labels
         self.token_counts = token_counts
         self.metadata_manager = metadata_manager
+        # download_climbmix (called from _prepare_mixture_data in worker threads)
+        # resumes into a fixed .tmp path; two threads downloading the same shard
+        # would corrupt each other's partial writes.
+        self._download_lock = threading.Lock()
 
     def _validate_nanochat(self):
         nc_dir = self.nanochat_dir
@@ -84,6 +96,46 @@ class ProxyRunner:
                 raise FileNotFoundError(f"nanochat module missing: {path}")
         print(f"  [ProxyRunner] nanochat-npu validated at {nc_dir}")
 
+    @staticmethod
+    def _load_completed_result(meta_path: str, mixture_config: MixtureConfig) -> Optional[ProxyResult]:
+        """Reconstruct a ProxyResult from a completed experiment's meta.json.
+
+        Returns None (=> the experiment must be re-run) unless the meta file
+        parses, BOTH mid_train and eval exited 0, and the recorded mixture
+        weights match the requested ones (np.allclose). The weight check
+        guards against reusing a result that belongs to a different config.
+        """
+        if not os.path.exists(meta_path):
+            return None
+        try:
+            with open(meta_path) as f:
+                meta = json.load(f)
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+            return None
+        if not isinstance(meta, dict):
+            return None
+        if meta.get("mid_train_rc") != 0 or meta.get("eval_rc") != 0:
+            return None
+        w = meta.get("weights")
+        if not isinstance(w, list):
+            return None
+        try:
+            w_arr = np.array(w, dtype=np.float64)
+        except (TypeError, ValueError):
+            return None
+        if w_arr.shape != mixture_config.mixture_weights.weights.shape or \
+                not np.allclose(w_arr, mixture_config.mixture_weights.weights, atol=1e-9):
+            return None
+        return ProxyResult(
+            mixture_config=mixture_config,
+            validation_loss=0.0,
+            validation_accuracy=float(meta.get("val_accuracy", 0.0)),
+            validation_nll=float(meta.get("stem_nll", 0.0)),
+            per_task_accuracies=meta.get("per_task_accuracies"),
+            per_task_nlls=meta.get("per_task_nlls"),
+            metadata=meta,
+        )
+
     def run_experiment(
         self,
         mixture_config: MixtureConfig,
@@ -96,9 +148,26 @@ class ProxyRunner:
     ) -> ProxyResult:
         output_dir = output_dir or self.config.output_dir
         exp_dir = os.path.join(output_dir, f"exp_{experiment_id:04d}")
-        os.makedirs(exp_dir, exist_ok=True)
+        meta_path = os.path.join(exp_dir, "meta.json")
 
-        model_tag = f"climbmix_{experiment_id:04d}"
+        model_tag = f"climbmix_{self.experiment_name}_{experiment_id:04d}"
+
+        # Resume support: reuse a previously completed experiment instead of
+        # retraining (which costs a full 1000-step proxy train + eval).
+        reused = self._load_completed_result(meta_path, mixture_config)
+        if reused is not None:
+            print(f"\n  [Exp {experiment_id}] Reusing completed experiment "
+                  f"(tag={model_tag}, weights match, rc=0/0)")
+            # The mixture data of a finished experiment is no longer needed.
+            shutil.rmtree(os.path.join(exp_dir, "mixture_data"), ignore_errors=True)
+            return reused
+
+        # Fresh (re)run: clear any partial state left by a previous crashed
+        # attempt — a half-written mixture_data dir would feed the dataloader
+        # stale shards alongside the new ones.
+        if os.path.isdir(exp_dir):
+            shutil.rmtree(exp_dir)
+        os.makedirs(exp_dir, exist_ok=True)
 
         self._symlink_base_checkpoint(model_tag)
 
@@ -151,6 +220,9 @@ class ProxyRunner:
             "warmup": self.proxy_warmup,
             "warmdown": self.proxy_warmdown,
             "mixture_weights": mixture_config.mixture_weights.to_dict(),
+            # Plain weight list: exact-match key for experiment resume
+            # (see _load_completed_result).
+            "weights": mixture_config.mixture_weights.weights.tolist(),
             "validation_metric": self.validation_metric,
             "val_tasks": self.val_tasks,
             "stem_ratio": self.stem_ratio,
@@ -189,11 +261,20 @@ class ProxyRunner:
         configs: List[MixtureConfig],
         data_dir: Optional[str] = None,
         output_dir: Optional[str] = None,
+        experiment_id_base: int = 0,
     ) -> List[ProxyResult]:
+        """Run a batch of proxy experiments.
+
+        experiment_id_base: global offset for experiment ids (and thus exp dirs
+        and model tags). The bootstrapper passes the current accumulated-config
+        count so ids stay globally unique across iterations — exp_0000 of
+        iteration 2 never collides with exp_0000 of iteration 1.
+        """
         if self.npu_per_exp == 0 or self.npu_per_exp >= self.npu_devices:
             results = []
             for i, config in enumerate(configs):
-                r = self.run_experiment(config, experiment_id=i, data_dir=data_dir, output_dir=output_dir)
+                r = self.run_experiment(config, experiment_id=experiment_id_base + i,
+                                        data_dir=data_dir, output_dir=output_dir)
                 results.append(r)
             return results
 
@@ -216,7 +297,7 @@ class ProxyRunner:
             with ThreadPoolExecutor(max_workers=batch_size) as pool:
                 futures = {}
                 for i in range(batch_size):
-                    exp_id = batch_start + i
+                    exp_id = experiment_id_base + batch_start + i
                     group_id = i
                     dev_start = group_id * devices_per_exp
                     devices = list(range(dev_start, dev_start + devices_per_exp))
@@ -377,10 +458,10 @@ class ProxyRunner:
             try:
                 mix_mod = self._load_mix_module()
             except FileNotFoundError as e:
-                print(f"  [Exp {experiment_id}] WARNING: {e}, using STEM only")
-                self._copy_stem_only(stem_temp_dir, mixture_data_dir)
-                shutil.rmtree(stem_temp_dir, ignore_errors=True)
-                return
+                raise FileNotFoundError(
+                    f"Exp {experiment_id}: stem_ratio={self.stem_ratio} requires "
+                    f"mix_general_data.py, but it could not be loaded: {e}"
+                ) from e
 
             stem_train_files = sorted(
                 os.path.join(stem_temp_dir, f)
@@ -394,22 +475,22 @@ class ProxyRunner:
             print(f"  [Exp {experiment_id}] STEM: {stem_docs:,} docs -> need {needed_shards} ClimbMix shards "
                   f"({self.stem_ratio*100:.0f}% STEM + {(1-self.stem_ratio)*100:.0f}% general)")
 
-            climb_files = mix_mod.download_climbmix(
-                self.general_data_dir, needed_shards, self.npu_devices
-            )
-
-            if not climb_files:
-                print(f"  [Exp {experiment_id}] WARNING: No ClimbMix data available, using STEM only")
-                self._copy_stem_only(stem_temp_dir, mixture_data_dir)
-            else:
-                detected_batch = mix_mod.detect_shard_size(stem_train_files)
-                num_output_files = len(stem_train_files)
-                mix_mod.mix_data(
-                    stem_temp_dir, climb_files, mixture_data_dir,
-                    num_output_files, detected_batch, num_npu=nproc,
+            # Parallel experiments in the same process share general_data_dir;
+            # serialize downloads (first thread downloads, the rest hit the
+            # exists+validate cache in download_single_file).
+            with self._download_lock:
+                climb_files = mix_mod.download_climbmix(
+                    self.general_data_dir, needed_shards, self.npu_devices
                 )
-                print(f"  [Exp {experiment_id}] Mixed {stem_docs:,} STEM + "
-                      f"~{int(stem_docs * (1-self.stem_ratio) / self.stem_ratio):,} general")
+
+            detected_batch = mix_mod.detect_shard_size(stem_train_files)
+            num_output_files = len(stem_train_files)
+            mix_mod.mix_data(
+                stem_temp_dir, climb_files, mixture_data_dir,
+                num_output_files, detected_batch, num_npu=nproc,
+            )
+            print(f"  [Exp {experiment_id}] Mixed {stem_docs:,} STEM + "
+                  f"~{int(stem_docs * (1-self.stem_ratio) / self.stem_ratio):,} general")
         else:
             self._copy_stem_only(stem_temp_dir, mixture_data_dir)
             print(f"  [Exp {experiment_id}] No general data, using {n_stem} STEM docs only")

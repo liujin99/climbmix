@@ -10,6 +10,7 @@ Paper-aligned changes:
 import time
 import json
 import os
+import inspect
 import numpy as np
 import numpy.typing as npt
 from typing import Dict, List, Optional, Any, Tuple
@@ -24,6 +25,7 @@ from climbmix.core.types import (
 )
 from climbmix.core.dirichlet_sampler import DirichletSampler
 from climbmix.core.predictor import get_predictor
+from climbmix.utils.io_utils import atomic_write_json, load_json_state
 
 
 class IterativeBootstrapper:
@@ -61,6 +63,10 @@ class IterativeBootstrapper:
         self.w_floor = config.search.w_floor
         self.state_path = state_path
         self._last_completed_iter = 0
+        # Configs of the iteration currently being trained (written to state
+        # BEFORE the experiments run so a mid-iteration crash restores the
+        # exact same configs instead of re-sampling different ones).
+        self._pending: Optional[Dict[str, Any]] = None
 
     def _is_better(self, score_a: float, score_b: float) -> bool:
         if self.metric_direction == "maximize":
@@ -86,29 +92,43 @@ class IterativeBootstrapper:
                 {"acc": d[0], "nll": d[1]}
                 for d in self._accumulated_per_benchmark
             ],
+            "pending": self._pending,
         }
-        with open(self.state_path, "w") as f:
-            json.dump(state, f)
-        print(f"[Search] State saved → {self.state_path} (iter {self._last_completed_iter}, {len(self._accumulated_configs)} configs)")
+        atomic_write_json(self.state_path, state)
+        pend = ""
+        if self._pending:
+            pend = (f", pending iter {self._pending['iteration']} "
+                    f"({len(self._pending['configs'])} configs)")
+        print(f"[Search] State saved → {self.state_path} (iter {self._last_completed_iter}, "
+              f"{len(self._accumulated_configs)} configs{pend})")
 
     def _load_state(self) -> int:
         if not self.state_path or not os.path.exists(self.state_path):
             return 0
-        with open(self.state_path) as f:
-            state = json.load(f)
-        self._accumulated_scores = state["accumulated_scores"]
-        self._accumulated_configs = [
-            MixtureConfig(
-                mixture_weights=MixtureWeights(weights=np.array(c["weights"], dtype=np.float64)),
-                config_id=c["config_id"],
-            )
-            for c in state["accumulated_configs"]
-        ]
-        self._accumulated_per_benchmark = [
-            (d["acc"], d["nll"]) for d in state["accumulated_per_benchmark"]
-        ]
-        self._last_completed_iter = state["last_completed_iter"]
-        print(f"[Search] State loaded ← {self.state_path} (iter {self._last_completed_iter}, {len(self._accumulated_configs)} configs)")
+        state = load_json_state(self.state_path)
+        if state is None:
+            print(f"[Search] State file unreadable (crashed mid-write?), starting fresh: "
+                  f"{self.state_path}")
+            return 0
+        try:
+            self._accumulated_scores = state["accumulated_scores"]
+            self._accumulated_configs = [
+                MixtureConfig(
+                    mixture_weights=MixtureWeights(weights=np.array(c["weights"], dtype=np.float64)),
+                    config_id=c["config_id"],
+                )
+                for c in state["accumulated_configs"]
+            ]
+            self._accumulated_per_benchmark = [
+                (d["acc"], d["nll"]) for d in state["accumulated_per_benchmark"]
+            ]
+            self._last_completed_iter = state["last_completed_iter"]
+            self._pending = state.get("pending")
+        except (KeyError, TypeError, ValueError):
+            print(f"[Search] State file malformed, starting fresh: {self.state_path}")
+            return 0
+        print(f"[Search] State loaded ← {self.state_path} (iter {self._last_completed_iter}, "
+              f"{len(self._accumulated_configs)} configs)")
         return self._last_completed_iter
 
     def _compute_scores(self) -> npt.NDArray[np.float64]:
@@ -150,11 +170,101 @@ class IterativeBootstrapper:
         per_config_scores /= len(benchmarks)
         return per_config_scores
 
+    def _refit_predictor(self) -> Tuple[npt.NDArray[np.float64], Optional[List[Any]], Optional[npt.NDArray[np.float64]]]:
+        """(Re)train the predictor on all accumulated configs.
+
+        Used both at the end of every iteration and after a resume, so a
+        resumed run continues exactly like an uninterrupted one:
+          - the next iteration uses predictor-guided sampling (not plain
+            Dirichlet), matching the never-interrupted behavior;
+          - a run interrupted AFTER the last iteration still selects the
+            final mixture via the full-design-space search (paper section
+            3.3) instead of falling back to the accumulated best.
+
+        Returns (all_scores, val_configs, val_targets).
+        """
+        print(f"[Predictor] Computing SNR-weighted scores on "
+              f"{len(self._accumulated_per_benchmark)} accumulated configs")
+        all_scores = self._compute_scores()
+        self._accumulated_scores = all_scores.tolist()
+
+        if not self._accumulated_configs:
+            return all_scores, None, None
+
+        print(f"[Predictor] Training predictor on {len(self._accumulated_configs)} accumulated configs")
+
+        if self.metric_direction == "minimize":
+            predictor_targets = all_scores
+        else:
+            predictor_targets = -all_scores
+
+        valid_mask = np.isfinite(predictor_targets)
+
+        train_configs = [c for c, v in zip(self._accumulated_configs, valid_mask) if v]
+        train_targets = predictor_targets[valid_mask]
+
+        n_total = len(train_configs)
+        val_configs_split = None
+        val_targets_split = None
+        if n_total >= 10:
+            n_val = max(5, int(n_total * 0.2))
+            rng_split = np.random.default_rng(42)
+            indices = rng_split.permutation(n_total)
+            train_idx = indices[:n_total - n_val]
+            val_idx = indices[n_total - n_val:]
+
+            val_configs_split = [train_configs[i] for i in val_idx]
+            val_targets_split = train_targets[val_idx]
+            train_configs = [train_configs[i] for i in train_idx]
+            train_targets = train_targets[train_idx]
+
+        predictor = get_predictor(
+            self.config.predictor.method,
+            self.num_clusters,
+            self.config.predictor,
+        )
+        predictor.fit(
+            train_configs, train_targets,
+            val_configs=val_configs_split,
+            val_losses=val_targets_split,
+        )
+
+        self._predictor = predictor
+        return all_scores, val_configs_split, val_targets_split
+
+    def _reconstruct_iteration_results(self) -> List[IterationResult]:
+        """Rebuild per-iteration results from accumulated state after a resume,
+        so the final report/summary still covers pre-crash iterations."""
+        results: List[IterationResult] = []
+        offset = 0
+        scores = (np.array(self._accumulated_scores, dtype=np.float64)
+                  if self._accumulated_scores else np.array([], dtype=np.float64))
+        for k, n in enumerate(self.config.search.configs_per_iter):
+            if offset + n > len(self._accumulated_configs):
+                break
+            chunk_configs = self._accumulated_configs[offset:offset + n]
+            chunk_scores = scores[offset:offset + n]
+            best_idx = self._best_index(chunk_scores) if len(chunk_scores) else 0
+            results.append(IterationResult(
+                iteration=k + 1,
+                n_configs=n,
+                n_trained=n,
+                predictor=self._predictor,
+                predictor_r2=None,
+                best_config=chunk_configs[best_idx] if chunk_configs else None,
+                best_score=float(chunk_scores[best_idx]) if len(chunk_scores) else None,
+                all_configs=chunk_configs,
+                all_scores=chunk_scores,
+            ))
+            offset += n
+        return results
+
     def run_iteration(
         self,
         iteration: int,
         n_configs: int,
         proxy_runner: Optional[Any] = None,
+        preset_configs: Optional[List[MixtureConfig]] = None,
     ) -> IterationResult:
         print(f"\n{'=' * 70}")
         print(f"  CLIMB Iteration {iteration}")
@@ -163,7 +273,10 @@ class IterativeBootstrapper:
 
         t0 = time.time()
 
-        if iteration == 1 or self._predictor is None:
+        if preset_configs is not None:
+            new_configs = list(preset_configs)
+            print(f"[Iter {iteration}] Restored {len(new_configs)} pending configs from saved state")
+        elif iteration == 1 or self._predictor is None:
             print(f"[Iter {iteration}] Sampling {n_configs} configs from Dirichlet")
             new_configs = self._sampler.sample_batch(n_configs)
         else:
@@ -195,11 +308,31 @@ class IterativeBootstrapper:
         for i, c in enumerate(new_configs):
             c.config_id = len(self._accumulated_configs) + i
 
+        # Persist this iteration's configs BEFORE running the experiments: if
+        # we crash mid-iteration, the restart restores exactly these configs
+        # (not a fresh Dirichlet/predictor-guided sample), which is what lets
+        # the proxy runner match and reuse exp_XXXX/meta.json results.
+        if self.state_path:
+            self._pending = {
+                "iteration": iteration,
+                "configs": [c.mixture_weights.weights.tolist() for c in new_configs],
+            }
+            self._save_state()
+
         trained_configs: List[MixtureConfig] = []
 
         if proxy_runner is not None:
             print(f"[Iter {iteration}] Training {len(new_configs)} proxy models")
-            results = proxy_runner.run_batch(new_configs)
+            # Global experiment ids (== config ids) so exp dirs never collide
+            # across iterations and meta.json reuse can match them.
+            run_kwargs = {}
+            try:
+                sig = inspect.signature(proxy_runner.run_batch)
+                if "experiment_id_base" in sig.parameters:
+                    run_kwargs["experiment_id_base"] = len(self._accumulated_configs)
+            except (ValueError, TypeError):
+                pass
+            results = proxy_runner.run_batch(new_configs, **run_kwargs)
             for r in results:
                 trained_configs.append(r.mixture_config)
                 self._accumulated_configs.append(r.mixture_config)
@@ -216,55 +349,10 @@ class IterativeBootstrapper:
                 fake_nll = {b: float(rng.uniform(2.0, 4.0)) for b in self.config.val_tasks}
                 self._accumulated_per_benchmark.append((fake_acc, fake_nll))
 
-        print(f"[Iter {iteration}] Computing SNR-weighted scores on {len(self._accumulated_per_benchmark)} accumulated configs")
-        all_scores = self._compute_scores()
-        self._accumulated_scores = all_scores.tolist()
+        all_scores, val_configs_split, val_targets_split = self._refit_predictor()
 
         n_new = len(trained_configs)
         scores_arr = all_scores[-n_new:] if n_new > 0 else np.array([], dtype=np.float64)
-
-        print(f"[Iter {iteration}] Training predictor on {len(self._accumulated_configs)} accumulated configs")
-
-        if self.metric_direction == "minimize":
-            predictor_targets = all_scores
-        else:
-            predictor_targets = -all_scores
-
-        valid_mask = np.isfinite(predictor_targets)
-
-        train_configs = [c for c, v in zip(self._accumulated_configs, valid_mask) if v]
-        train_targets = predictor_targets[valid_mask]
-
-        n_total = len(train_configs)
-        if n_total < 10:
-            val_configs_split = None
-            val_targets_split = None
-        else:
-            n_val = max(5, int(n_total * 0.2))
-            rng_split = np.random.default_rng(42)
-            indices = rng_split.permutation(n_total)
-            train_idx = indices[:n_total - n_val]
-            val_idx = indices[n_total - n_val:]
-
-            train_configs_split = [train_configs[i] for i in train_idx]
-            train_targets_split = train_targets[train_idx]
-            val_configs_split = [train_configs[i] for i in val_idx]
-            val_targets_split = train_targets[val_idx]
-            train_configs = train_configs_split
-            train_targets = train_targets_split
-
-        predictor = get_predictor(
-            self.config.predictor.method,
-            self.num_clusters,
-            self.config.predictor,
-        )
-        predictor.fit(
-            train_configs, train_targets,
-            val_configs=val_configs_split,
-            val_losses=val_targets_split,
-        )
-
-        self._predictor = predictor
 
         best_idx = self._best_index(scores_arr)
         best_config = trained_configs[best_idx]
@@ -275,7 +363,7 @@ class IterativeBootstrapper:
             iteration=iteration,
             n_configs=n_configs,
             n_trained=len(trained_configs),
-            predictor=predictor,
+            predictor=self._predictor,
             predictor_r2=None,
             best_config=best_config,
             best_score=best_score,
@@ -283,8 +371,8 @@ class IterativeBootstrapper:
             all_scores=scores_arr,
         )
 
-        if n_total >= 10 and val_configs_split is not None:
-            iter_result.predictor_r2 = float(predictor.score(
+        if val_configs_split is not None:
+            iter_result.predictor_r2 = float(self._predictor.score(
                 val_configs_split, val_targets_split,
             ))
 
@@ -317,16 +405,37 @@ class IterativeBootstrapper:
         t0 = time.time()
 
         start_iter = 1
+        resumed_pending: Optional[Dict[str, Any]] = None
         if self.state_path:
             loaded_iter = self._load_state()
+            resumed_pending = self._pending
             if loaded_iter > 0:
                 start_iter = loaded_iter + 1
+                self._iteration_results = self._reconstruct_iteration_results()
                 print(f"[Search] Resuming from iteration {start_iter}")
+                # Refit the predictor from accumulated data so the resumed run
+                # behaves exactly like an uninterrupted one: predictor-guided
+                # sampling for the next iteration, and full-design-space
+                # selection even if all iterations had already finished.
+                if self._accumulated_configs:
+                    self._refit_predictor()
 
         for k in range(start_iter - 1, self.config.search.num_iterations):
             n_configs = self.config.search.configs_per_iter[k]
-            self.run_iteration(k + 1, n_configs, proxy_runner)
+            preset = None
+            if resumed_pending is not None and resumed_pending.get("iteration") == k + 1:
+                preset = [
+                    MixtureConfig(
+                        mixture_weights=MixtureWeights(
+                            weights=np.array(w, dtype=np.float64)),
+                    )
+                    for w in resumed_pending["configs"]
+                ]
+                n_configs = len(preset)
+                resumed_pending = None
+            self.run_iteration(k + 1, n_configs, proxy_runner, preset_configs=preset)
             self._last_completed_iter = k + 1
+            self._pending = None
             self._save_state()
 
         if self._predictor is None:

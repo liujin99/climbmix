@@ -3,16 +3,29 @@
 Convert a parquet file (sampled_dataset.parquet) into nanochat shard format.
 Last shard is the val split (nanochat convention: last file = val, real docs).
 
+Crash safety: shards are written to temp names and renamed into place, and a
+.done marker is only written after everything succeeded. A directory with
+shards but no .done is treated as a crashed partial run: it is wiped and
+redone (never fed to the dataloader half-written).
+
 DDP row-group safety: nanochat's dataloader shards row groups round-robin
 across ranks (rank r reads rg r, r+W, r+2W, ... per file). Every shard must
 therefore contain at least num_npu row groups, or ranks with no assigned
 row group spin forever inside the dataloader and HCCL times out.
 """
 import argparse
+import json
 import os
 import math
 import pyarrow.parquet as pq
 import pyarrow as pa
+
+
+def _atomic_write(args_output_dir, name, table, rg_size):
+    shard_path = os.path.join(args_output_dir, name)
+    tmp_path = shard_path + ".tmp.parquet"
+    pq.write_table(table, tmp_path, row_group_size=rg_size)
+    os.replace(tmp_path, shard_path)
 
 
 def main():
@@ -25,10 +38,18 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    existing = [f for f in os.listdir(args.output_dir) if f.startswith("shard_")]
-    if existing:
-        print(f"  Shards already exist ({len(existing)}), skipping")
+    done_marker = os.path.join(args.output_dir, ".done")
+    if os.path.exists(done_marker):
+        print(f"  Shards already complete (.done), skipping")
         return
+
+    # Shards without .done = crashed partial run: wipe and redo.
+    leftovers = [f for f in os.listdir(args.output_dir)
+                 if f.startswith("shard_") or f.endswith(".tmp.parquet")]
+    if leftovers:
+        print(f"  Cleaning {len(leftovers)} partial files from a crashed run (no .done)")
+        for f in leftovers:
+            os.remove(os.path.join(args.output_dir, f))
 
     table = pq.read_table(args.input, columns=["text"])
     texts = table["text"].to_pylist()
@@ -63,12 +84,15 @@ def main():
         start = i * args.shard_size
         end = min(start + args.shard_size, n_train)
         shard_texts = train_texts[start:end]
-        shard_table = pa.table({"text": shard_texts})
-        pq.write_table(shard_table, os.path.join(args.output_dir, f"shard_{i:05d}.parquet"), row_group_size=rg_size)
+        _atomic_write(args.output_dir, f"shard_{i:05d}.parquet",
+                      pa.table({"text": shard_texts}), rg_size)
 
-    pq.write_table(pa.table({"text": val_texts}),
-                   os.path.join(args.output_dir, f"shard_{n_shards:05d}.parquet"),
-                   row_group_size=1)
+    _atomic_write(args.output_dir, f"shard_{n_shards:05d}.parquet",
+                  pa.table({"text": val_texts}), 1)
+
+    with open(done_marker, "w") as f:
+        json.dump({"n_train_shards": n_shards, "val_docs": val_n,
+                   "rg_size": rg_size, "num_npu": args.num_npu}, f)
 
     print(f"  {n} docs -> {n_shards} train shards (rg_size={rg_size}) "
           f"+ 1 val shard ({val_n} docs, rg_size=1) -> {args.output_dir}")

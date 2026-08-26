@@ -18,6 +18,7 @@
 - **Eval CSV location**: 3-tier strategy (filename contains model_tag → mtime within eval window → global newest); failed evals skip parsing instead of reading stale CSVs
 - **nanochat-npu integration**: all training via subprocess torchrun, --device-type npu
 - **Self-contained scripts**: get_model_info.py and mix_general_data.py in climbmix/scripts/, no quadmix dependency
+- **Crash resume (A+B+C+D)**: fingerprint auto-reset (code/param change → archive stale output dir), shard-level embedding resume (memmap + per-worker progress ledgers), iteration-level search state (`search_state.json`, atomic, with pending-iteration configs), experiment-level reuse (`exp_XXXX/meta.json` rc=0/0 + weight match, globally unique exp ids), predictor refit on resume (search continues paper-faithfully incl. full-design-space selection), atomic writes + `.done` markers for shards/mix/sampled/cluster caches, per-target `.done` markers with partial-checkpoint cleanup. EXP_NAME isolates experiments (output dir + proxy/target tags)
 
 ## Resolved Design Decisions
 
@@ -40,6 +41,10 @@
 
 ## Known Limitations
 
+- Resume is atomic per experiment/training run, NOT per training step: an interrupted nanochat training restarts from step 0 (partial target checkpoints are deliberately cleared before retrain)
+- Fingerprint does not detect: edits inside nanochat-npu, or data files whose names/row-counts are unchanged (content swaps)
+- Predictor refit on resume assumes LightGBM determinism (same accumulated data → same model); verified identical weights in local integration tests
+- quality_cluster discovery breaks when K_init > number of domains (centroids shape error) — unused in production (embedding_cluster)
 - NPU embedding compatibility relies on the stella buffer repair; re-verify NaN=0 after any sentence-transformers upgrade
 - ClimbMix shard count is adaptive (3-50), not full 400B dataset — only enough to match 30% of STEM doc count
 - d28 DEPTH_INFO requires meta_*.json checkpoint for auto-detection; without checkpoint, raises ValueError

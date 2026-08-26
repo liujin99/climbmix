@@ -499,6 +499,10 @@ class CLIMBConfig:
     quality_config_path: str = ""
     schema_path: str = ""
     npu_per_exp: int = 0
+    # Experiment name (like nanochat's model-tag): scopes proxy model tags
+    # (climbmix_{name}_{id}) so parallel runs with different names never
+    # overwrite each other's checkpoints / eval CSVs.
+    experiment_name: str = "main"
 
     @property
     def metric_direction(self) -> str:

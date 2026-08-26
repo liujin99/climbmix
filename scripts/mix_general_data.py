@@ -12,9 +12,11 @@ References:
   - DeepSeek V3: weight_decay=0.1, warmup=2K steps
   - Kimi K2: weight_decay=0.1, warmup=500 steps
 """
+import json
 import math
 import os
 import sys
+import time
 import argparse
 import random
 import shutil
@@ -57,9 +59,9 @@ def count_stem_docs(stem_train_files):
     total = 0
     for f in stem_train_files:
         try:
-            total += pq.ParquetFile(f).num_rows
-        except Exception:
-            print(f"  WARNING: could not read metadata for {f}")
+            total += pq.ParquetFile(f).metadata.num_rows
+        except Exception as e:
+            raise RuntimeError(f"could not read parquet metadata for {f}: {e}") from e
     return total
 
 
@@ -68,9 +70,11 @@ def detect_shard_size(stem_train_files):
     if not stem_train_files:
         return BATCH_PER_FILE
     try:
-        return pq.ParquetFile(stem_train_files[0]).num_rows
-    except Exception:
-        return BATCH_PER_FILE
+        return pq.ParquetFile(stem_train_files[0]).metadata.num_rows
+    except Exception as e:
+        raise RuntimeError(
+            f"could not read parquet metadata for {stem_train_files[0]}: {e}"
+        ) from e
 
 
 def calc_climbmix_count(stem_docs, stem_ratio):
@@ -92,6 +96,11 @@ def download_climbmix(data_dir, num_shards, num_workers=16):
     for round_idx in range(1, 4):
         if not remaining:
             break
+        if round_idx > 1:
+            # Transient proxy/network failures (e.g. 503 bursts lasting tens of
+            # minutes) deserve a cooldown before the next round of retries.
+            print(f"  Cooling down 60s before round {round_idx}...")
+            time.sleep(60)
         round_workers = max(4, num_workers // round_idx)
         with ThreadPool(round_workers) as pool:
             results = pool.map(lambda i: download_single_file(i, data_dir, "climb"), remaining)
@@ -103,7 +112,11 @@ def download_climbmix(data_dir, num_shards, num_workers=16):
         remaining = failed
 
     if remaining:
-        print(f"  WARNING: {len(remaining)} ClimbMix files permanently failed: shards {remaining}")
+        raise RuntimeError(
+            f"ClimbMix download failed for shards {remaining} after 3 rounds. "
+            f"Check proxy/network, or pre-download manually into {data_dir} "
+            f"(HF_ENDPOINT=https://hf-mirror.com may help)."
+        )
 
     climb_files = [os.path.join(data_dir, index_to_filename(i)) for i in climb_ids]
     climb_files = [f for f in climb_files if os.path.exists(f)]
@@ -119,11 +132,30 @@ def endless_generator(gen_func, files):
 
 
 def mix_data(stem_dir, climb_files, output_dir, num_output_files, batch_per_file=BATCH_PER_FILE, num_npu=8):
-    """Mix 70% STEM + 30% ClimbMix at document level."""
+    """Mix 70% STEM + 30% ClimbMix at document level.
+
+    Crash safety: shards are written to temp names and renamed into place; a
+    .done marker is written only after everything (incl. the val shard copy)
+    succeeded. Pre-existing shards without .done are treated as a crashed
+    partial run and wiped before redoing.
+    """
     if not climb_files:
         raise ValueError("No ClimbMix files available. Download failed?")
 
     os.makedirs(output_dir, exist_ok=True)
+
+    done_marker = os.path.join(output_dir, ".done")
+    if os.path.exists(done_marker):
+        print(f"  Mix already complete (.done), skipping: {output_dir}")
+        with open(done_marker) as f:
+            return json.load(f).get("n_train_shards", 0)
+
+    leftovers = [f for f in os.listdir(output_dir)
+                 if f.startswith("shard_") or f.endswith(".tmp.parquet")]
+    if leftovers:
+        print(f"  Cleaning {len(leftovers)} partial files from a crashed run (no .done)")
+        for f in leftovers:
+            os.remove(os.path.join(output_dir, f))
 
     all_files = sorted(Path(stem_dir).glob("shard_*.parquet"))
     if not all_files:
@@ -138,6 +170,12 @@ def mix_data(stem_dir, climb_files, output_dir, num_output_files, batch_per_file
     # DDP row-group safety: every output shard must contain at least num_npu
     # row groups (dataloader assigns row groups round-robin per rank).
     rg_size = max(1, batch_per_file // (num_npu * 2))
+
+    def _atomic_write(name, table):
+        out_path = os.path.join(output_dir, name)
+        tmp_path = out_path + ".tmp.parquet"
+        pq.write_table(table, tmp_path, row_group_size=rg_size)
+        os.replace(tmp_path, out_path)
 
     print(f"  STEM: {len(stem_files)} train shards from {stem_dir}")
     print(f"  ClimbMix: {len(climb_files)} shards")
@@ -164,14 +202,12 @@ def mix_data(stem_dir, climb_files, output_dir, num_output_files, batch_per_file
             pbar.update(1)
 
             if len(current) >= batch_per_file:
-                out_path = os.path.join(output_dir, f"shard_{file_idx:05d}.parquet")
-                pq.write_table(pa.table({"text": current}), out_path, row_group_size=rg_size)
+                _atomic_write(f"shard_{file_idx:05d}.parquet", pa.table({"text": current}))
                 current = []
                 file_idx += 1
     finally:
         if current and file_idx < num_output_files:
-            out_path = os.path.join(output_dir, f"shard_{file_idx:05d}.parquet")
-            pq.write_table(pa.table({"text": current}), out_path, row_group_size=rg_size)
+            _atomic_write(f"shard_{file_idx:05d}.parquet", pa.table({"text": current}))
             file_idx += 1
 
         del stem_gen
@@ -180,8 +216,14 @@ def mix_data(stem_dir, climb_files, output_dir, num_output_files, batch_per_file
 
     if val_file:
         val_dst = os.path.join(output_dir, f"shard_{file_idx:05d}.parquet")
-        shutil.copy2(val_file, val_dst)
+        tmp_dst = val_dst + ".tmp.parquet"
+        shutil.copy2(val_file, tmp_dst)
+        os.replace(tmp_dst, val_dst)
         print(f"  Copied val shard: {Path(val_file).name} -> shard_{file_idx:05d}.parquet")
+
+    with open(done_marker, "w") as f:
+        json.dump({"n_train_shards": file_idx, "has_val": bool(val_file),
+                   "batch_per_file": batch_per_file, "rg_size": rg_size}, f)
 
     print(f"  Done: {file_idx} train + 1 val shard -> {output_dir}")
     return file_idx

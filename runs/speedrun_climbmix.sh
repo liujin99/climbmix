@@ -14,6 +14,10 @@
 #      该缓存也供 full run 复用)。不做 random baseline。
 #
 #  用法:  bash runs/speedrun_climbmix.sh
+#
+#  断点续跑: 直接重跑同一命令。指纹(代码+参数)匹配 → 自动续跑;
+#  变更代码/参数后旧目录自动归档为 result/speedrun_stale_<ts> 并全新开始
+#  (改代码后无需手动 rm -rf)。强制全新: 换 EXP_NAME 或 rm -rf。
 # ═══════════════════════════════════════════════════════════════════════
 source /usr/local/Ascend/ascend-toolkit/set_env.sh 2>/dev/null || true
 
@@ -23,6 +27,7 @@ set -euo pipefail
 CLIMBMIX_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 export PYTHONPATH="${CLIMBMIX_DIR}/src:${PYTHONPATH:-}"
 
+EXP_NAME="${EXP_NAME:-speedrun}"
 DATA_DIR="${DATA_DIR:-/home/ma-user/work/100B_stem_parquet_filtered}"
 SPEED_DATA="/tmp/speedrun_data"
 NANOCHAT_DIR="${NANOCHAT_DIR:-/home/ma-user/work/nanochat-npu}"
@@ -44,8 +49,7 @@ STEM_RATIO="${STEM_RATIO:-0.7}"
 PROXY_TARGET_TOKENS=10M
 TARGET_TOKENS=10M
 
-TS=$(date +%Y%m%d_%H%M%S)
-OUTPUT_DIR="$CLIMBMIX_DIR/result/speedrun_${TS}"
+OUTPUT_DIR="${OUTPUT_DIR:-$CLIMBMIX_DIR/result/$EXP_NAME}"
 
 # ── NPU Environment ──
 export OMP_NUM_THREADS=1 WANDB_MODE=offline NANOCHAT_BASE_DIR="$NANOCHAT_BASE_DIR"
@@ -64,6 +68,39 @@ export TORCH_NPU_ALLOC_CONF="expandable_segments:True,max_split_size_mb:256,memo
 export PYTORCH_NPU_ALLOC_MAX_SIZE=60G ASCEND_ENABLE_CACHE=1
 export NANOCHAT_DTYPE=bfloat16 PYTHONWARNINGS="ignore::UserWarning:torch_npu"
 
+# ── Fingerprint: code + semantic params → auto-reset on change ──
+FINGERPRINT=$(python3 -m climbmix.utils.fingerprint --base-dir "$CLIMBMIX_DIR" \
+    --param "proxy_depth=$PROXY_DEPTH" \
+    --param "target_depth=$TARGET_DEPTH" \
+    --param "proxy_num_iterations=$PROXY_NUM_ITERATIONS" \
+    --param "target_steps=$TARGET_STEPS" \
+    --param "proxy_target_tokens=$PROXY_TARGET_TOKENS" \
+    --param "target_tokens=$TARGET_TOKENS" \
+    --param "configs_per_iter=$CONFIGS_PER_ITER" \
+    --param "K_enhanced=$K_ENHANCED" \
+    --param "K_init=$K_INIT" \
+    --param "embedding_sample_size=$EMBEDDING_SAMPLE_SIZE" \
+    --param "stem_ratio=$STEM_RATIO" \
+    --param "eval_benchmarks=$EVAL_BENCHMARKS" \
+    --param "num_npu=$NUM_NPU" \
+    --param "npu_per_exp=$NPU_PER_EXP" \
+    --param "data_dir=$DATA_DIR" \
+    --param "general_data_dir=$GENERAL_DATA_DIR")
+
+mkdir -p "$CLIMBMIX_DIR/result"
+if [ -d "$OUTPUT_DIR" ] && [ -n "$(ls -A "$OUTPUT_DIR" 2>/dev/null)" ]; then
+    if [ -f "$OUTPUT_DIR/.fingerprint" ] && [ "$(cat "$OUTPUT_DIR/.fingerprint")" = "$FINGERPRINT" ]; then
+        echo "  RESUME: $OUTPUT_DIR (fingerprint ${FINGERPRINT} matches)"
+    else
+        STALE="$CLIMBMIX_DIR/result/${EXP_NAME}_stale_$(date +%Y%m%d_%H%M%S)"
+        echo "  Fingerprint changed (code or params) — archiving old output:"
+        echo "    $OUTPUT_DIR -> $STALE"
+        mv "$OUTPUT_DIR" "$STALE"
+    fi
+fi
+mkdir -p "$OUTPUT_DIR"
+echo "$FINGERPRINT" > "$OUTPUT_DIR/.fingerprint"
+
 # ── Pre-flight ──
 echo -e "\n════════════════════════════════════════════════════════════"
 echo "  ClimbMix Speedrun: d${PROXY_DEPTH} → d${TARGET_DEPTH}  |  $OUTPUT_DIR"
@@ -79,7 +116,6 @@ for d in "$PROXY_DEPTH" "$TARGET_DEPTH"; do
     echo "✓ d${d} checkpoint"
 done
 
-mkdir -p "$OUTPUT_DIR"
 ( cd "$NANOCHAT_DIR" && python3 -c "from scripts.base_eval import prepare_eval_data; prepare_eval_data('stem')" 2>/dev/null ) || true
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -98,36 +134,42 @@ ls -lh "$SPEED_DATA"/*.parquet
 # ═══════════════════════════════════════════════════════════════════════
 #  Step 1-3: Embedding + Proxy Search + Data Selection
 #  Tests: ProxyRunner._build_mid_train_cmd + _build_eval_cmd (fixed with --)
+#  (search_state 迭代级续跑 + exp_*/meta.json 实验级复用 — 均自动)
 # ═══════════════════════════════════════════════════════════════════════
-echo -e "\n===== Step 1-3: Proxy Search (d${PROXY_DEPTH}, ${CONFIGS_PER_ITER} configs, ${PROXY_NUM_ITERATIONS} steps) =====\n"
+if [ -f "$OUTPUT_DIR/sampled_dataset.parquet" ]; then
+    echo -e "\n===== Step 1-3: Proxy Search — already complete, skip =====\n"
+else
+    echo -e "\n===== Step 1-3: Proxy Search (d${PROXY_DEPTH}, ${CONFIGS_PER_ITER} configs, ${PROXY_NUM_ITERATIONS} steps) =====\n"
 
-python3 "$CLIMBMIX_DIR/scripts/run_climb.py" \
-    --data-dir "$SPEED_DATA" \
-    --nanochat-dir "$NANOCHAT_DIR" \
-    --nanochat-base-dir "$NANOCHAT_BASE_DIR" \
-    --general-data-dir "$GENERAL_DATA_DIR" \
-    --stem-ratio "$STEM_RATIO" \
-    --eval-benchmarks "$EVAL_BENCHMARKS" \
-    --proxy-depth "$PROXY_DEPTH" \
-    --proxy-num-iterations "$PROXY_NUM_ITERATIONS" \
-    --proxy-lr-scale 1.0 --proxy-warmup 0.0 --proxy-warmdown 0.9 \
-    --phase1-checkpoint-path "$NANOCHAT_BASE_DIR/base_checkpoints/d${PROXY_DEPTH}" \
-    --target-depth "$TARGET_DEPTH" \
-    --target-phase1-checkpoint-path "$NANOCHAT_BASE_DIR/base_checkpoints/d${TARGET_DEPTH}" \
-    --K-enhanced "$K_ENHANCED" \
-    --K-init "$K_INIT" \
-    --discovery-method embedding_cluster \
-    --embedding-device npu \
-    --embedding-sample-size "$EMBEDDING_SAMPLE_SIZE" \
-    --configs-per-iter "$CONFIGS_PER_ITER" \
-    --device-type npu --npu-devices "$NUM_NPU" --npu-per-exp "$NPU_PER_EXP" \
-    --output-dir "$OUTPUT_DIR" \
-    --cluster-cache-dir "$OUTPUT_DIR" \
-    --resume-search \
-    --proxy-target-tokens "$PROXY_TARGET_TOKENS" \
-    --target-tokens "$TARGET_TOKENS" \
-    --schema "$CLIMBMIX_DIR/config/schema_stem.yaml" \
-    --skip-target
+    python3 "$CLIMBMIX_DIR/scripts/run_climb.py" \
+        --data-dir "$SPEED_DATA" \
+        --nanochat-dir "$NANOCHAT_DIR" \
+        --nanochat-base-dir "$NANOCHAT_BASE_DIR" \
+        --general-data-dir "$GENERAL_DATA_DIR" \
+        --stem-ratio "$STEM_RATIO" \
+        --eval-benchmarks "$EVAL_BENCHMARKS" \
+        --proxy-depth "$PROXY_DEPTH" \
+        --proxy-num-iterations "$PROXY_NUM_ITERATIONS" \
+        --proxy-lr-scale 1.0 --proxy-warmup 0.0 --proxy-warmdown 0.9 \
+        --phase1-checkpoint-path "$NANOCHAT_BASE_DIR/base_checkpoints/d${PROXY_DEPTH}" \
+        --target-depth "$TARGET_DEPTH" \
+        --target-phase1-checkpoint-path "$NANOCHAT_BASE_DIR/base_checkpoints/d${TARGET_DEPTH}" \
+        --K-enhanced "$K_ENHANCED" \
+        --K-init "$K_INIT" \
+        --discovery-method embedding_cluster \
+        --embedding-device npu \
+        --embedding-sample-size "$EMBEDDING_SAMPLE_SIZE" \
+        --configs-per-iter "$CONFIGS_PER_ITER" \
+        --device-type npu --npu-devices "$NUM_NPU" --npu-per-exp "$NPU_PER_EXP" \
+        --output-dir "$OUTPUT_DIR" \
+        --exp-name "$EXP_NAME" \
+        --cluster-cache-dir "$OUTPUT_DIR" \
+        --resume-search \
+        --proxy-target-tokens "$PROXY_TARGET_TOKENS" \
+        --target-tokens "$TARGET_TOKENS" \
+        --schema "$CLIMBMIX_DIR/config/schema_stem.yaml" \
+        --skip-target
+fi
 
 [ ! -f "$OUTPUT_DIR/sampled_dataset.parquet" ] && { echo "✗ No sampled_dataset.parquet — Step 1-3 FAILED"; exit 1; }
 echo -e "\n✓ Step 1-3 complete: sampled_dataset.parquet found"
@@ -153,11 +195,15 @@ echo "✓ Shards prepared: $(ls "$CLIMB_SHARDS"/shard_*.parquet 2>/dev/null | wc
 echo -e "\n===== Step 5: Mix STEM + General Data (ratio=$STEM_RATIO) =====\n"
 
 CLIMB_MIXED="$OUTPUT_DIR/climb_mixed"
-NANOCHAT_REPO="$NANOCHAT_DIR" python3 "$CLIMBMIX_DIR/scripts/mix_general_data.py" \
-    --stem-dir "$CLIMB_SHARDS" --output-dir "$CLIMB_MIXED" \
-    --climbmix-dir "$GENERAL_DATA_DIR" \
-    --stem-ratio "$STEM_RATIO" --num-workers "$NUM_NPU" --num-npu "$NUM_NPU" \
-    || { echo "✗ Mix failed"; exit 1; }
+if [ -f "$CLIMB_MIXED/.done" ]; then
+    echo "  CLIMB mix: already complete (.done), skip"
+else
+    NANOCHAT_REPO="$NANOCHAT_DIR" python3 "$CLIMBMIX_DIR/scripts/mix_general_data.py" \
+        --stem-dir "$CLIMB_SHARDS" --output-dir "$CLIMB_MIXED" \
+        --climbmix-dir "$GENERAL_DATA_DIR" \
+        --stem-ratio "$STEM_RATIO" --num-workers "$NUM_NPU" --num-npu "$NUM_NPU" \
+        || { echo "✗ Mix failed"; exit 1; }
+fi
 
 CLIMB_DATA="$CLIMB_MIXED"
 
@@ -167,22 +213,30 @@ CLIMB_DATA="$CLIMB_MIXED"
 # ═══════════════════════════════════════════════════════════════════════
 echo -e "\n===== Step 6: Target Training (d${TARGET_DEPTH}, ${TARGET_STEPS} steps) =====\n"
 
-CLIMB_TAG="d${TARGET_DEPTH}_speedrun_${TS}"
+CLIMB_TAG="d${TARGET_DEPTH}_${EXP_NAME}"
 link_dir="$NANOCHAT_BASE_DIR/base_checkpoints/$CLIMB_TAG"
-[ -e "$link_dir" ] || ln -s "$NANOCHAT_BASE_DIR/base_checkpoints/d${TARGET_DEPTH}" "$link_dir"
 
-( cd "$NANOCHAT_DIR" && torchrun --standalone --nproc_per_node="$NUM_NPU" -m scripts.mid_train -- \
-    --num-iterations="$TARGET_STEPS" \
-    --lr-scale=1.0 --warmup-ratio=0.0 --warmdown-ratio=0.9 \
-    --device-batch-size=8 \
-    --run="speedrun_climb" --model-tag="$CLIMB_TAG" \
-    --eval-benchmarks="$EVAL_BENCHMARKS" \
-    --data-dir="$CLIMB_DATA" 2>&1 | tee "$OUTPUT_DIR/mid_train_climb.log" ) || {
-    echo "✗ Target mid_train FAILED"
+if [ -f "$OUTPUT_DIR/.done_mid_train_climb" ]; then
+    echo "  mid_train climb: already done, skip"
+else
+    [ -e "$link_dir" ] || ln -s "$NANOCHAT_BASE_DIR/base_checkpoints/d${TARGET_DEPTH}" "$link_dir"
+    # Clear partial checkpoints from a crashed attempt (whole-run atomicity)
+    rm -rf "$NANOCHAT_BASE_DIR/mid_checkpoints/$CLIMB_TAG"
+
+    ( cd "$NANOCHAT_DIR" && torchrun --standalone --nproc_per_node="$NUM_NPU" -m scripts.mid_train -- \
+        --num-iterations="$TARGET_STEPS" \
+        --lr-scale=1.0 --warmup-ratio=0.0 --warmdown-ratio=0.9 \
+        --device-batch-size=8 \
+        --run="speedrun_climb" --model-tag="$CLIMB_TAG" \
+        --eval-benchmarks="$EVAL_BENCHMARKS" \
+        --data-dir="$CLIMB_DATA" 2>&1 | tee "$OUTPUT_DIR/mid_train_climb.log" ) || {
+        echo "✗ Target mid_train FAILED"
+        [ -L "$link_dir" ] && rm "$link_dir"
+        exit 1
+    }
     [ -L "$link_dir" ] && rm "$link_dir"
-    exit 1
-}
-[ -L "$link_dir" ] && rm "$link_dir"
+    touch "$OUTPUT_DIR/.done_mid_train_climb"
+fi
 echo "✓ Target training complete"
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -191,13 +245,18 @@ echo "✓ Target training complete"
 # ═══════════════════════════════════════════════════════════════════════
 echo -e "\n===== Step 7: Evaluation =====\n"
 
-( cd "$NANOCHAT_DIR" && torchrun --standalone --nproc_per_node="$NUM_NPU" -m scripts.base_eval -- \
-    --eval=core --eval-benchmarks="$EVAL_BENCHMARKS" \
-    --device-batch-size=32 \
-    --model-tag="$CLIMB_TAG" --model-type=mid 2>&1 | tee "$OUTPUT_DIR/eval_climb.log" ) || {
-    echo "✗ Eval FAILED"
-    exit 1
-}
+if [ -f "$OUTPUT_DIR/.done_eval_climb" ]; then
+    echo "  eval climb: already done, skip"
+else
+    ( cd "$NANOCHAT_DIR" && torchrun --standalone --nproc_per_node="$NUM_NPU" -m scripts.base_eval -- \
+        --eval=core --eval-benchmarks="$EVAL_BENCHMARKS" \
+        --device-batch-size=32 \
+        --model-tag="$CLIMB_TAG" --model-type=mid 2>&1 | tee "$OUTPUT_DIR/eval_climb.log" ) || {
+        echo "✗ Eval FAILED"
+        exit 1
+    }
+    touch "$OUTPUT_DIR/.done_eval_climb"
+fi
 echo "✓ Evaluation complete"
 
 # ═══════════════════════════════════════════════════════════════════════

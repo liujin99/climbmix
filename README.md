@@ -108,6 +108,8 @@ climbmix/
     │   └── data_selector.py             # Mixture-weighted doc sampling (seeded permutation)
     └── utils/
         ├── token_estimate.py            # chars→tokens heuristic + "2B"/"10M" parser
+        ├── io_utils.py                  # Atomic write helpers (savez/json/parquet)
+        ├── fingerprint.py               # Experiment fingerprint (code + params → reset)
         └── perf_timer.py
 ```
 
@@ -126,6 +128,37 @@ bash runs/run_climbmix.sh
 ```
 
 Each script auto-checks dependencies, NPU availability, disk space, and exits with instructions if anything is missing.
+
+## Crash Resume (断点续跑)
+
+Both runners are resumable: **re-run the same command after an interruption.**
+
+- **Fingerprint auto-reset**: on start, each script compares a fingerprint of
+  (repo sources + semantic run params) against `result/$EXP_NAME/.fingerprint`.
+  On mismatch (code/param change) the old output is archived as
+  `result/${EXP_NAME}_stale_<ts>` and the run starts fresh — stale caches can
+  never silently mask a code change. `runs/*.sh` edits alone (comments/echo)
+  do NOT reset; `--param` knobs do. Not covered: nanochat-npu edits, data
+  files with unchanged names/counts.
+- **Granularity** (finest loss on crash):
+  | Stage | Resume unit | Loss on crash |
+  |---|---|---|
+  | metadata scan | step | rescan |
+  | embedding | **shard ledger** (`embedding_progress_w*.json` + memmap) | ≤ N_workers in-flight shards |
+  | clustering | step (cache) | re-cluster |
+  | search iteration | iteration (`search_state.json`, atomic) | ≈0 |
+  | search experiment | **experiment** (`exp_XXXX/meta.json`, rc=0/0 + weight match) | only interrupted exp re-runs |
+  | search done, pre-selection | predictor refit + full-design-space search (paper-faithful) | ≈0 |
+  | shard/mix/sampled writes | atomic (tmp+rename, `.done` markers) | redo step |
+  | target train (climb/random independent) | whole run (partial checkpoints cleared first) | 1 training run |
+  | eval / report | `.done` marker / idempotent | minutes / 0 |
+- **Not resumable**: inside a single nanochat training run (1000 steps) —
+  interrupted trainings restart from step 0 by design.
+- **Experiment isolation**: `EXP_NAME=myexp bash runs/run_climbmix.sh` scopes
+  the output dir (`result/myexp`), proxy tags (`climbmix_myexp_*`) and target
+  tags (`d28_climb_myexp`) so parallel/sequential experiments never overwrite
+  each other. Valid chars: `[A-Za-z0-9_-]`.
+- **Force fresh run**: change `EXP_NAME` or `rm -rf result/$EXP_NAME`.
 
 ## CLI Options
 
@@ -150,6 +183,7 @@ python scripts/run_climb.py --help
 --general-data-dir /path   # ClimbMix shard cache dir
 --stem-ratio 0.7           # 70% STEM + 30% ClimbMix (default)
 --eval-benchmarks stem     # STEM benchmark subset for eval
+--exp-name main            # Experiment name: scopes proxy/target tags + dirs
 --skip-target              # Skip d28 target training
 --dry-run                 # Skip training (CPU only, logic check)
 ```

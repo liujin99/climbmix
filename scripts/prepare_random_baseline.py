@@ -9,12 +9,17 @@ pass 2 reads each file once and keeps only its sampled share, so peak
 memory is ~1 file + the sample (~GBs on the 116M-doc pool) instead of
 the whole pool (~1TB of Python strings).
 
+Crash safety: shards are written to temp names and renamed into place; a
+.done marker is written only after everything succeeded. Shards without
+.done are treated as a crashed partial run and wiped before redoing.
+
 DDP row-group safety: nanochat's dataloader shards row groups round-robin
 across ranks, so every shard must contain at least num_npu row groups
 (see prepare_shards.py).
 """
 
 import argparse
+import json
 import os
 import math
 import random
@@ -117,22 +122,36 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
+    done_marker = os.path.join(args.output_dir, ".done")
+    if os.path.exists(done_marker):
+        print(f"  Random baseline already complete (.done), skipping")
+        return
+
+    # Shards without .done = crashed partial run: wipe and redo.
+    leftovers = [f for f in os.listdir(args.output_dir)
+                 if f.startswith("shard_") or f.endswith(".tmp.parquet")]
+    if leftovers:
+        print(f"  Cleaning {len(leftovers)} partial files from a crashed run (no .done)")
+        for f in leftovers:
+            os.remove(os.path.join(args.output_dir, f))
+
+    def _atomic_write(name, table, rg):
+        shard_path = os.path.join(args.output_dir, name)
+        tmp_path = shard_path + ".tmp.parquet"
+        pq.write_table(table, tmp_path, row_group_size=rg)
+        os.replace(tmp_path, shard_path)
+
     for i in range(n_shards):
         start = i * shard_size
         end = min(start + shard_size, n_train)
         shard_texts = train_texts[start:end]
-        shard_table = pa.table({"text": shard_texts})
-        pq.write_table(
-            shard_table,
-            os.path.join(args.output_dir, f"shard_{i:05d}.parquet"),
-            row_group_size=rg_size,
-        )
+        _atomic_write(f"shard_{i:05d}.parquet", pa.table({"text": shard_texts}), rg_size)
 
-    pq.write_table(
-        pa.table({"text": val_texts}),
-        os.path.join(args.output_dir, f"shard_{n_shards:05d}.parquet"),
-        row_group_size=1,
-    )
+    _atomic_write(f"shard_{n_shards:05d}.parquet", pa.table({"text": val_texts}), 1)
+
+    with open(done_marker, "w") as f:
+        json.dump({"n_train_shards": n_shards, "val_docs": val_n,
+                   "rg_size": rg_size, "num_npu": args.num_npu, "seed": args.seed}, f)
 
     print(f"Random baseline: {n} docs -> {n_shards} shards (rg_size={rg_size}) "
           f"+ 1 val shard ({val_n} docs, rg_size=1) -> {args.output_dir}")
