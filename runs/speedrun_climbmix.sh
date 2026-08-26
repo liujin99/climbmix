@@ -32,10 +32,13 @@ PROXY_NUM_ITERATIONS=50
 TARGET_STEPS=50
 CONFIGS_PER_ITER="2,3,2"
 K_ENHANCED=10
+K_INIT=100
 NUM_NPU=8
 NPU_PER_EXP=1
 EMBEDDING_SAMPLE_SIZE=2000
 EVAL_BENCHMARKS="stem"
+PROXY_TARGET_TOKENS=10000000
+TARGET_TOKENS=10000000
 
 TS=$(date +%Y%m%d_%H%M%S)
 OUTPUT_DIR="$CLIMBMIX_DIR/result/speedrun_${TS}"
@@ -107,6 +110,7 @@ python3 "$CLIMBMIX_DIR/scripts/run_climb.py" \
     --target-depth "$TARGET_DEPTH" \
     --target-phase1-checkpoint-path "$NANOCHAT_BASE_DIR/base_checkpoints/d${TARGET_DEPTH}" \
     --K-enhanced "$K_ENHANCED" \
+    --K-init "$K_INIT" \
     --discovery-method embedding_cluster \
     --embedding-device npu \
     --embedding-sample-size "$EMBEDDING_SAMPLE_SIZE" \
@@ -115,6 +119,8 @@ python3 "$CLIMBMIX_DIR/scripts/run_climb.py" \
     --output-dir "$OUTPUT_DIR" \
     --cluster-cache-dir "$OUTPUT_DIR" \
     --resume-search \
+    --proxy-target-tokens "$PROXY_TARGET_TOKENS" \
+    --target-tokens "$TARGET_TOKENS" \
     --schema "$CLIMBMIX_DIR/config/schema_stem.yaml" \
     --skip-target
 

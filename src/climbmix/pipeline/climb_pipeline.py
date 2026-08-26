@@ -166,6 +166,7 @@ class CLIMBPipeline:
             filtered_labels,
             optimal_weights.mixture_weights,
             token_counts,
+            target_tokens=self.config.target.target_tokens,
         )
 
         stats = compute_mixture_dataset_stats(

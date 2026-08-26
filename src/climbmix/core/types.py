@@ -299,6 +299,7 @@ class ProxyConfig:
     lr_scale: float = 1.0
     warmup: float = 0.0
     warmdown: float = 0.9
+    target_tokens: int = 0
 
     DEPTH_INFO = _DEPTH_INFO
 
@@ -400,6 +401,7 @@ class TargetConfig:
     lr_scale: float = 1.0
     warmup: float = 0.0
     warmdown: float = 0.9
+    target_tokens: int = 0
 
     DEPTH_INFO = _DEPTH_INFO
 

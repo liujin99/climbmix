@@ -48,6 +48,8 @@ def main():
     parser.add_argument("--discovery-method", type=str, default="embedding_cluster",
                         choices=["embedding_cluster", "quality_cluster"])
     parser.add_argument("--K-enhanced", type=int, default=10)
+    parser.add_argument("--K-init", type=int, default=1000,
+                        help="Initial number of clusters before prune+merge")
     parser.add_argument("--embedding-model", type=str, default="NovaSearch/stella_en_400M_v5")
     parser.add_argument("--embedding-device", type=str, default="cpu",
                         help="Device for embedding: cpu, npu")
@@ -70,6 +72,8 @@ def main():
     parser.add_argument("--phase1-checkpoint-path", type=str, default=None)
     parser.add_argument("--validation-metric", type=str, default="accuracy",
                         choices=["accuracy", "loss"])
+    parser.add_argument("--proxy-target-tokens", type=int, default=0,
+                        help="Cap data selection per proxy experiment (0 = all available)")
 
     # ── Target ──
     parser.add_argument("--target-depth", type=int, default=28)
@@ -81,6 +85,8 @@ def main():
     parser.add_argument("--target-phase1-checkpoint-path", type=str, default=None)
     parser.add_argument("--skip-target", action="store_true",
                         help="Skip target training (only run proxy search)")
+    parser.add_argument("--target-tokens", type=int, default=0,
+                        help="Cap final data selection for target training (0 = all available)")
 
     # ── Search ──
     parser.add_argument("--num-iterations", type=int, default=3)
@@ -132,6 +138,7 @@ def main():
         warmdown=args.proxy_warmdown,
         phase1_checkpoint_path=args.phase1_checkpoint_path,
         validation_metric=args.validation_metric,
+        target_tokens=args.proxy_target_tokens,
     )
 
     target_config = TargetConfig(
@@ -142,11 +149,13 @@ def main():
         warmup=args.target_warmup,
         warmdown=args.target_warmdown,
         phase1_checkpoint_path=args.target_phase1_checkpoint_path,
+        target_tokens=args.target_tokens,
     )
 
     config = CLIMBConfig(
         discovery=ClusterDiscoveryConfig(
             method=args.discovery_method,
+            K_init=args.K_init,
             K_enhanced=args.K_enhanced,
             embedding_model=args.embedding_model,
             embedding_device=args.embedding_device,

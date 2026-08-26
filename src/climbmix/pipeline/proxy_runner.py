@@ -62,6 +62,7 @@ class ProxyRunner:
         self.stem_ratio = config.stem_ratio
         self.eval_benchmarks = config.eval_benchmarks
         self.npu_per_exp = getattr(config, 'npu_per_exp', 0)
+        self.proxy_target_tokens = config.proxy.target_tokens
 
         self.cluster_labels = cluster_labels
         self.token_counts = token_counts
@@ -296,6 +297,7 @@ class ProxyRunner:
             self.cluster_labels,
             mixture_config.mixture_weights,
             self.token_counts,
+            target_tokens=self.proxy_target_tokens,
             seed=experiment_id + 42,
         )
         print(f"  [Exp {experiment_id}] Selected {len(selected_indices)} STEM docs by mixture weights")
