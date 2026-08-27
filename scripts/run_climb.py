@@ -97,7 +97,8 @@ def main():
                              "Accepts human-readable suffixes: 2B, 10M, 500K, 1.5B")
 
     # ── Search ──
-    parser.add_argument("--num-iterations", type=int, default=3)
+    parser.add_argument("--num-iterations", type=int, default=None,
+                        help="Search iterations (default: derived from len(configs_per_iter))")
     parser.add_argument("--configs-per-iter", type=str, default="15,8,4")
     parser.add_argument("--dirichlet-alpha", type=float, default=None)
 
@@ -143,6 +144,13 @@ def main():
         parser.error(f"--exp-name must match [A-Za-z0-9_-]+ (got: {args.exp_name!r})")
 
     configs_per_iter = [int(x) for x in args.configs_per_iter.split(",")]
+    if args.num_iterations is None:
+        args.num_iterations = len(configs_per_iter)
+    elif args.num_iterations != len(configs_per_iter):
+        parser.error(
+            f"--num-iterations ({args.num_iterations}) must equal the number of "
+            f"per-iteration entries in --configs-per-iter ({len(configs_per_iter)}: "
+            f"{args.configs_per_iter}); omit --num-iterations to derive it automatically")
     val_tasks = STEM_BENCHMARK_LABELS.copy() if args.val_tasks is None else [x.strip() for x in args.val_tasks.split(",")]
 
     proxy_config = ProxyConfig(

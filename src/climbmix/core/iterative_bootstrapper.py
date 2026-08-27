@@ -95,6 +95,7 @@ class IterativeBootstrapper:
             return
         state = {
             "last_completed_iter": self._last_completed_iter,
+            "n_clusters": self.num_clusters,
             "accumulated_scores": self._accumulated_scores,
             "accumulated_configs": [
                 {"weights": c.mixture_weights.weights.tolist(), "config_id": c.config_id}
@@ -123,14 +124,43 @@ class IterativeBootstrapper:
                   f"{self.state_path}")
             return 0
         try:
-            self._accumulated_scores = state["accumulated_scores"]
-            self._accumulated_configs = [
+            saved_configs = [
                 MixtureConfig(
                     mixture_weights=MixtureWeights(weights=np.array(c["weights"], dtype=np.float64)),
                     config_id=c["config_id"],
                 )
                 for c in state["accumulated_configs"]
             ]
+        except (KeyError, TypeError, ValueError):
+            print(f"[Search] State file malformed, starting fresh: {self.state_path}")
+            return 0
+
+        # Defense: if the cluster count changed since this state was written
+        # (recomputed cluster cache, edited data, or a run_climb.py invocation
+        # bypassing the shell fingerprint), old config vectors have the wrong
+        # dimension for the current search space — mixing them with new ones
+        # would silently corrupt the predictor. Discard and start fresh.
+        state_n_clusters = state.get("n_clusters")
+        weights_k = len(saved_configs[0].mixture_weights.weights) if saved_configs else None
+        if weights_k is None:
+            pending_configs = (state.get("pending") or {}).get("configs") or []
+            if pending_configs:
+                weights_k = len(pending_configs[0])
+        if (state_n_clusters is not None and weights_k is not None
+                and state_n_clusters != weights_k):
+            print(f"[Search] State file inconsistent (n_clusters={state_n_clusters} "
+                  f"but config weights have K={weights_k}), starting fresh: {self.state_path}")
+            return 0
+        stale_k = state_n_clusters if state_n_clusters is not None else weights_k
+        if stale_k is not None and stale_k != self.num_clusters:
+            print(f"[Search] WARNING: n_clusters changed {stale_k} -> {self.num_clusters} "
+                  f"since this state was written — discarding stale search state "
+                  f"and starting fresh: {self.state_path}")
+            return 0
+
+        try:
+            self._accumulated_scores = state["accumulated_scores"]
+            self._accumulated_configs = saved_configs
             self._accumulated_per_benchmark = [
                 (d["acc"], d["nll"]) for d in state["accumulated_per_benchmark"]
             ]

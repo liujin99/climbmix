@@ -41,8 +41,24 @@ TARGET_DEPTH=28
 PROXY_NUM_ITERATIONS=50
 TARGET_STEPS=50
 CONFIGS_PER_ITER="2,3,2"
+SEARCH_NUM_ITERATIONS="${SEARCH_NUM_ITERATIONS:-3}"
 K_ENHANCED=10
-K_INIT=100
+K_INIT="${K_INIT:-100}"
+FILTER_METHOD="${FILTER_METHOD:-none}"
+PRUNE_THRESHOLD="${PRUNE_THRESHOLD:-3.0}"
+MERGE_DISTANCE="${MERGE_DISTANCE:-1.5}"
+EMBEDDING_MODEL="${EMBEDDING_MODEL:-NovaSearch/stella_en_400M_v5}"
+# Training dynamics (semantic: change → fingerprint → fresh run)
+PROXY_LR_SCALE="${PROXY_LR_SCALE:-1.0}"
+PROXY_WARMUP="${PROXY_WARMUP:-0.0}"
+PROXY_WARMDOWN="${PROXY_WARMDOWN:-0.9}"
+TARGET_LR_SCALE="${TARGET_LR_SCALE:-1.0}"
+TARGET_WARMUP="${TARGET_WARMUP:-0.0}"
+TARGET_WARMDOWN="${TARGET_WARMDOWN:-0.9}"
+MID_DEVICE_BATCH_SIZE="${MID_DEVICE_BATCH_SIZE:-8}"
+EVAL_DEVICE_BATCH_SIZE="${EVAL_DEVICE_BATCH_SIZE:-32}"
+CORE_METRIC_EVERY="${CORE_METRIC_EVERY:--1}"
+NANOCHAT_DTYPE="${NANOCHAT_DTYPE:-bfloat16}"
 NUM_NPU=8
 NPU_PER_EXP=1
 EMBEDDING_SAMPLE_SIZE=2000
@@ -88,7 +104,7 @@ export ASCEND_VISIBLE_DEVICES=$(seq -s, 0 $((NUM_NPU - 1)))
 export RANK_SIZE=$NUM_NPU MASTER_ADDR=127.0.0.1 MASTER_PORT=29500
 export HCCL_EXEC_TIMEOUT=1200
 export PYTHONUNBUFFERED=1
-export NANOCHAT_DTYPE=bfloat16 PYTHONWARNINGS="ignore::UserWarning:torch_npu"
+export NANOCHAT_DTYPE="$NANOCHAT_DTYPE" PYTHONWARNINGS="ignore::UserWarning:torch_npu"
 
 # ── Fingerprint: code + semantic params → auto-reset on change ──
 FINGERPRINT=$(python3 -m climbmix.utils.fingerprint --base-dir "$CLIMBMIX_DIR" \
@@ -99,8 +115,23 @@ FINGERPRINT=$(python3 -m climbmix.utils.fingerprint --base-dir "$CLIMBMIX_DIR" \
     --param "proxy_target_tokens=$PROXY_TARGET_TOKENS" \
     --param "target_tokens=$TARGET_TOKENS" \
     --param "configs_per_iter=$CONFIGS_PER_ITER" \
+    --param "search_num_iterations=$SEARCH_NUM_ITERATIONS" \
     --param "K_enhanced=$K_ENHANCED" \
     --param "K_init=$K_INIT" \
+    --param "filter_method=$FILTER_METHOD" \
+    --param "prune_threshold=$PRUNE_THRESHOLD" \
+    --param "merge_distance=$MERGE_DISTANCE" \
+    --param "embedding_model=$EMBEDDING_MODEL" \
+    --param "proxy_lr_scale=$PROXY_LR_SCALE" \
+    --param "proxy_warmup=$PROXY_WARMUP" \
+    --param "proxy_warmdown=$PROXY_WARMDOWN" \
+    --param "target_lr_scale=$TARGET_LR_SCALE" \
+    --param "target_warmup=$TARGET_WARMUP" \
+    --param "target_warmdown=$TARGET_WARMDOWN" \
+    --param "mid_device_batch_size=$MID_DEVICE_BATCH_SIZE" \
+    --param "eval_device_batch_size=$EVAL_DEVICE_BATCH_SIZE" \
+    --param "core_metric_every=$CORE_METRIC_EVERY" \
+    --param "nanochat_dtype=$NANOCHAT_DTYPE" \
     --param "embedding_sample_size=$EMBEDDING_SAMPLE_SIZE" \
     --param "stem_ratio=$STEM_RATIO" \
     --param "eval_benchmarks=$EVAL_BENCHMARKS" \
@@ -174,12 +205,17 @@ else
         --eval-max-per-task "$EVAL_MAX_PER_TASK" \
         --proxy-depth "$PROXY_DEPTH" \
         --proxy-num-iterations "$PROXY_NUM_ITERATIONS" \
-        --proxy-lr-scale 1.0 --proxy-warmup 0.0 --proxy-warmdown 0.9 \
+        --proxy-lr-scale "$PROXY_LR_SCALE" --proxy-warmup "$PROXY_WARMUP" --proxy-warmdown "$PROXY_WARMDOWN" \
         --phase1-checkpoint-path "$NANOCHAT_BASE_DIR/base_checkpoints/d${PROXY_DEPTH}" \
         --target-depth "$TARGET_DEPTH" \
         --target-phase1-checkpoint-path "$NANOCHAT_BASE_DIR/base_checkpoints/d${TARGET_DEPTH}" \
         --K-enhanced "$K_ENHANCED" \
         --K-init "$K_INIT" \
+        --filter-method "$FILTER_METHOD" \
+        --prune-threshold "$PRUNE_THRESHOLD" \
+        --merge-distance "$MERGE_DISTANCE" \
+        --embedding-model "$EMBEDDING_MODEL" \
+        --num-iterations "$SEARCH_NUM_ITERATIONS" \
         --discovery-method embedding_cluster \
         --embedding-device npu \
         --embedding-sample-size "$EMBEDDING_SAMPLE_SIZE" \
@@ -252,9 +288,9 @@ else
 
     ( cd "$NANOCHAT_DIR" && torchrun --standalone --nproc_per_node="$NUM_NPU" -m scripts.mid_train -- \
         --num-iterations="$TARGET_STEPS" \
-        --lr-scale=1.0 --warmup-ratio=0.0 --warmdown-ratio=0.9 \
-        --core-metric-every=-1 \
-        --device-batch-size=8 \
+        --lr-scale="$TARGET_LR_SCALE" --warmup-ratio="$TARGET_WARMUP" --warmdown-ratio="$TARGET_WARMDOWN" \
+        --core-metric-every="$CORE_METRIC_EVERY" \
+        --device-batch-size="$MID_DEVICE_BATCH_SIZE" \
         --run="speedrun_climb" --model-tag="$CLIMB_TAG" \
         --data-dir="$CLIMB_DATA" 2>&1 | tee "$OUTPUT_DIR/mid_train_climb.log" ) || {
         echo "✗ Target mid_train FAILED"
@@ -280,7 +316,7 @@ else
     ( cd "$NANOCHAT_DIR" && torchrun --standalone --nproc_per_node="$NUM_NPU" -m scripts.base_eval -- \
         --eval=core --eval-benchmarks="$EVAL_BENCHMARKS" \
         --max-per-task="$EVAL_MAX_PER_TASK" \
-        --device-batch-size=32 \
+        --device-batch-size="$EVAL_DEVICE_BATCH_SIZE" \
         --model-tag="$CLIMB_TAG" --model-type=mid 2>&1 | tee "$OUTPUT_DIR/eval_climb.log" ) || {
         echo "✗ Eval FAILED"
         exit 1
