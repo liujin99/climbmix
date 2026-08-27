@@ -299,11 +299,13 @@ class CLIMBPipeline:
     def _pool_embedding_cache_dir(self, data_dir: str) -> Optional[str]:
         """Content-keyed stable cache dir for pool-level artifacts.
 
-        Key = sha256(shard name+size manifest, embedding model, truncate len)
-        — the inputs that determine the embedding array. NOT keyed by
-        K_enhanced/K_max/merge_distance/prune_threshold: those change the
-        merge stage only, which must reuse the (expensive) embeddings and
-        K-means results. Empty config → None (legacy behavior).
+        Key = sha256(shard name+size manifest, embedding model, truncate len,
+        and — for subsampled runs — the sample size, which determines WHICH
+        docs get embedded). NOT keyed by K_enhanced/K_max/merge_distance/
+        prune_threshold: those change the merge stage only, which must reuse
+        the (expensive) embeddings and K-means results. The sample size is
+        only hashed when > 0 so full-pool (streaming) keys stay stable.
+        Empty config → None (legacy behavior).
         """
         import hashlib
         if not self.config.embedding_cache_dir:
@@ -323,6 +325,8 @@ class CLIMBPipeline:
             hasher.update(str(os.path.getsize(os.path.join(data_dir, name))).encode())
         hasher.update(disc.embedding_model.encode())
         hasher.update(str(disc.embedding_truncate_len).encode())
+        if disc.embedding_sample_size and disc.embedding_sample_size > 0:
+            hasher.update(f"sample={disc.embedding_sample_size}".encode())
         key = hasher.hexdigest()[:12]
         return os.path.join(self.config.embedding_cache_dir, key)
 

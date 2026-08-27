@@ -323,6 +323,21 @@ class TargetRunner:
             "--lr-scale", str(self.target_lr_scale),
             "--warmup-ratio", str(self.target_warmup),
             "--warmdown-ratio", str(self.target_warmdown),
+            # d28 mid_train 实证安全配置, 与 speedrun/run_climbmix Step 6 及
+            # proxy_runner 同口径:
+            #   dbs=1 — d28 fp32 主权重+梯度 ~16G 静态 (ws=8), 不传则继承
+            #   预训练 dbs (32), 第一个 forward 即撞 ~27.5G 墙; dbs>=4 实测
+            #   必 OOM。dbs 只切 micro-batch, total batch 不变。
+            "--device-batch-size", "1",
+            # flat = 零裁剪打包, 与 proxy 阶段同口径 (proxy 分数预测 target
+            # 表现的前提); bos_bestfit 会裁掉 ~35% token。
+            "--loader", "flat",
+            # 默认 sample_every=500 在 last_step 触发 generate_batch(),
+            # 打碎 NPU 内存 → optimizer.step() OOM (quadmix af525ee)。
+            "--sample-every", "-1",
+            # 训练内 benchmark eval 与紧随其后的外部 base_eval 重复
+            # (speedrun 实测 ~2h10m/次), 关掉; val bpb 仍是训练信号。
+            "--core-metric-every", "-1",
             "--data-dir", mixture_data_dir,
         ]
         return cmd

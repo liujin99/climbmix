@@ -6,7 +6,8 @@
 #  不关注结果质量, 只确认所有步骤跑通无报错
 #
 #  设置:
-#    - 5 个 parquet 文件 (~580K docs)
+#    - 5 个 parquet 文件 (~580K docs), 其中 20K 条子采样做 embedding/聚类
+#      (merge 超参校准用, EMBEDDING_SAMPLE_SIZE 可调)
 #    - configs=2,3,2 (7 个), proxy_steps=50, target_steps=50
 #    - 8 NPU 做 embedding, 1 NPU/experiment 做 proxy search
 #    - 70% STEM + 30% ClimbMix general data (含 proxy 实验内混合 + Step 5 混合;
@@ -78,7 +79,13 @@ CORE_METRIC_EVERY="${CORE_METRIC_EVERY:--1}"
 NANOCHAT_DTYPE="${NANOCHAT_DTYPE:-bfloat16}"
 NUM_NPU=8
 NPU_PER_EXP=1
-EMBEDDING_SAMPLE_SIZE=2000
+# Embedding/聚类子采样池大小。τ (merge_distance) / floor / cap 的校准
+# 依据是 merge_profile.json 里的质心距离树状图 (K vs 最近对距离) —
+# 2000 条下 K_init=100 平均每簇 20 条文档, 距离分布失真, 树状图没有
+# 校准价值; 20000 条 (每簇 ~200) 才能让 merge/prune 动态接近真实池。
+# 改此值 → search 指纹变 (Steps 1-3 重跑) + embedding 缓存池键变
+# (重新 embed 20000 条, 一次性, 之后复用)。
+EMBEDDING_SAMPLE_SIZE="${EMBEDDING_SAMPLE_SIZE:-20000}"
 EVAL_BENCHMARKS="stem"
 # Eval subsample cap per task (speedrun keeps proxy evals cheap; the fixed
 # shuffle seed 1337 inside base_eval keeps scores comparable across exps).

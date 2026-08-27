@@ -178,6 +178,57 @@ def _flush_device_cache(device: str, tag: str) -> None:
         print(f"{tag} Embedding model released, NPU cache returned to driver")
 
 
+def _load_cached_embeddings(
+    cache_path: Optional[str],
+    expected_n: Optional[int],
+    tag: str,
+) -> Optional[npt.NDArray[np.float32]]:
+    """Load cached embeddings; None when absent or row-count mismatched.
+
+    The pool-keyed cache DIRECTORY names its inputs (shard manifest, model,
+    truncate len, sample size), but this guard is the last line of defense
+    against a stale cache reached through a manually pinned dir or an older
+    key formula: a silent row-count mismatch would misalign labels with
+    sample_indices downstream (discovery passes 20K indices against a 2K
+    array). Returns None → caller re-embeds and overwrites the cache.
+    """
+    if not (cache_path and os.path.exists(cache_path)):
+        return None
+    data = np.load(cache_path)
+    embeddings = data["embeddings"]
+    if expected_n is not None and embeddings.shape[0] != expected_n:
+        print(f"{tag} WARNING: {cache_path} holds {embeddings.shape[0]:,} embeddings "
+              f"but {expected_n:,} expected — stale cache, re-embedding")
+        return None
+    print(f"{tag} Loading cached embeddings from: {cache_path}")
+    print(f"{tag} Loaded {embeddings.shape[0]:,} embeddings, dim={embeddings.shape[1]}")
+    return embeddings
+
+
+def _load_cached_clustering(
+    cache_path: Optional[str],
+    expected_n_docs: Optional[int],
+    tag: str = "[Cluster]",
+) -> Optional[Tuple[npt.NDArray[np.int64], npt.NDArray[np.float32]]]:
+    """Load cached K-means labels+centroids; None when absent or mismatched.
+
+    Same staleness guard as _load_cached_embeddings: labels must cover
+    exactly the docs the (freshly loaded or computed) embeddings describe.
+    """
+    if not (cache_path and os.path.exists(cache_path)):
+        return None
+    data = np.load(cache_path)
+    labels = data["labels"]
+    centroids = data["centroids"]
+    if expected_n_docs is not None and labels.shape[0] != expected_n_docs:
+        print(f"{tag} WARNING: {cache_path} holds {labels.shape[0]:,} labels "
+              f"but {expected_n_docs:,} expected — stale cache, re-clustering")
+        return None
+    print(f"{tag} Loading cached clustering from: {cache_path}")
+    print(f"{tag} Loaded {len(labels):,} labels, K={len(centroids)}")
+    return labels, centroids
+
+
 def embed_documents(
     texts: List[str],
     model_name: str = "NovaSearch/stella_en_400M_v5",
@@ -200,12 +251,9 @@ def embed_documents(
     Returns:
         Embeddings array of shape (num_docs, embedding_dim).
     """
-    if cache_path and os.path.exists(cache_path):
-        print(f"[Embed] Loading cached embeddings from: {cache_path}")
-        data = np.load(cache_path)
-        embeddings = data["embeddings"]
-        print(f"[Embed] Loaded {embeddings.shape[0]} embeddings, dim={embeddings.shape[1]}")
-        return embeddings
+    cached = _load_cached_embeddings(cache_path, len(texts), "[Embed]")
+    if cached is not None:
+        return cached
 
     actual_device = device
 
@@ -558,12 +606,10 @@ def embed_texts_streaming(
     Reads one shard's text column at a time, embeds it, stores embeddings
     in a preallocated array, then frees the text memory.
     """
-    if cache_path and os.path.exists(cache_path):
-        print(f"[Embed-Stream] Loading cached embeddings from: {cache_path}")
-        data = np.load(cache_path)
-        embeddings = data["embeddings"]
-        print(f"[Embed-Stream] Loaded {embeddings.shape[0]} embeddings, dim={embeddings.shape[1]}")
-        return embeddings
+    cached = _load_cached_embeddings(
+        cache_path, getattr(metadata_manager, "num_docs", None), "[Embed-Stream]")
+    if cached is not None:
+        return cached
 
     actual_device = device
 
@@ -826,13 +872,9 @@ def cluster_embeddings_faiss(
         cluster_labels: shape (num_docs,)
         centroids: shape (K_init, dim)
     """
-    if cache_path and os.path.exists(cache_path):
-        print(f"[Cluster] Loading cached clustering from: {cache_path}")
-        data = np.load(cache_path)
-        labels = data["labels"]
-        centroids = data["centroids"]
-        print(f"[Cluster] Loaded {len(labels)} labels, K={len(centroids)}")
-        return labels, centroids
+    cached = _load_cached_clustering(cache_path, embeddings.shape[0])
+    if cached is not None:
+        return cached
 
     import faiss
 
@@ -903,12 +945,9 @@ def cluster_embeddings_sklearn(
     Returns:
         Tuple of (cluster_labels, centroids).
     """
-    if cache_path and os.path.exists(cache_path):
-        print(f"[Cluster] Loading cached clustering from: {cache_path}")
-        data = np.load(cache_path)
-        labels = data["labels"]
-        centroids = data["centroids"]
-        return labels, centroids
+    cached = _load_cached_clustering(cache_path, embeddings.shape[0])
+    if cached is not None:
+        return cached
 
     from sklearn.cluster import MiniBatchKMeans
 
