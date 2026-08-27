@@ -27,8 +27,10 @@ Key design:
 
 import os
 import sys
+import glob
 import json
 import shutil
+import hashlib
 import importlib
 import subprocess
 import threading
@@ -43,14 +45,15 @@ from climbmix.sampling.data_selector import select_data_by_mixture
 
 
 class ProxyRunner:
-    # Process-wide: base_eval.py writes its output CSV into one SHARED
-    # $NANOCHAT_BASE_DIR/base_eval/ directory under a step-only name
-    # (mid_model_{step:06d}.csv — no model tag; base_eval.py:462,537), and
-    # parallel proxy experiments all finish at the same final step, so two
+    # Parallel eval safety: base_eval.py writes its results CSV into
+    # {NANOCHAT_BASE_DIR}/base_eval/mid_model_{step:06d}.csv — a step-only
+    # name with NO model tag (base_eval.py:537), and every proxy experiment
+    # finishes at the same final step. With a shared base dir, two
     # concurrent evals overwrite each other's CSV and the wrong scores get
-    # attributed silently. Evals must therefore be serialized across all
-    # threads; training stays parallel. See run_experiment.
-    _eval_lock = threading.Lock()
+    # attributed silently (this used to force evals to be serialized behind
+    # a global lock). Fix: each eval subprocess gets a PRIVATE base dir
+    # (symlink farm — see _make_eval_base_dir) so its CSV path is physically
+    # per-experiment; evals run fully in parallel, one per device group.
 
     def __init__(
         self,
@@ -76,6 +79,7 @@ class ProxyRunner:
         self.general_data_dir = config.general_data_dir
         self.stem_ratio = config.stem_ratio
         self.eval_benchmarks = config.eval_benchmarks
+        self.eval_max_per_task = getattr(config, 'eval_max_per_task', -1)
         self.npu_per_exp = getattr(config, 'npu_per_exp', 0)
         self.proxy_target_tokens = config.proxy.target_tokens
         self.experiment_name = getattr(config, 'experiment_name', 'main') or "main"
@@ -159,9 +163,10 @@ class ProxyRunner:
         meta_path = os.path.join(exp_dir, "meta.json")
 
         model_tag = f"climbmix_{self.experiment_name}_{experiment_id:04d}"
+        t_start = time.time()
 
-        # Resume support: reuse a previously completed experiment instead of
-        # retraining (which costs a full 1000-step proxy train + eval).
+        # Resume level 1: completed experiment (meta.json with rc=0/0 and
+        # matching weights) -> reuse scores without running any subprocess.
         reused = self._load_completed_result(meta_path, mixture_config)
         if reused is not None:
             print(f"\n  [Exp {experiment_id}] Reusing completed experiment "
@@ -170,65 +175,72 @@ class ProxyRunner:
             shutil.rmtree(os.path.join(exp_dir, "mixture_data"), ignore_errors=True)
             return reused
 
-        # Fresh (re)run: clear any partial state left by a previous crashed
-        # attempt — a half-written mixture_data dir would feed the dataloader
-        # stale shards alongside the new ones.
-        if os.path.isdir(exp_dir):
-            shutil.rmtree(exp_dir)
-        os.makedirs(exp_dir, exist_ok=True)
+        # Resume level 2 (.mid_train_ok marker): training of THIS exact config
+        # already succeeded but eval did not complete (crash / kill / ^C).
+        # Skip the expensive training and re-run eval only — without this, a
+        # kill during a slow eval burns the full training again (speedrun
+        # 2026-08-27: ^C during iteration-2's first eval would have wasted
+        # all three ~1h trainings).
+        if self._load_mid_train_marker(exp_dir, mixture_config, model_tag):
+            print(f"\n  [Exp {experiment_id}] mid_train already complete "
+                  f"(marker valid, tag={model_tag}) — re-running eval only")
+            mid_rc = 0  # marker validity == training succeeded
+        else:
+            # Fresh (re)run: clear any partial state left by a previous crashed
+            # attempt — a half-written mixture_data dir would feed the dataloader
+            # stale shards alongside the new ones.
+            if os.path.isdir(exp_dir):
+                shutil.rmtree(exp_dir)
+            os.makedirs(exp_dir, exist_ok=True)
 
-        self._symlink_base_checkpoint(model_tag)
+            self._symlink_base_checkpoint(model_tag)
 
-        mixture_data_dir = os.path.join(exp_dir, "mixture_data")
+            mixture_data_dir = os.path.join(exp_dir, "mixture_data")
 
-        t_start = time.time()
-        group_tag = f"d{device_ids[0]}-{device_ids[-1]}" if device_ids else "all"
-        print(f"\n  [Exp {experiment_id}] Starting proxy experiment (d{self.proxy_depth}, tag={model_tag}, npu={group_tag})")
+            group_tag = f"d{device_ids[0]}-{device_ids[-1]}" if device_ids else "all"
+            print(f"\n  [Exp {experiment_id}] Starting proxy experiment (d{self.proxy_depth}, tag={model_tag}, npu={group_tag})")
 
-        print(f"  [Exp {experiment_id}] Preparing mixture-weighted data "
-              f"({self.stem_ratio*100:.0f}% STEM + {(1-self.stem_ratio)*100:.0f}% general)...")
-        self._prepare_mixture_data(mixture_config, experiment_id, mixture_data_dir,
-                                   nproc_per_node=nproc_per_node)
+            print(f"  [Exp {experiment_id}] Preparing mixture-weighted data "
+                  f"({self.stem_ratio*100:.0f}% STEM + {(1-self.stem_ratio)*100:.0f}% general)...")
+            self._prepare_mixture_data(mixture_config, experiment_id, mixture_data_dir,
+                                       nproc_per_node=nproc_per_node)
 
-        mid_cmd = self._build_mid_train_cmd(model_tag, mixture_data_dir,
-                                            nproc_per_node=nproc_per_node,
-                                            master_port=master_port)
-        print(f"  [Exp {experiment_id}] mid_train: {' '.join(mid_cmd)}")
-        mid_rc = self._run_subprocess(mid_cmd, exp_dir, "mid_train",
-                                      device_ids=device_ids, master_port=master_port)
-        if mid_rc != 0:
-            # Fail-fast: a failed proxy training must never enter the search
-            # as a fake score (0.0 looks like a real measurement and silently
-            # poisons the predictor — observed in speedrun 2026-08-26 17:35).
-            # run_batch converts this raise into an inf result with the error
-            # recorded; resume re-runs the experiment.
-            raise RuntimeError(
-                f"mid_train failed (rc={mid_rc}) for experiment {experiment_id}, "
-                f"see {os.path.join(exp_dir, 'mid_train.log')}")
+            mid_cmd = self._build_mid_train_cmd(model_tag, mixture_data_dir,
+                                                nproc_per_node=nproc_per_node,
+                                                master_port=master_port)
+            print(f"  [Exp {experiment_id}] mid_train: {' '.join(mid_cmd)}")
+            mid_rc = self._run_subprocess(mid_cmd, exp_dir, "mid_train",
+                                          device_ids=device_ids, master_port=master_port)
+            if mid_rc != 0:
+                # Fail-fast: a failed proxy training must never enter the search
+                # as a fake score (0.0 looks like a real measurement and silently
+                # poisons the predictor — observed in speedrun 2026-08-26 17:35).
+                # run_batch converts this raise into an inf result with the error
+                # recorded; resume re-runs the experiment.
+                raise RuntimeError(
+                    f"mid_train failed (rc={mid_rc}) for experiment {experiment_id}, "
+                    f"see {os.path.join(exp_dir, 'mid_train.log')}")
+            # Training succeeded: persist the marker so a later crash before
+            # meta.json (i.e. during eval) resumes at eval, not at training.
+            self._write_mid_train_marker(exp_dir, mixture_config, model_tag)
 
+        # Eval in a PRIVATE base dir (see _make_eval_base_dir): the CSV base_eval
+        # writes is addressed only by step, so a shared dir would let parallel
+        # evals overwrite each other. Private dir -> no lock, full parallelism.
+        eval_base = self._make_eval_base_dir(exp_dir, model_tag)
         eval_cmd = self._build_eval_cmd(model_tag,
                                         nproc_per_node=nproc_per_node,
                                         master_port=master_port)
         print(f"  [Exp {experiment_id}] base_eval: {' '.join(eval_cmd)}")
-        # Eval section is serialized via _eval_lock (see its definition):
-        # purge leftover CSVs, run eval, then move the fresh CSV into exp_dir
-        # before any other eval can overwrite/claim it. The old mtime-window
-        # heuristic mis-attributed scores whenever two evals finished within
-        # the same ±60s window — i.e. always, in parallel mode.
-        with ProxyRunner._eval_lock:
-            self._purge_stale_eval_csvs()
-            eval_rc = self._run_subprocess(eval_cmd, exp_dir, "eval",
-                                           device_ids=device_ids, master_port=master_port)
-            if eval_rc == 0:
-                csv_path = self._claim_eval_csv(exp_dir, model_tag)
-            else:
-                csv_path = None
-                # Remove a partial CSV the failed eval may have written.
-                self._purge_stale_eval_csvs()
+        eval_rc = self._run_subprocess(eval_cmd, exp_dir, "eval",
+                                       device_ids=device_ids, master_port=master_port,
+                                       base_dir_override=eval_base)
         if eval_rc != 0:
             raise RuntimeError(
                 f"base_eval failed (rc={eval_rc}) for experiment {experiment_id}, "
                 f"see {os.path.join(exp_dir, 'eval.log')}")
+
+        csv_path = self._claim_eval_csv(exp_dir, model_tag, eval_base)
 
         self._copy_mid_checkpoint(model_tag, exp_dir)
         per_task, val_accuracy, stem_metric, per_task_nlls, stem_nll = \
@@ -253,6 +265,7 @@ class ProxyRunner:
             "val_tasks": self.val_tasks,
             "stem_ratio": self.stem_ratio,
             "eval_benchmarks": self.eval_benchmarks,
+            "eval_max_per_task": self.eval_max_per_task,
             "elapsed_seconds": elapsed,
             "mid_train_rc": mid_rc,
             "eval_rc": eval_rc,
@@ -573,6 +586,14 @@ class ProxyRunner:
             # load_optimizer block is a no-op here (proxy inherits
             # total_batch_size from the same checkpoint).
             "--load-optimizer", "0",
+            # Disable the IN-TRAINING benchmark eval (--core-metric-every,
+            # default 500, fires unconditionally at last_step). The external
+            # base_eval right after training scores the same benchmarks
+            # anyway; the in-training copy measured ~2h10m per experiment on
+            # the speedrun (gsm8k_cot ~50min + math_cot_500 ~49min + 26 more
+            # tasks) — pure duplication. Val bpb (--eval-every) stays on as
+            # the training signal.
+            "--core-metric-every", "-1",
             "--data-dir", mixture_data_dir,
         ]
         return cmd
@@ -598,6 +619,13 @@ class ProxyRunner:
             "--model-type", "mid",
             "--device-type", self.device_type,
         ]
+        # Subsample cap for cheap proxy evals: base_eval shuffles each task
+        # with a FIXED seed (random.Random(1337)) before truncating
+        # (base_eval.py:356-359), so every experiment scores the SAME subset
+        # — scores stay comparable across candidate mixtures. -1 (default) =
+        # full eval sets (production); the speedrun passes a small cap.
+        if self.eval_max_per_task and self.eval_max_per_task > 0:
+            cmd += ["--max-per-task", str(self.eval_max_per_task)]
         return cmd
 
     def _run_subprocess(
@@ -607,11 +635,14 @@ class ProxyRunner:
         stage_name: str,
         device_ids: Optional[List[int]] = None,
         master_port: Optional[int] = None,
+        base_dir_override: Optional[str] = None,
     ) -> int:
         log_path = os.path.join(exp_dir, f"{stage_name}.log")
         env = os.environ.copy()
         env["PYTHONPATH"] = self.nanochat_dir + ":" + env.get("PYTHONPATH", "")
-        env["NANOCHAT_BASE_DIR"] = self.nanochat_base_dir
+        # base_dir_override: private NANOCHAT_BASE_DIR for eval subprocesses
+        # (per-experiment symlink farm) — see _make_eval_base_dir.
+        env["NANOCHAT_BASE_DIR"] = base_dir_override or self.nanochat_base_dir
 
         if device_ids is not None:
             # ASCEND_RT_VISIBLE_DEVICES is the torch_npu-documented pinning var
@@ -625,6 +656,7 @@ class ProxyRunner:
         if master_port is not None:
             env["MASTER_PORT"] = str(master_port)
 
+        print(f"  [{stage_name}] started (log: {log_path})")
         with open(log_path, "w") as log_f:
             proc = subprocess.Popen(
                 cmd,
@@ -633,7 +665,19 @@ class ProxyRunner:
                 stdout=log_f,
                 stderr=subprocess.STDOUT,
             )
-            proc.wait()
+            # Heartbeat: subprocess output goes to the log file, so a long
+            # stage otherwise prints NOTHING to the console for its entire
+            # duration — a 3h eval looks exactly like a hung pipeline
+            # (speedrun 2026-08-26). Print progress every 5 minutes instead.
+            t0 = time.time()
+            while True:
+                try:
+                    proc.wait(timeout=300)
+                    break
+                except subprocess.TimeoutExpired:
+                    elapsed_min = (time.time() - t0) / 60
+                    print(f"  [{stage_name}] running {elapsed_min:.0f}m | "
+                          f"{self._tail_last_line(log_path)}")
 
         if proc.returncode != 0:
             print(f"  [{stage_name}] FAILED (exit code {proc.returncode}), see {log_path}")
@@ -642,38 +686,145 @@ class ProxyRunner:
 
         return proc.returncode
 
-    def _purge_stale_eval_csvs(self) -> None:
-        """Delete leftover mid_model_*.csv in the shared base_eval dir.
-
-        Any such file present at this point belongs to a previous eval that
-        crashed or failed to claim its output — successful evals move their
-        CSV into their own exp dir, so nothing of value is ever deleted.
-        Must be called under _eval_lock.
-        """
-        csv_dir = os.path.join(self.nanochat_base_dir, "base_eval")
+    @staticmethod
+    def _tail_last_line(log_path: str, max_chars: int = 120) -> str:
+        """Last non-empty line of a growing log file, truncated for console."""
         try:
-            names = [f for f in os.listdir(csv_dir)
-                     if f.startswith("mid_model_") and f.endswith(".csv")]
+            with open(log_path, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                f.seek(max(0, size - 8192))
+                chunk = f.read().decode("utf-8", errors="replace")
+            lines = [l.strip() for l in chunk.splitlines() if l.strip()]
+            if not lines:
+                return "(no output yet)"
+            last = lines[-1]
+            return last[:max_chars] + ("..." if len(last) > max_chars else "")
         except OSError:
-            return
-        for f in names:
-            try:
-                os.remove(os.path.join(csv_dir, f))
-            except OSError:
-                pass
+            return "(log not readable)"
 
-    def _claim_eval_csv(self, exp_dir: str, model_tag: str) -> Optional[str]:
-        """Move the CSV written by THIS eval into exp_dir (under _eval_lock).
+    # ── mid_train resume marker (skip retraining when only eval is missing) ──
 
-        base_eval.py names its output f"{model_slug}.csv" where
-        model_slug = f"{model_type}_model_{step:06d}" — the step is the same
-        for every proxy experiment, so the shared filename cannot identify
-        the experiment that produced it. Under _eval_lock, the newest (and
-        only) mid_model_*.csv after our subprocess returned is unambiguously
-        ours; moving it out guarantees no later eval can claim it, and
-        resume/debug has a per-experiment record at eval_{model_tag}.csv.
+    @staticmethod
+    def _weights_sha256(mixture_config: MixtureConfig) -> str:
+        arr = np.ascontiguousarray(
+            mixture_config.mixture_weights.weights, dtype=np.float64)
+        return hashlib.sha256(arr.tobytes()).hexdigest()
+
+    @staticmethod
+    def _mid_train_marker_path(exp_dir: str) -> str:
+        return os.path.join(exp_dir, ".mid_train_ok")
+
+    def _load_mid_train_marker(
+        self,
+        exp_dir: str,
+        mixture_config: MixtureConfig,
+        model_tag: str,
+    ) -> bool:
+        """True iff a previous mid_train of THIS config (same weights hash,
+        same model tag) succeeded and its checkpoint still exists. Any
+        mismatch/corruption -> False (full retrain): fail-safe, never
+        fail-wrong."""
+        path = self._mid_train_marker_path(exp_dir)
+        if not os.path.isfile(path):
+            return False
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+            return False
+        if not isinstance(data, dict):
+            return False
+        if data.get("weights_sha256") != self._weights_sha256(mixture_config):
+            return False
+        if data.get("model_tag") != model_tag:
+            return False
+        ckpt_dir = os.path.join(self.nanochat_base_dir, "mid_checkpoints", model_tag)
+        if not glob.glob(os.path.join(ckpt_dir, "model_*.pt")):
+            return False
+        return True
+
+    def _write_mid_train_marker(
+        self,
+        exp_dir: str,
+        mixture_config: MixtureConfig,
+        model_tag: str,
+    ) -> None:
+        payload = {
+            "weights_sha256": self._weights_sha256(mixture_config),
+            "model_tag": model_tag,
+            "num_iterations": self.proxy_num_iterations,
+        }
+        with open(self._mid_train_marker_path(exp_dir), "w") as f:
+            json.dump(payload, f, indent=2)
+
+    # ── private eval base dir (parallel-safe CSV attribution) ──
+
+    def _make_eval_base_dir(self, exp_dir: str, model_tag: str) -> str:
+        """Private NANOCHAT_BASE_DIR for this experiment's eval subprocess.
+
+        base_eval.py writes its results CSV to
+        {base_dir}/base_eval/mid_model_{step:06d}.csv — a step-only name with
+        NO model tag (base_eval.py:537) — and every proxy experiment finishes
+        at the same final step. With the shared base dir, two concurrent
+        evals overwrite each other's CSV and the wrong scores get attributed
+        silently (which used to force eval serialization behind a global
+        lock). A private base dir makes the collision physically impossible
+        and lets evals run fully in parallel.
+
+        Everything the eval READS is symlinked to the real shared data; the
+        two things it WRITES ({base_eval}/ CSV, {report}/) are private real
+        dirs inside exp_dir.
         """
-        csv_dir = os.path.join(self.nanochat_base_dir, "base_eval")
+        eval_base = os.path.join(exp_dir, "_eval_base")
+        # Rebuild from scratch on every eval attempt: a previously crashed
+        # eval may have left a partial CSV or download in the private dirs.
+        shutil.rmtree(eval_base, ignore_errors=True)
+
+        # Model checkpoint — mid_train just succeeded (or the marker verified
+        # it), so it must exist; refuse to eval anything else (fail-fast).
+        mid_src = os.path.join(self.nanochat_base_dir, "mid_checkpoints", model_tag)
+        if not os.path.isdir(mid_src):
+            raise FileNotFoundError(
+                f"mid checkpoint for eval not found: {mid_src} — refusing to "
+                f"evaluate a missing/stale model")
+        os.makedirs(os.path.join(eval_base, "mid_checkpoints"))
+        os.symlink(mid_src, os.path.join(eval_base, "mid_checkpoints", model_tag))
+
+        # Tokenizer — required by build_model (get_tokenizer / token_bytes).
+        tok_src = os.path.join(self.nanochat_base_dir, "tokenizer")
+        if not os.path.isdir(tok_src):
+            raise FileNotFoundError(
+                f"tokenizer not found at {tok_src} — eval cannot run")
+        os.symlink(tok_src, os.path.join(eval_base, "tokenizer"))
+
+        # Eval datasets: symlink when present (normal case — the shell
+        # pre-flight downloads them once). When absent, skip the link and let
+        # base_eval download its own copy into the private dir (correct but
+        # slow); warn so the operator can pre-download once instead.
+        for name in ("eval_bundle", "eval_stem"):
+            src = os.path.join(self.nanochat_base_dir, name)
+            if os.path.isdir(src):
+                os.symlink(src, os.path.join(eval_base, name))
+            else:
+                print(f"  [Eval] WARNING: {src} not found — eval will download "
+                      f"{name} into the private dir (slow)")
+
+        # Private writable output dirs (CSV + report); never shared.
+        os.makedirs(os.path.join(eval_base, "base_eval"), exist_ok=True)
+        os.makedirs(os.path.join(eval_base, "report"), exist_ok=True)
+        return eval_base
+
+    def _claim_eval_csv(self, exp_dir: str, model_tag: str, eval_base: str) -> Optional[str]:
+        """Move the CSV written by THIS eval from its private base dir into
+        exp_dir.
+
+        The private dir was rebuilt empty immediately before the eval
+        subprocess started, so any mid_model_*.csv in it is unambiguously
+        ours — no lock and no mtime heuristics needed. Moving it out also
+        gives resume/debug a per-experiment record at eval_{model_tag}.csv.
+        """
+        csv_dir = os.path.join(eval_base, "base_eval")
         try:
             names = [f for f in os.listdir(csv_dir)
                      if f.startswith("mid_model_") and f.endswith(".csv")]

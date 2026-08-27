@@ -496,6 +496,13 @@ class CLIMBConfig:
     general_data_dir: str = ""
     stem_ratio: float = 0.7
     eval_benchmarks: str = "stem"
+    # Subsample cap for base_eval (--max-per-task). base_eval shuffles every
+    # task with a FIXED seed (random.Random(1337)) before truncating, so all
+    # experiments score the SAME subset and stay comparable. -1 = full eval
+    # sets (production); small caps (e.g. 100) keep proxy evals cheap
+    # (speedrun). Part of the run fingerprint: changing it changes the eval
+    # protocol, so old results must not be mixed with new ones.
+    eval_max_per_task: int = -1
     quality_config_path: str = ""
     schema_path: str = ""
     npu_per_exp: int = 0

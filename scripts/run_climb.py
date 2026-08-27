@@ -45,6 +45,10 @@ def main():
                         help="STEM data ratio (default 0.7 = 70%% STEM + 30%% general)")
     parser.add_argument("--eval-benchmarks", type=str, default="stem",
                         help="Evaluation benchmarks: all, core, stem, or comma-separated labels")
+    parser.add_argument("--eval-max-per-task", type=int, default=-1,
+                        help="Subsample cap per eval task (-1 = full sets). base_eval "
+                             "shuffles with a fixed seed (1337), so all experiments score "
+                             "the same subset and stay comparable.")
 
     # ── Discovery ──
     parser.add_argument("--discovery-method", type=str, default="embedding_cluster",
@@ -196,6 +200,7 @@ def main():
         general_data_dir=args.general_data_dir,
         stem_ratio=args.stem_ratio,
         eval_benchmarks=args.eval_benchmarks,
+        eval_max_per_task=args.eval_max_per_task,
         quality_config_path=args.quality_config_path,
         schema_path=args.schema,
         npu_per_exp=args.npu_per_exp,
@@ -211,7 +216,8 @@ def main():
     print(f"  Discovery:  {config.discovery.method} (K_enhanced={config.discovery.K_enhanced})")
     print(f"  Search:     {config.search.num_iterations} iterations, {configs_per_iter} = {sum(configs_per_iter)} configs")
     print(f"  Metric:     {config.val_tasks} ({config.metric_direction})")
-    print(f"  Eval:       benchmarks={config.eval_benchmarks}")
+    print(f"  Eval:       benchmarks={config.eval_benchmarks}, max_per_task="
+          f"{config.eval_max_per_task if config.eval_max_per_task > 0 else 'full'}")
     print(f"  Data mix:   {config.stem_ratio*100:.0f}% STEM + {(1-config.stem_ratio)*100:.0f}% general")
     print(f"  Device:     {config.device.device_type} ({config.device.npu_devices} devices)")
     print(f"  nanochat:   {config.nanochat_dir}")

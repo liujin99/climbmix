@@ -12,6 +12,8 @@
 #    - 70% STEM + 30% ClimbMix general data (含 proxy 实验内混合 + Step 5 混合;
 #      首次运行会下载 3 个 ClimbMix 分片到 GENERAL_DATA_DIR, 之后复用缓存;
 #      该缓存也供 full run 复用)。不做 random baseline。
+#    - Proxy eval: 每实验私有 NANOCHAT_BASE_DIR (symlink farm) → eval 并行;
+#      --max-per-task=$EVAL_MAX_PER_TASK 抽样 (固定种子, 各实验同一子集)
 #
 #  用法:  bash runs/speedrun_climbmix.sh
 #
@@ -45,6 +47,10 @@ NUM_NPU=8
 NPU_PER_EXP=1
 EMBEDDING_SAMPLE_SIZE=2000
 EVAL_BENCHMARKS="stem"
+# Eval subsample cap per task (speedrun keeps proxy evals cheap; the fixed
+# shuffle seed 1337 inside base_eval keeps scores comparable across exps).
+# Full sets = -1 (what the production run uses).
+EVAL_MAX_PER_TASK="${EVAL_MAX_PER_TASK:-100}"
 STEM_RATIO="${STEM_RATIO:-0.7}"
 PROXY_TARGET_TOKENS=10M
 TARGET_TOKENS=10M
@@ -98,6 +104,7 @@ FINGERPRINT=$(python3 -m climbmix.utils.fingerprint --base-dir "$CLIMBMIX_DIR" \
     --param "embedding_sample_size=$EMBEDDING_SAMPLE_SIZE" \
     --param "stem_ratio=$STEM_RATIO" \
     --param "eval_benchmarks=$EVAL_BENCHMARKS" \
+    --param "eval_max_per_task=$EVAL_MAX_PER_TASK" \
     --param "num_npu=$NUM_NPU" \
     --param "npu_per_exp=$NPU_PER_EXP" \
     --param "data_dir=$DATA_DIR" \
@@ -164,6 +171,7 @@ else
         --general-data-dir "$GENERAL_DATA_DIR" \
         --stem-ratio "$STEM_RATIO" \
         --eval-benchmarks "$EVAL_BENCHMARKS" \
+        --eval-max-per-task "$EVAL_MAX_PER_TASK" \
         --proxy-depth "$PROXY_DEPTH" \
         --proxy-num-iterations "$PROXY_NUM_ITERATIONS" \
         --proxy-lr-scale 1.0 --proxy-warmup 0.0 --proxy-warmdown 0.9 \
@@ -245,9 +253,9 @@ else
     ( cd "$NANOCHAT_DIR" && torchrun --standalone --nproc_per_node="$NUM_NPU" -m scripts.mid_train -- \
         --num-iterations="$TARGET_STEPS" \
         --lr-scale=1.0 --warmup-ratio=0.0 --warmdown-ratio=0.9 \
+        --core-metric-every=-1 \
         --device-batch-size=8 \
         --run="speedrun_climb" --model-tag="$CLIMB_TAG" \
-        --eval-benchmarks="$EVAL_BENCHMARKS" \
         --data-dir="$CLIMB_DATA" 2>&1 | tee "$OUTPUT_DIR/mid_train_climb.log" ) || {
         echo "✗ Target mid_train FAILED"
         if [ -L "$link_dir" ]; then rm -f "$link_dir"; fi
@@ -271,6 +279,7 @@ if [ -f "$OUTPUT_DIR/.done_eval_climb" ]; then
 else
     ( cd "$NANOCHAT_DIR" && torchrun --standalone --nproc_per_node="$NUM_NPU" -m scripts.base_eval -- \
         --eval=core --eval-benchmarks="$EVAL_BENCHMARKS" \
+        --max-per-task="$EVAL_MAX_PER_TASK" \
         --device-batch-size=32 \
         --model-tag="$CLIMB_TAG" --model-type=mid 2>&1 | tee "$OUTPUT_DIR/eval_climb.log" ) || {
         echo "✗ Eval FAILED"

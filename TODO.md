@@ -15,7 +15,11 @@
 - **Token caps**: --proxy-target-tokens / --target-tokens (default 200M proxy / 1B target in production, 10M in speedrun; human-readable "2B/10M/500K" syntax) — caps per-experiment I/O and peak RAM (8 parallel read_texts)
 - **Seeded data selection**: cluster docs randomly permuted (seed = exp_id + 42) before token-budget prefix cut
 - **Val split hygiene**: last shard_*.parquet = held-out validation (train shards exclude val docs); DDP row-group sizing mirrors prepare_shards.py
-- **Eval CSV location**: 3-tier strategy (filename contains model_tag → mtime within eval window → global newest); failed evals skip parsing instead of reading stale CSVs
+- **Parallel-safe eval via private base dirs**: base_eval.py writes its CSV to `{NANOCHAT_BASE_DIR}/base_eval/mid_model_{step}.csv` — step-only, no model tag (confirmed on remote), so parallel evals used to overwrite each other and were serialized behind a global lock. Now each eval subprocess gets a private base dir (symlink farm: mid_checkpoints/tokenizer/eval_bundle/eval_stem → real shared data; private base_eval/ + report/) — no lock, evals fully parallel, CSV attribution unambiguous
+- **Eval subsample cap (`--eval-max-per-task`)**: base_eval shuffles each task with fixed seed 1337 before truncating, so capped runs still score the same subset across experiments (comparable). Speedrun: 100/task; production: -1 (full sets). Recorded in meta.json and the run fingerprint
+- **No duplicate in-training benchmark eval**: proxy/target mid_train now pass `--core-metric-every=-1` (the default fires all 28 benchmarks at last_step inside training — measured ~2h10m/exp on the speedrun, duplicating the external base_eval; val bpb stays on as the training signal)
+- **mid_train resume marker (`.mid_train_ok`)**: weights-sha256 + model-tag + checkpoint presence; a crash/kill during eval resumes at eval only instead of retraining (speedrun 2026-08-27: ^C during iteration-2's first eval)
+- **Subprocess heartbeat**: every 5min the runner prints stage elapsed + last log line (mid_train step / eval task progress) + log path at start — a 3h eval no longer looks like a hang
 - **nanochat-npu integration**: all training via subprocess torchrun, --device-type npu
 - **Self-contained scripts**: get_model_info.py and mix_general_data.py in climbmix/scripts/, no quadmix dependency
 - **HF_ENDPOINT defaults to hf-mirror.com in runs/*.sh**: corporate proxy selectively rejects Python CONNECT tunnels to huggingface.co (curl + Python-to-mirror both fine); mirror serves identical bytes; covers ClimbMix shards + eval_stem.zip; override with the env var
@@ -34,7 +38,6 @@
 
 ## Remaining
 
-- Confirm on remote: how nanochat base_eval.py names its CSV files (tag vs timestamp) — 3-tier fallback handles both, but tier-1 confirmation removes ambiguity under parallel experiments
 - Confirm on remote: mid_train val-shard convention (last shard = val, minimum val size)
 - Pull latest code on remote and run `bash runs/speedrun_climbmix.sh` (watch: NaN=0, K=100 clustering, 50-step train+eval)
 - Speedrun passes → run production `bash runs/run_climbmix.sh` (d20 search, 200M proxy / 1B target token caps)

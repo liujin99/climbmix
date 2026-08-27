@@ -49,6 +49,10 @@ EMBEDDING_DEVICE="${EMBEDDING_DEVICE:-npu}"
 EMBEDDING_SAMPLE_SIZE="${EMBEDDING_SAMPLE_SIZE:-0}"
 STEM_RATIO="${STEM_RATIO:-0.7}"
 EVAL_BENCHMARKS="${EVAL_BENCHMARKS:-stem}"
+# Eval subsample cap per task: -1 = FULL eval sets (production default).
+# base_eval shuffles each task with a fixed seed (1337) before truncating,
+# so any cap still yields comparable scores across experiments.
+EVAL_MAX_PER_TASK="${EVAL_MAX_PER_TASK:--1}"
 NUM_NPU="${NUM_NPU:-8}"
 NPU_PER_EXP="${NPU_PER_EXP:-1}"
 OUTPUT_DIR="${OUTPUT_DIR:-$CLIMBMIX_DIR/result/$EXP_NAME}"
@@ -97,6 +101,7 @@ FINGERPRINT=$(python3 -m climbmix.utils.fingerprint --base-dir "$CLIMBMIX_DIR" \
     --param "embedding_sample_size=$EMBEDDING_SAMPLE_SIZE" \
     --param "stem_ratio=$STEM_RATIO" \
     --param "eval_benchmarks=$EVAL_BENCHMARKS" \
+    --param "eval_max_per_task=$EVAL_MAX_PER_TASK" \
     --param "num_npu=$NUM_NPU" \
     --param "npu_per_exp=$NPU_PER_EXP" \
     --param "data_dir=$DATA_DIR" \
@@ -149,6 +154,7 @@ else
         --general-data-dir "$GENERAL_DATA_DIR" \
         --stem-ratio "$STEM_RATIO" \
         --eval-benchmarks "$EVAL_BENCHMARKS" \
+        --eval-max-per-task "$EVAL_MAX_PER_TASK" \
         --proxy-depth "$PROXY_DEPTH" \
         --proxy-num-iterations "$PROXY_NUM_ITERATIONS" \
         --proxy-target-tokens "$PROXY_TARGET_TOKENS" \
@@ -237,9 +243,9 @@ run_mid_train() {
     ( cd "$NANOCHAT_DIR" && torchrun --standalone --nproc_per_node="$NUM_NPU" -m scripts.mid_train -- \
         --num-iterations="$TARGET_STEPS" \
         --lr-scale=1.0 --warmup-ratio=0.0 --warmdown-ratio=0.9 \
+        --core-metric-every=-1 \
         --device-batch-size=8 \
         --run="${name}_mid" --model-tag="$tag" \
-        --eval-benchmarks="$EVAL_BENCHMARKS" \
         --data-dir="$data_dir" 2>&1 | tee "$OUTPUT_DIR/mid_train_${name}.log" )
     # NOT `[ -L ] && rm` as the last statement: when link_dir is absent or not
     # a symlink the function would return 1, and under set -e the script dies
@@ -270,6 +276,7 @@ run_eval() {
     local tag="$1" name="$2"
     ( cd "$NANOCHAT_DIR" && torchrun --standalone --nproc_per_node="$NUM_NPU" -m scripts.base_eval -- \
         --eval=core --eval-benchmarks="$EVAL_BENCHMARKS" \
+        --max-per-task="$EVAL_MAX_PER_TASK" \
         --device-batch-size=32 \
         --model-tag="$tag" --model-type=mid 2>&1 | tee "$OUTPUT_DIR/eval_${name}.log" )
 }
