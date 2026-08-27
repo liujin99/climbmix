@@ -62,14 +62,17 @@ PROXY_WARMDOWN="${PROXY_WARMDOWN:-0.9}"
 TARGET_LR_SCALE="${TARGET_LR_SCALE:-1.0}"
 TARGET_WARMUP="${TARGET_WARMUP:-0.0}"
 TARGET_WARMDOWN="${TARGET_WARMDOWN:-0.9}"
-# d28 Step-6 OOM evidence (speedrun 2026-08-27): dbs=8 override + full AdamW
-# optimizer state (Step 6 loads it by design, ws=8 matches the d28 base) →
-# 27.58 GiB allocated / 29.49 GiB HBM, 66 MiB short in the FIRST forward
-# (apply_rotary_emb). dbs=4 (the d28 checkpoint's own inherited value) halves
-# activations → same memory envelope as the d20 proxy runs (~23.7 GiB peak).
-# dbs only re-slices micro-batches (total batch 1,048,576 unchanged), and both
-# arms (climb/random) use the same value → scores stay comparable.
-MID_DEVICE_BATCH_SIZE="${MID_DEVICE_BATCH_SIZE:-4}"
+# d28 Step-6 OOM: 对齐 quadmix/nanochat_mid_compare/run_stem_experiment.sh
+# (dev/dataset-schema 分支, 同一 nanochat-npu repo + 同一 d28 ckpt) 的实证配置:
+#   DEVICE_BATCH_SIZE=1 + 完整 NPU env 块 (runs/lib/npu_env.sh, 含 unified
+#   memory) + --sample-every=-1 (采样会打碎 NPU 内存, quadmix af525ee 修复)。
+# 2026-08-27 实测: dbs=8 与 dbs=4 都在第一个 forward ~27.5G/29.5G 撞墙
+# (fp32 主权重 + fp32 梯度 ~13G 静态 + 激活)。dbs=1 是唯一被实证过的值。
+# dbs 只影响 micro-batch 切分 (total batch 1,048,576 不变), 两臂同值 → 可比。
+# 生产若想升 dbs: 先看本 speedrun 日志的 "Peak memory usage" 实测余量。
+MID_DEVICE_BATCH_SIZE="${MID_DEVICE_BATCH_SIZE:-1}"
+# flat = 零裁剪文档打包 (DeepSeek V3 式), 与 proxy 搜索阶段及 quadmix 实验同口径
+MID_TRAIN_LOADER="${MID_TRAIN_LOADER:-flat}"
 EVAL_DEVICE_BATCH_SIZE="${EVAL_DEVICE_BATCH_SIZE:-32}"
 CORE_METRIC_EVERY="${CORE_METRIC_EVERY:--1}"
 NANOCHAT_DTYPE="${NANOCHAT_DTYPE:-bfloat16}"
@@ -159,6 +162,7 @@ FP_TARGET_PARAMS=(
     "target_warmup=$TARGET_WARMUP"
     "target_warmdown=$TARGET_WARMDOWN"
     "mid_device_batch_size=$MID_DEVICE_BATCH_SIZE"
+    "mid_train_loader=$MID_TRAIN_LOADER"
     "eval_device_batch_size=$EVAL_DEVICE_BATCH_SIZE"
     "core_metric_every=$CORE_METRIC_EVERY"
     "stem_ratio=$STEM_RATIO"
@@ -305,13 +309,21 @@ else
     # Clear partial checkpoints from a crashed attempt (whole-run atomicity)
     rm -rf "$NANOCHAT_BASE_DIR/mid_checkpoints/$CLIMB_TAG"
 
-    ( cd "$NANOCHAT_DIR" && torchrun --standalone --nproc_per_node="$NUM_NPU" -m scripts.mid_train -- \
+    # Step 6 = 单 8-rank torchrun (quadmix 验证过 env 块安全的唯一形态);
+    # 并行搜索阶段绝不 source (2026-08-26 事故, 见文件头).
+    (
+        # shellcheck source=/dev/null
+        source "$CLIMBMIX_DIR/runs/lib/npu_env.sh"
+        cd "$NANOCHAT_DIR" && torchrun --standalone --nproc_per_node="$NUM_NPU" -m scripts.mid_train -- \
         --num-iterations="$TARGET_STEPS" \
         --lr-scale="$TARGET_LR_SCALE" --warmup-ratio="$TARGET_WARMUP" --warmdown-ratio="$TARGET_WARMDOWN" \
         --core-metric-every="$CORE_METRIC_EVERY" \
         --device-batch-size="$MID_DEVICE_BATCH_SIZE" \
+        --loader="$MID_TRAIN_LOADER" \
+        --sample-every=-1 \
         --run="speedrun_climb" --model-tag="$CLIMB_TAG" \
-        --data-dir="$CLIMB_DATA" 2>&1 | tee "$OUTPUT_DIR/mid_train_climb.log" ) || {
+        --data-dir="$CLIMB_DATA" 2>&1 | tee "$OUTPUT_DIR/mid_train_climb.log"
+    ) || {
         echo "✗ Target mid_train FAILED"
         if [ -L "$link_dir" ]; then rm -f "$link_dir"; fi
         exit 1
@@ -332,11 +344,15 @@ echo -e "\n===== Step 7: Evaluation =====\n"
 if [ -f "$OUTPUT_DIR/.done_eval_climb" ]; then
     echo "  eval climb: already done, skip"
 else
-    ( cd "$NANOCHAT_DIR" && torchrun --standalone --nproc_per_node="$NUM_NPU" -m scripts.base_eval -- \
+    (
+        # shellcheck source=/dev/null
+        source "$CLIMBMIX_DIR/runs/lib/npu_env.sh"
+        cd "$NANOCHAT_DIR" && torchrun --standalone --nproc_per_node="$NUM_NPU" -m scripts.base_eval -- \
         --eval=core --eval-benchmarks="$EVAL_BENCHMARKS" \
         --max-per-task="$EVAL_MAX_PER_TASK" \
         --device-batch-size="$EVAL_DEVICE_BATCH_SIZE" \
-        --model-tag="$CLIMB_TAG" --model-type=mid 2>&1 | tee "$OUTPUT_DIR/eval_climb.log" ) || {
+        --model-tag="$CLIMB_TAG" --model-type=mid 2>&1 | tee "$OUTPUT_DIR/eval_climb.log"
+    ) || {
         echo "✗ Eval FAILED"
         exit 1
     }

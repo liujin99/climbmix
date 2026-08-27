@@ -586,6 +586,15 @@ class ProxyRunner:
             # load_optimizer block is a no-op here (proxy inherits
             # total_batch_size from the same checkpoint).
             "--load-optimizer", "0",
+            # flat = 零裁剪文档打包 (DeepSeek V3 式)。与 target 阶段
+            # (speedrun/run_climbmix Step 6) 及 quadmix STEM 实验保持同一
+            # 口径 —— "proxy 分数预测 target 表现" 的前提是数据打包方式一致。
+            # bos_bestfit 会裁掉 ~35% token, 且两阶段混用会使预测迁移失真。
+            "--loader", "flat",
+            # mid_train 默认 sample_every=500 会在 step 500 及 last_step 触发
+            # Engine.generate_batch(), 打碎 NPU 内存 → optimizer.step() OOM
+            # (quadmix af525ee 用崩溃换来的修复, 直接移植)。
+            "--sample-every", "-1",
             # Disable the IN-TRAINING benchmark eval (--core-metric-every,
             # default 500, fires unconditionally at last_step). The external
             # base_eval right after training scores the same benchmarks
