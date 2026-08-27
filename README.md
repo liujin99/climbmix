@@ -133,12 +133,17 @@ Each script auto-checks dependencies, NPU availability, disk space, and exits wi
 
 Both runners are resumable: **re-run the same command after an interruption.**
 
-- **Fingerprint auto-reset**: on start, each script compares a fingerprint of
-  (repo sources + semantic run params) against `result/$EXP_NAME/.fingerprint`.
-  On mismatch (code/param change) the old output is archived as
-  `result/${EXP_NAME}_stale_<ts>` and the run starts fresh — stale caches can
-  never silently mask a code change. `runs/*.sh` edits alone (comments/echo)
-  do NOT reset; `--param` knobs do. Not covered: nanochat-npu edits, data
+- **Stage-scoped fingerprint auto-reset**: on start, each script compares TWO
+  fingerprints against `result/$EXP_NAME/.fingerprint_search` and
+  `.fingerprint_target` (each = stage-relevant repo sources + semantic params).
+  A SEARCH mismatch (search semantics changed) archives the whole dir as
+  `result/${EXP_NAME}_stale_<ts>`; a TARGET mismatch archives only target
+  products (Steps 4-8 rerun; search results are kept). Legacy single-
+  `.fingerprint` dirs are adopted unverified with
+  `MIGRATE_LEGACY_FINGERPRINT=1` (one-time migration), else archived.
+  `num_npu` is deliberately NOT fingerprinted (parallel shape only — the NPU
+  pool may shrink/grow mid-campaign). `runs/*.sh` edits alone (comments/echo)
+  do NOT reset; param-array knobs do. Not covered: nanochat-npu edits, data
   files with unchanged names/counts.
 - **Granularity** (finest loss on crash):
   | Stage | Resume unit | Loss on crash |

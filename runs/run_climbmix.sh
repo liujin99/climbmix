@@ -6,11 +6,13 @@
 #  实验:   EXP_NAME=myexp bash runs/run_climbmix.sh   (输出 result/myexp)
 #
 #  断点续跑 (直接重跑同一命令即可):
-#    - 指纹匹配  → 自动续跑: 聚类/搜索状态/已完成实验/target 训练/eval 全部复用
-#    - 指纹不匹配(代码或参数变更) → 旧目录归档为 result/${EXP_NAME}_stale_<ts> 后全新开始
-#    - 强制全新:  换 EXP_NAME 或 rm -rf result/$EXP_NAME
+#    - 阶段指纹匹配 → 自动续跑: 聚类/搜索状态/已完成实验/target 训练/eval 全部复用
+#    - search 指纹变(搜索语义代码或参数变更) → 旧目录归档 result/${EXP_NAME}_stale_<ts> 后全新开始
+#    - target 指纹变(仅 target 语义变更) → 只归档 target 产物, 搜索结果保留, Steps 4-8 重跑
 #  恢复粒度: 步骤级(.done) / 迭代级(search_state.json) / 实验级(exp_*/meta.json)
 #            / embedding 分片级(进度账本) / 训练内部不支持(整次重跑)
+#  旧版单一 .fingerprint 目录: MIGRATE_LEGACY_FINGERPRINT=1 采纳(不校验)。
+#  num_npu 不进指纹(并行形状可变, 见 runs/lib/stage_gate.sh)。
 #  注意: nanochat-npu 侧代码变更、同名数据文件内容变化不在指纹检测范围内
 # ═══════════════════════════════════════════════════════════════════════
 # Source CANN env BEFORE set -euo pipefail (set_env.sh may have commands
@@ -60,7 +62,14 @@ PROXY_WARMDOWN="${PROXY_WARMDOWN:-0.9}"
 TARGET_LR_SCALE="${TARGET_LR_SCALE:-1.0}"
 TARGET_WARMUP="${TARGET_WARMUP:-0.0}"
 TARGET_WARMDOWN="${TARGET_WARMDOWN:-0.9}"
-MID_DEVICE_BATCH_SIZE="${MID_DEVICE_BATCH_SIZE:-8}"
+# d28 Step-6 OOM evidence (speedrun 2026-08-27): dbs=8 override + full AdamW
+# optimizer state (Step 6 loads it by design, ws=8 matches the d28 base) →
+# 27.58 GiB allocated / 29.49 GiB HBM, 66 MiB short in the FIRST forward
+# (apply_rotary_emb). dbs=4 (the d28 checkpoint's own inherited value) halves
+# activations → same memory envelope as the d20 proxy runs (~23.7 GiB peak).
+# dbs only re-slices micro-batches (total batch 1,048,576 unchanged), and both
+# arms (climb/random) use the same value → scores stay comparable.
+MID_DEVICE_BATCH_SIZE="${MID_DEVICE_BATCH_SIZE:-4}"
 EVAL_DEVICE_BATCH_SIZE="${EVAL_DEVICE_BATCH_SIZE:-32}"
 CORE_METRIC_EVERY="${CORE_METRIC_EVERY:--1}"
 NANOCHAT_DTYPE="${NANOCHAT_DTYPE:-bfloat16}"
@@ -103,56 +112,58 @@ export HCCL_EXEC_TIMEOUT=1200
 export PYTHONUNBUFFERED=1
 export NANOCHAT_DTYPE="$NANOCHAT_DTYPE" PYTHONWARNINGS="ignore::UserWarning:torch_npu"
 
-# ── Fingerprint: code + semantic params → auto-reset on change ──
-FINGERPRINT=$(python3 -m climbmix.utils.fingerprint --base-dir "$CLIMBMIX_DIR" \
-    --param "proxy_depth=$PROXY_DEPTH" \
-    --param "target_depth=$TARGET_DEPTH" \
-    --param "proxy_num_iterations=$PROXY_NUM_ITERATIONS" \
-    --param "target_steps=$TARGET_STEPS" \
-    --param "proxy_target_tokens=$PROXY_TARGET_TOKENS" \
-    --param "target_tokens=$TARGET_TOKENS" \
-    --param "configs_per_iter=$CONFIGS_PER_ITER" \
-    --param "search_num_iterations=$SEARCH_NUM_ITERATIONS" \
-    --param "K_enhanced=$K_ENHANCED" \
-    --param "K_init=$K_INIT" \
-    --param "filter_method=$FILTER_METHOD" \
-    --param "prune_threshold=$PRUNE_THRESHOLD" \
-    --param "merge_distance=$MERGE_DISTANCE" \
-    --param "embedding_model=$EMBEDDING_MODEL" \
-    --param "discovery_method=$DISCOVERY_METHOD" \
-    --param "embedding_device=$EMBEDDING_DEVICE" \
-    --param "embedding_sample_size=$EMBEDDING_SAMPLE_SIZE" \
-    --param "proxy_lr_scale=$PROXY_LR_SCALE" \
-    --param "proxy_warmup=$PROXY_WARMUP" \
-    --param "proxy_warmdown=$PROXY_WARMDOWN" \
-    --param "target_lr_scale=$TARGET_LR_SCALE" \
-    --param "target_warmup=$TARGET_WARMUP" \
-    --param "target_warmdown=$TARGET_WARMDOWN" \
-    --param "mid_device_batch_size=$MID_DEVICE_BATCH_SIZE" \
-    --param "eval_device_batch_size=$EVAL_DEVICE_BATCH_SIZE" \
-    --param "core_metric_every=$CORE_METRIC_EVERY" \
-    --param "nanochat_dtype=$NANOCHAT_DTYPE" \
-    --param "stem_ratio=$STEM_RATIO" \
-    --param "eval_benchmarks=$EVAL_BENCHMARKS" \
-    --param "eval_max_per_task=$EVAL_MAX_PER_TASK" \
-    --param "num_npu=$NUM_NPU" \
-    --param "npu_per_exp=$NPU_PER_EXP" \
-    --param "data_dir=$DATA_DIR" \
-    --param "general_data_dir=$GENERAL_DATA_DIR")
+# ── Stage-scoped fingerprints (code + semantic params → auto-reset on change) ──
+# search guards Steps 1-3 products (embedding/cluster/search_state/exp_*/
+# sampled_dataset); target guards Steps 4-8 products (shards, mixes, .done_*).
+# num_npu deliberately NOT fingerprinted — parallel shape only, see
+# runs/lib/stage_gate.sh. Params are split by which stage consumes them;
+# shared params (data mix, eval sets, dtype, data dirs) enter BOTH stages.
+FP_SEARCH_PARAMS=(
+    "proxy_depth=$PROXY_DEPTH"
+    "proxy_num_iterations=$PROXY_NUM_ITERATIONS"
+    "proxy_target_tokens=$PROXY_TARGET_TOKENS"
+    "configs_per_iter=$CONFIGS_PER_ITER"
+    "search_num_iterations=$SEARCH_NUM_ITERATIONS"
+    "K_enhanced=$K_ENHANCED"
+    "K_init=$K_INIT"
+    "filter_method=$FILTER_METHOD"
+    "prune_threshold=$PRUNE_THRESHOLD"
+    "merge_distance=$MERGE_DISTANCE"
+    "embedding_model=$EMBEDDING_MODEL"
+    "discovery_method=$DISCOVERY_METHOD"
+    "embedding_device=$EMBEDDING_DEVICE"
+    "embedding_sample_size=$EMBEDDING_SAMPLE_SIZE"
+    "proxy_lr_scale=$PROXY_LR_SCALE"
+    "proxy_warmup=$PROXY_WARMUP"
+    "proxy_warmdown=$PROXY_WARMDOWN"
+    "npu_per_exp=$NPU_PER_EXP"
+    "stem_ratio=$STEM_RATIO"
+    "eval_benchmarks=$EVAL_BENCHMARKS"
+    "eval_max_per_task=$EVAL_MAX_PER_TASK"
+    "nanochat_dtype=$NANOCHAT_DTYPE"
+    "data_dir=$DATA_DIR"
+    "general_data_dir=$GENERAL_DATA_DIR"
+)
+FP_TARGET_PARAMS=(
+    "target_depth=$TARGET_DEPTH"
+    "target_steps=$TARGET_STEPS"
+    "target_tokens=$TARGET_TOKENS"
+    "target_lr_scale=$TARGET_LR_SCALE"
+    "target_warmup=$TARGET_WARMUP"
+    "target_warmdown=$TARGET_WARMDOWN"
+    "mid_device_batch_size=$MID_DEVICE_BATCH_SIZE"
+    "eval_device_batch_size=$EVAL_DEVICE_BATCH_SIZE"
+    "core_metric_every=$CORE_METRIC_EVERY"
+    "stem_ratio=$STEM_RATIO"
+    "eval_benchmarks=$EVAL_BENCHMARKS"
+    "eval_max_per_task=$EVAL_MAX_PER_TASK"
+    "nanochat_dtype=$NANOCHAT_DTYPE"
+    "data_dir=$DATA_DIR"
+    "general_data_dir=$GENERAL_DATA_DIR"
+)
 
-mkdir -p "$CLIMBMIX_DIR/result"
-if [ -d "$OUTPUT_DIR" ] && [ -n "$(ls -A "$OUTPUT_DIR" 2>/dev/null)" ]; then
-    if [ -f "$OUTPUT_DIR/.fingerprint" ] && [ "$(cat "$OUTPUT_DIR/.fingerprint")" = "$FINGERPRINT" ]; then
-        echo "  RESUME: $OUTPUT_DIR (fingerprint ${FINGERPRINT} matches)"
-    else
-        STALE="$CLIMBMIX_DIR/result/${EXP_NAME}_stale_$(date +%Y%m%d_%H%M%S)"
-        echo "  Fingerprint changed (code or params) — archiving old output:"
-        echo "    $OUTPUT_DIR -> $STALE"
-        mv "$OUTPUT_DIR" "$STALE"
-    fi
-fi
-mkdir -p "$OUTPUT_DIR"
-echo "$FINGERPRINT" > "$OUTPUT_DIR/.fingerprint"
+source "$CLIMBMIX_DIR/runs/lib/stage_gate.sh"
+run_stage_gate
 
 # ── Pre-flight ──
 echo -e "\n════════════════════════════════════════════════════════════"

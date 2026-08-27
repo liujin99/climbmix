@@ -2,6 +2,8 @@
 
 ## Completed
 
+- **Stage-scoped fingerprints** (`runs/lib/stage_gate.sh` + `fingerprint.py --stage`): single global fingerprint meant a target-stage knob (MID_DEVICE_BATCH_SIZE) would archive multi-day search results. Now `.fingerprint_search` (Steps 1-3 products) and `.fingerprint_target` (Steps 4-8 products) are checked independently: search mismatch → archive all; target mismatch → archive only target products, search kept. File classification: search-only (proxy_runner/climb_pipeline/embedding_cluster/discovery/predictor/dirichlet/iterative_bootstrapper/cluster_merge/quality_filter/run_climb.py), target-only (target_runner/report_generator/prepare_shards/prepare_random_baseline/mix_general_data), everything else BOTH (conservative); diagnostics + get_model_info excluded. Params split by consuming stage; shared (stem_ratio, eval sets, dtype, data dirs) in both. `num_npu` removed from fingerprints (parallel shape only — pool may shrink/grow, remote executors later). Legacy single-`.fingerprint` dirs: `MIGRATE_LEGACY_FINGERPRINT=1` adopts unverified (one-time), else archives with hint. Guarded by `/tmp/opencode/test_stage_fingerprint.py` (44 checks) + updated `test_fingerprint_p1.py` (array parsing, NUM_NPU excluded-by-design)
+- **d28 Step-6 OOM fix**: `MID_DEVICE_BATCH_SIZE` 8→4 in both runners — dbs=8 override + full AdamW optimizer state (ws=8 matches d28 base) hit 27.58/29.49 GiB in the FIRST forward (apply_rotary_emb, 66 MiB short; speedrun 2026-08-27). dbs=4 = the checkpoint's own inherited value; total batch 1,048,576 unchanged, both arms same value → scores comparable
 - **d20 proxy → d28 target pipeline**: embedding cluster → Dirichlet search → LightGBM predictor → d28 target training
 - **Paper-fidelity audit** (arXiv:2504.13161): stella_en_400M_v5 embeddings, FAISS spherical K-means (K_init=1000), prune threshold 3.0, merge distance 1.5, Dirichlet init on cluster token counts, predictor-guided sampling, LightGBM features = mixture weights, WSD annealing semantics — all verified aligned
 - **stella NaN fix on torch_npu**: `position_ids` buffer held uninitialized heap garbage → OOB RoPE → NaN; repaired via `_repair_stella_buffers` in `embedding_cluster.py`
@@ -41,9 +43,9 @@
 
 ## Remaining
 
+- Server: `git pull` + `MIGRATE_LEGACY_FINGERPRINT=1 bash runs/speedrun_climbmix.sh` — adopts today's completed search (7/7 exps, weights C0=0.9486/C2=0.0514), skips Steps 1-5 via .done markers, reruns Step 6 with dbs=4 (~35min) + Step 7 eval (~15min)
+- Speedrun passes → build RemoteExecutor (OBS + ModelArts API: ExpExecutor abstraction, remote_worker.py, dispatch_remote.py, Mock-first JobAPI), validate with a byte-identical exp_0000 bundle on a remote node (Δstem_metric < 0.002), then launch production `bash runs/run_climbmix.sh`
 - Confirm on remote: mid_train val-shard convention (last shard = val, minimum val size)
-- Pull latest code on remote and run `bash runs/speedrun_climbmix.sh` (watch: NaN=0, K=100 clustering, 50-step train+eval)
-- Speedrun passes → run production `bash runs/run_climbmix.sh` (d20 search, 200M proxy / 1B target token caps)
 - Analyze results, write final report
 
 ## Known Limitations
