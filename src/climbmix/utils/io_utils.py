@@ -84,3 +84,28 @@ def load_json_state(path: str):
             return json.load(f)
     except (json.JSONDecodeError, OSError, UnicodeDecodeError):
         return None
+
+
+def file_lock(lock_path: str):
+    """Exclusive advisory lock (fcntl.flock) held for the duration of the
+    context. Cross-process: two runs embedding the SAME pool serialize —
+    the second waits, then finds the first run's cache complete instead of
+    racing it. The lock file itself is empty and permanent (its presence
+    costs nothing; correctness relies on flock, not on file contents).
+    """
+    import fcntl
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _lock():
+        directory = os.path.dirname(lock_path) or "."
+        os.makedirs(directory, exist_ok=True)
+        f = open(lock_path, "w")
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            f.close()
+
+    return _lock()

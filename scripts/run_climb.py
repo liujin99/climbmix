@@ -54,6 +54,9 @@ def main():
     parser.add_argument("--discovery-method", type=str, default="embedding_cluster",
                         choices=["embedding_cluster", "quality_cluster"])
     parser.add_argument("--K-enhanced", type=int, default=10)
+    parser.add_argument("--K-max", type=int, default=15,
+                        help="Cap on final cluster count (search-budget bound); "
+                             "K_final = clamp(natural_K(tau), K-enhanced, K-max)")
     parser.add_argument("--K-init", type=int, default=1000,
                         help="Initial number of clusters before prune+merge")
     parser.add_argument("--embedding-model", type=str, default="NovaSearch/stella_en_400M_v5")
@@ -62,7 +65,9 @@ def main():
     parser.add_argument("--embedding-sample-size", type=int, default=0,
                         help="Subsample N docs for embedding (0 = all). Speeds up embedding_cluster on large datasets.")
     parser.add_argument("--prune-threshold", type=float, default=3.0)
-    parser.add_argument("--merge-distance", type=float, default=1.5)
+    parser.add_argument("--merge-distance", type=float, default=0.9,
+                        help="Merge legality threshold (tau) on centroid L2 distance "
+                             "(unit-normalized embeddings: d^2=2(1-cos), 0.9 ~ cos 0.6)")
 
     # ── Filter ──
     parser.add_argument("--filter-method", type=str, default="none",
@@ -121,6 +126,11 @@ def main():
     # ── Cache / Resume ──
     parser.add_argument("--cluster-cache-dir", type=str, default=None,
                         help="Directory with cached cluster info (skip embedding clustering if exists)")
+    parser.add_argument("--embedding-cache-dir", type=str, default="",
+                        help="Stable cache root for pool-level artifacts (embeddings + "
+                             "K-means), keyed by data-pool content hash. Survives "
+                             "fingerprint resets: changing K/merge knobs reuses the "
+                             "embeddings instead of re-embedding the pool")
     parser.add_argument("--resume-search", action="store_true",
                         help="Resume proxy search from saved state (search_state.json)")
 
@@ -151,6 +161,10 @@ def main():
             f"--num-iterations ({args.num_iterations}) must equal the number of "
             f"per-iteration entries in --configs-per-iter ({len(configs_per_iter)}: "
             f"{args.configs_per_iter}); omit --num-iterations to derive it automatically")
+    if args.K_max < args.K_enhanced:
+        parser.error(
+            f"--K-max ({args.K_max}) must be >= --K-enhanced ({args.K_enhanced}): "
+            f"the cluster-count band [K_enhanced, K_max] would be empty")
     val_tasks = STEM_BENCHMARK_LABELS.copy() if args.val_tasks is None else [x.strip() for x in args.val_tasks.split(",")]
 
     proxy_config = ProxyConfig(
@@ -181,6 +195,7 @@ def main():
             method=args.discovery_method,
             K_init=args.K_init,
             K_enhanced=args.K_enhanced,
+            K_max=args.K_max,
             embedding_model=args.embedding_model,
             embedding_device=args.embedding_device,
             embedding_sample_size=args.embedding_sample_size,
@@ -210,6 +225,7 @@ def main():
         eval_benchmarks=args.eval_benchmarks,
         eval_max_per_task=args.eval_max_per_task,
         quality_config_path=args.quality_config_path,
+        embedding_cache_dir=args.embedding_cache_dir,
         schema_path=args.schema,
         npu_per_exp=args.npu_per_exp,
         experiment_name=args.exp_name,

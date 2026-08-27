@@ -250,13 +250,23 @@ class IterationResult:
 class ClusterDiscoveryConfig:
     method: str = "embedding_cluster"
     K_init: int = 1000
+    # Cluster-count band: K_final = clamp(natural_K(merge_distance), K_enhanced, K_max).
+    # K_enhanced is the FLOOR (paper's fixed target; min search dimensionality),
+    # K_max the CAP (search-budget bound). Inside the band the distance guard
+    # refuses to merge semantically distinct clusters; beyond K_max closest-pair
+    # forced merges keep heterogeneous pools within budget (see cluster_merge.py).
     K_enhanced: int = 10
+    K_max: int = 15
     embedding_model: str = "NovaSearch/stella_en_400M_v5"
     embedding_truncate_len: int = 512
     embedding_device: str = "cpu"
     embedding_sample_size: int = 0
     prune_threshold: float = 3.0
-    merge_distance: float = 1.5
+    # Merge legality threshold (tau) on unit-normalized embeddings:
+    # d^2 = 2(1 - cos), so 0.9 ~ cosine similarity 0.6. NOT from the paper
+    # (paper merges to fixed K_enhanced regardless of distance) — deliberate
+    # deviation to prevent forced merges of semantically distinct clusters.
+    merge_distance: float = 0.9
 
     VALID_METHODS = ("embedding_cluster", "quality_cluster")
 
@@ -505,6 +515,13 @@ class CLIMBConfig:
     eval_max_per_task: int = -1
     quality_config_path: str = ""
     schema_path: str = ""
+    # Stable cache location for (expensive) pool-level artifacts: embeddings
+    # and K-means labels/centroids, keyed by content hash of the data pool.
+    # Lives OUTSIDE the fingerprinted output dir so K_enhanced/merge_distance
+    # changes (which archive the output dir) reuse the embeddings instead of
+    # re-embedding the whole pool. Empty = legacy behavior (cache alongside
+    # the other cluster caches in the output dir).
+    embedding_cache_dir: str = ""
     npu_per_exp: int = 0
     # Experiment name (like nanochat's model-tag): scopes proxy model tags
     # (climbmix_{name}_{id}) so parallel runs with different names never

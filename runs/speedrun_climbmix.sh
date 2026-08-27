@@ -45,12 +45,16 @@ PROXY_NUM_ITERATIONS=50
 TARGET_STEPS=50
 CONFIGS_PER_ITER="2,3,2"
 SEARCH_NUM_ITERATIONS="${SEARCH_NUM_ITERATIONS:-3}"
-K_ENHANCED=10
+K_ENHANCED="${K_ENHANCED:-10}"
+K_CLUSTER_MAX="${K_CLUSTER_MAX:-15}"
 K_INIT="${K_INIT:-100}"
 FILTER_METHOD="${FILTER_METHOD:-none}"
 PRUNE_THRESHOLD="${PRUNE_THRESHOLD:-3.0}"
-MERGE_DISTANCE="${MERGE_DISTANCE:-1.5}"
+MERGE_DISTANCE="${MERGE_DISTANCE:-0.9}"
 EMBEDDING_MODEL="${EMBEDDING_MODEL:-NovaSearch/stella_en_400M_v5}"
+# Stable pool-keyed cache for embeddings + K-means (survives fingerprint
+# resets; K/merge knob changes reuse embeddings instead of re-embedding)
+EMBEDDING_CACHE_DIR="${EMBEDDING_CACHE_DIR:-$CLIMBMIX_DIR/cache/embeddings}"
 # Training dynamics (semantic: change → fingerprint → fresh run)
 PROXY_LR_SCALE="${PROXY_LR_SCALE:-1.0}"
 PROXY_WARMUP="${PROXY_WARMUP:-0.0}"
@@ -129,6 +133,7 @@ FP_SEARCH_PARAMS=(
     "configs_per_iter=$CONFIGS_PER_ITER"
     "search_num_iterations=$SEARCH_NUM_ITERATIONS"
     "K_enhanced=$K_ENHANCED"
+    "K_cluster_max=$K_CLUSTER_MAX"
     "K_init=$K_INIT"
     "filter_method=$FILTER_METHOD"
     "prune_threshold=$PRUNE_THRESHOLD"
@@ -222,6 +227,7 @@ else
         --target-depth "$TARGET_DEPTH" \
         --target-phase1-checkpoint-path "$NANOCHAT_BASE_DIR/base_checkpoints/d${TARGET_DEPTH}" \
         --K-enhanced "$K_ENHANCED" \
+        --K-max "$K_CLUSTER_MAX" \
         --K-init "$K_INIT" \
         --filter-method "$FILTER_METHOD" \
         --prune-threshold "$PRUNE_THRESHOLD" \
@@ -236,6 +242,7 @@ else
         --output-dir "$OUTPUT_DIR" \
         --exp-name "$EXP_NAME" \
         --cluster-cache-dir "$OUTPUT_DIR" \
+        --embedding-cache-dir "$EMBEDDING_CACHE_DIR" \
         --resume-search \
         --proxy-target-tokens "$PROXY_TARGET_TOKENS" \
         --target-tokens "$TARGET_TOKENS" \

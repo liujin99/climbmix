@@ -125,34 +125,96 @@ def prune_clusters(
     return pruned_labels, pruned_centroids, old_to_new
 
 
+def natural_k_from_profile(profile, tau):
+    """Largest K whose closest-pair distance already exceeds tau.
+
+    profile: list of (K, closest_pair_dist) in merge order (K descending).
+    Returns None if the distance never exceeded tau within the recorded
+    range (i.e., natural structure is at or below the final K).
+    """
+    for k, d in profile:
+        if d > tau:
+            return k
+    return None
+
+
+def suggest_elbow(profile):
+    """K after the largest consecutive distance jump (dendrogram elbow).
+
+    The jump (k1, d1) -> (k2, d2) means merging from K=k1 down to K=k2
+    crosses the biggest distance increase: k2 is where "all close pairs
+    merged, everything left is far apart" — the natural cluster count.
+
+    Returns (K, gap). None if the profile is too short.
+    """
+    if len(profile) < 2:
+        return None, 0.0
+    best_gap, best_k = 0.0, None
+    for (_, d1), (k2, d2) in zip(profile, profile[1:]):
+        gap = d2 - d1
+        if gap > best_gap:
+            best_gap, best_k = gap, k2
+    return best_k, best_gap
+
+
 def merge_clusters_by_distance(
     cluster_labels: npt.NDArray[np.int64],
     centroids: npt.NDArray[np.float32],
-    merge_distance: float = 1.5,
+    merge_distance: float = 0.9,
     target_K: Optional[int] = None,
+    K_max: Optional[int] = None,
+    profile_path: Optional[str] = None,
 ) -> Tuple[npt.NDArray[np.int64], npt.NDArray[np.float32], Dict[int, int]]:
     """
     Merge similar clusters based on centroid Euclidean distance.
 
-    Paper: merge clusters with centroid distance < threshold (1.5),
-    iteratively merging the closest pair until target K is reached.
+    Band stop rule (pool-adaptive K, bounded by the search budget):
+
+    1. floor:  stop when K <= target_K            (min search dimensionality)
+    2. guard:  stop when closest-pair distance > merge_distance AND K <= K_max
+               (never force-merge semantically distinct clusters inside the
+               band — the pool's natural structure wins)
+    3. cap:    when K > K_max and distance > merge_distance, merge anyway
+               (closest-pair first, logged) so heterogeneous pools still end
+               within the search budget.
+
+    Result: K_final = clamp(natural_K(merge_distance), target_K, K_max).
+
+    On unit-normalized embeddings, L2 distance d relates to cosine
+    similarity as d^2 = 2(1 - cos); the default 0.9 means clusters must be
+    ~60% similar to be mergeable. The paper instead merges to a fixed
+    K_enhanced regardless of distance; the band is a deliberate deviation
+    (documented) that keeps the paper's floor semantics while refusing
+    forced merges inside the band.
+
+    profile_path: if set, writes merge_profile.json with the full
+    (K, closest-pair distance) dendrogram cut profile, natural K at
+    candidate taus, and an elbow suggestion — the audit trail for K
+    decisions on each data pool.
 
     Args:
         cluster_labels: Per-document cluster labels (after pruning).
         centroids: Cluster centroids.
-        merge_distance: Maximum distance for merging.
-        target_K: Target number of clusters after merging. If None,
-                   merges all pairs within distance threshold.
+        merge_distance: Max centroid distance for a merge to be legal (tau).
+        target_K: Floor on the final cluster count (paper's K_enhanced).
+        K_max: Cap on the final cluster count (search-budget bound); the
+               distance guard is only honored at or below K_max.
+        profile_path: Optional path for merge_profile.json.
 
     Returns:
         Tuple of (merged_labels, merged_centroids, merge_map).
     """
+    if (K_max is not None and target_K is not None and K_max < target_K):
+        raise ValueError(
+            f"K_max ({K_max}) must be >= target_K/K_enhanced ({target_K}): "
+            f"the cluster-count band would be empty")
+
     K = len(np.unique(cluster_labels[cluster_labels >= 0]))
     if K == 0:
         return cluster_labels, centroids, {}
 
-    print(f"[Merge] Starting with K={K} clusters, target_K={target_K}, "
-          f"merge_distance={merge_distance}")
+    print(f"[Merge] Starting with K={K} clusters, target_K={target_K} (floor), "
+          f"K_max={K_max}, merge_distance={merge_distance}")
 
     unique_ids = sorted(np.unique(cluster_labels[cluster_labels >= 0]).tolist())
     id_to_idx = {uid: i for i, uid in enumerate(unique_ids)}
@@ -175,6 +237,12 @@ def merge_clusters_by_distance(
     current_to_final: Dict[int, int] = {uid: uid for uid in unique_ids}
     cluster_groups: Dict[int, List[int]] = {uid: [uid] for uid in unique_ids}
 
+    # (K_current, closest-pair distance) per merge step, K descending —
+    # the dendrogram cut profile used for the diagnostics below.
+    profile: List[Tuple[int, float]] = []
+    stop_reason = "floor"
+    forced_warning_shown = False
+
     iteration = 0
     while True:
         active_ids = np.where(active)[0]
@@ -188,15 +256,25 @@ def merge_clusters_by_distance(
         i, j = divmod(min_idx, K_current)
         min_dist = sub[i, j]
 
+        profile.append((int(K_current), float(min_dist)))
+
         if min_dist > merge_distance:
-            # Distance guard is unconditional: never merge clusters farther
-            # apart than merge_distance, even if target_K has not been reached
-            # (K_enhanced then becomes a lower bound, per paper §2.1).
-            if target_K is not None and K_current > target_K:
+            guard_active = (K_max is None) or (K_current <= K_max)
+            if guard_active:
+                # Natural structure reached inside the band: the closest
+                # remaining pair is semantically too far apart to merge.
+                stop_reason = "guard"
                 print(f"[Merge] Closest pair distance {min_dist:.4f} > merge_distance "
-                      f"{merge_distance:.4f}: stopping at K={K_current} "
-                      f"(target_K={target_K} not reached, K is a lower bound)")
-            break
+                      f"{merge_distance:.4f}: stopping at natural K={K_current} "
+                      f"(floor={target_K}, cap={K_max})")
+                break
+            # K_current > K_max: cap takes precedence over the guard —
+            # closest-pair-first forced merge, loudly logged.
+            if not forced_warning_shown:
+                forced_warning_shown = True
+                print(f"[Merge] WARNING: pool is more heterogeneous than K_max="
+                      f"{K_max} (closest pair {min_dist:.4f} > {merge_distance:.4f} at "
+                      f"K={K_current}) — force-merging closest pairs down to K_max")
 
         id_i = int(active_ids[i])
         id_j = int(active_ids[j])
@@ -230,9 +308,6 @@ def merge_clusters_by_distance(
             print(f"[Merge] Iteration {iteration}: K={K_current - 1}, "
                   f"merged {id_i}+{id_j} (dist={min_dist:.3f})")
 
-        if target_K is not None and K_current - 1 <= target_K:
-            break
-
     final_ids = sorted(cluster_groups.keys())
     final_to_consecutive: Dict[int, int] = {}
     for new_id, final_id in enumerate(final_ids):
@@ -247,7 +322,37 @@ def merge_clusters_by_distance(
     merged_centroid_list = [current_centroids[final_id] for final_id in final_ids]
     merged_centroids = np.array(merged_centroid_list, dtype=np.float32)
 
-    print(f"[Merge] Final K={len(final_ids)} clusters from K_init={K}")
+    print(f"[Merge] Final K={len(final_ids)} clusters from K_init={K} "
+          f"(stop={stop_reason}, forced_merges_beyond_tau={forced_warning_shown})")
+
+    # ── Diagnostics: dendrogram cut profile for THIS pool ──
+    natural_ks = {}
+    for tau in (0.7, 0.8, 0.9, 1.0, 1.2):
+        nk = natural_k_from_profile(profile, tau)
+        natural_ks[f"{tau}"] = nk if nk is not None else f"<={len(final_ids)}"
+    elbow_k, elbow_gap = suggest_elbow(profile)
+    print("[Merge] natural_K(tau): " + ", ".join(f"{t}→{k}" for t, k in natural_ks.items()))
+    if elbow_k is not None and elbow_gap > 0:
+        print(f"[Merge] Elbow suggestion: K={elbow_k} (largest distance jump {elbow_gap:.4f})")
+
+    if profile_path:
+        import json
+        profile_data = {
+            "K_pruned": K,
+            "K_final": len(final_ids),
+            "target_K_floor": target_K,
+            "K_max": K_max,
+            "merge_distance_tau": merge_distance,
+            "stop_reason": stop_reason,
+            "forced_merges_beyond_tau": forced_warning_shown,
+            "profile": [{"K": k, "closest_pair_dist": round(d, 6)} for k, d in profile],
+            "natural_K": natural_ks,
+            "elbow_K": elbow_k,
+            "elbow_gap": round(float(elbow_gap), 6),
+        }
+        with open(profile_path, "w") as f:
+            json.dump(profile_data, f, indent=2)
+        print(f"[Merge] Profile written → {profile_path}")
 
     return merged_labels, merged_centroids, {old: final_to_consecutive[final] for old, final in current_to_final.items()}
 
@@ -292,10 +397,12 @@ def preprocess_pipeline(
     embedding_model: str = "NovaSearch/stella_en_400M_v5",
     K_init: int = 1000,
     K_enhanced: int = 21,
+    K_max: Optional[int] = None,
     prune_threshold: float = 3.0,
-    merge_distance: float = 1.5,
+    merge_distance: float = 0.9,
     embedding_cache: Optional[str] = None,
-    cluster_cache: Optional[str] = None,
+    kmeans_cache: Optional[str] = None,
+    profile_path: Optional[str] = None,
     device: str = "cpu",
     metadata_manager: Optional[object] = None,
     embedding_truncate_len: int = 512,
@@ -311,11 +418,14 @@ def preprocess_pipeline(
         token_counts: Per-document token counts.
         embedding_model: Sentence-transformer model name.
         K_init: Initial number of clusters.
-        K_enhanced: Target number of clusters after merging.
+        K_enhanced: Floor on the final cluster count (paper's K_enhanced).
+        K_max: Cap on the final cluster count (search-budget bound).
         prune_threshold: Quality threshold for cluster pruning.
-        merge_distance: Centroid distance threshold for merging.
-        embedding_cache: Cache path for embeddings.
-        cluster_cache: Cache path for cluster results.
+        merge_distance: Merge legality threshold (tau) on centroid distance.
+        embedding_cache: Cache path for embeddings (stable, pool-keyed).
+        kmeans_cache: Cache path for K-means labels+centroids (stable,
+            pool-keyed; survives K_enhanced/merge_distance changes).
+        profile_path: Where to write merge_profile.json (run-level audit).
         device: Device for embedding.
 
     Returns:
@@ -345,7 +455,7 @@ def preprocess_pipeline(
         raise ValueError("Either texts or metadata_manager must be provided")
 
     cluster_labels, centroids = cluster_embeddings(
-        embeddings, K_init=K_init, cache_path=cluster_cache,
+        embeddings, K_init=K_init, cache_path=kmeans_cache,
     )
 
     cluster_quality = compute_cluster_quality(cluster_labels, quality_scores, prune_threshold=prune_threshold)
@@ -363,6 +473,7 @@ def preprocess_pipeline(
         merged_labels, merged_centroids, _ = merge_clusters_by_distance(
             pruned_labels, pruned_centroids,
             merge_distance=merge_distance, target_K=K_enhanced,
+            K_max=K_max, profile_path=profile_path,
         )
 
     valid_mask = merged_labels >= 0

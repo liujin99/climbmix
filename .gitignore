@@ -31,3 +31,6 @@ result/
 *~
 
 .DS_Store
+
+# Pool-keyed embedding/kmeans caches (content-hash dirs)
+cache/

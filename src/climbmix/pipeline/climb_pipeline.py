@@ -102,6 +102,9 @@ class CLIMBPipeline:
         # Stage 1: Cluster discovery (cacheable)
         cluster_cache_npz = os.path.join(cluster_cache_dir, "cluster_cache.npz")
         cluster_cache_json = os.path.join(cluster_cache_dir, "cluster_info_cache.json")
+        embedding_cache_dir = self._pool_embedding_cache_dir(data_dir)
+        if embedding_cache_dir:
+            print(f"[Stage 1] Pool-level embedding/kmeans cache: {embedding_cache_dir}")
         cluster_cache_ok = False
         if os.path.exists(cluster_cache_npz) and os.path.exists(cluster_cache_json):
             try:
@@ -121,14 +124,31 @@ class CLIMBPipeline:
         else:
             _t = time.time()
             discovery = get_discovery(self.config.discovery.method, self.config.discovery)
-            cluster_info, final_labels = discovery.discover(
-                texts=texts_loaded,
-                cluster_labels=cluster_labels,
-                quality_scores=quality_scores,
-                token_counts=token_counts,
-                metadata_manager=mm,
-                cache_dir=cluster_cache_dir,
-            )
+            if embedding_cache_dir:
+                # Serialize concurrent runs over the SAME pool: the second
+                # run waits for the first to finish writing the pool cache,
+                # then reuses it instead of racing a partial write.
+                from climbmix.utils.io_utils import file_lock
+                lock_path = os.path.join(embedding_cache_dir, ".embed.lock")
+                with file_lock(lock_path):
+                    cluster_info, final_labels = discovery.discover(
+                        texts=texts_loaded,
+                        cluster_labels=cluster_labels,
+                        quality_scores=quality_scores,
+                        token_counts=token_counts,
+                        metadata_manager=mm,
+                        cache_dir=cluster_cache_dir,
+                        embedding_cache_dir=embedding_cache_dir,
+                    )
+            else:
+                cluster_info, final_labels = discovery.discover(
+                    texts=texts_loaded,
+                    cluster_labels=cluster_labels,
+                    quality_scores=quality_scores,
+                    token_counts=token_counts,
+                    metadata_manager=mm,
+                    cache_dir=cluster_cache_dir,
+                )
             num_clusters = len(cluster_info)
             print(f"[Stage 1] {num_clusters} clusters, {len(final_labels):,} documents")
             self._print_cluster_sizes(cluster_info)
@@ -275,6 +295,36 @@ class CLIMBPipeline:
             return texts, cluster_labels, quality_scores, token_counts, mm
 
         raise ValueError("Must provide data_dir, texts, or metadata_manager")
+
+    def _pool_embedding_cache_dir(self, data_dir: str) -> Optional[str]:
+        """Content-keyed stable cache dir for pool-level artifacts.
+
+        Key = sha256(shard name+size manifest, embedding model, truncate len)
+        — the inputs that determine the embedding array. NOT keyed by
+        K_enhanced/K_max/merge_distance/prune_threshold: those change the
+        merge stage only, which must reuse the (expensive) embeddings and
+        K-means results. Empty config → None (legacy behavior).
+        """
+        import hashlib
+        if not self.config.embedding_cache_dir:
+            return None
+        if not os.path.isdir(data_dir):
+            return None
+        disc = self.config.discovery
+        hasher = hashlib.sha256()
+        shards = sorted(
+            f for f in os.listdir(data_dir)
+            if f.endswith(".parquet")
+        )
+        if not shards:
+            return None
+        for name in shards:
+            hasher.update(name.encode())
+            hasher.update(str(os.path.getsize(os.path.join(data_dir, name))).encode())
+        hasher.update(disc.embedding_model.encode())
+        hasher.update(str(disc.embedding_truncate_len).encode())
+        key = hasher.hexdigest()[:12]
+        return os.path.join(self.config.embedding_cache_dir, key)
 
     @staticmethod
     def _print_cluster_sizes(cluster_info, top_n=20):

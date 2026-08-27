@@ -47,11 +47,15 @@ TARGET_TOKENS="${TARGET_TOKENS:-1B}"
 CONFIGS_PER_ITER="${CONFIGS_PER_ITER:-20,10,5}"
 SEARCH_NUM_ITERATIONS="${SEARCH_NUM_ITERATIONS:-3}"
 K_ENHANCED="${K_ENHANCED:-10}"
+K_CLUSTER_MAX="${K_CLUSTER_MAX:-15}"
 K_INIT="${K_INIT:-1000}"
 FILTER_METHOD="${FILTER_METHOD:-none}"
 PRUNE_THRESHOLD="${PRUNE_THRESHOLD:-3.0}"
-MERGE_DISTANCE="${MERGE_DISTANCE:-1.5}"
+MERGE_DISTANCE="${MERGE_DISTANCE:-0.9}"
 EMBEDDING_MODEL="${EMBEDDING_MODEL:-NovaSearch/stella_en_400M_v5}"
+# Stable pool-keyed cache for embeddings + K-means (survives fingerprint
+# resets; K/merge knob changes reuse embeddings instead of re-embedding)
+EMBEDDING_CACHE_DIR="${EMBEDDING_CACHE_DIR:-$CLIMBMIX_DIR/cache/embeddings}"
 DISCOVERY_METHOD="${DISCOVERY_METHOD:-embedding_cluster}"
 EMBEDDING_DEVICE="${EMBEDDING_DEVICE:-npu}"
 EMBEDDING_SAMPLE_SIZE="${EMBEDDING_SAMPLE_SIZE:-0}"
@@ -125,6 +129,7 @@ FP_SEARCH_PARAMS=(
     "configs_per_iter=$CONFIGS_PER_ITER"
     "search_num_iterations=$SEARCH_NUM_ITERATIONS"
     "K_enhanced=$K_ENHANCED"
+    "K_cluster_max=$K_CLUSTER_MAX"
     "K_init=$K_INIT"
     "filter_method=$FILTER_METHOD"
     "prune_threshold=$PRUNE_THRESHOLD"
@@ -208,6 +213,7 @@ else
         --target-tokens "$TARGET_TOKENS" \
         --target-phase1-checkpoint-path "$NANOCHAT_BASE_DIR/base_checkpoints/d${TARGET_DEPTH}" \
         --K-enhanced "$K_ENHANCED" \
+        --K-max "$K_CLUSTER_MAX" \
         --K-init "$K_INIT" \
         --filter-method "$FILTER_METHOD" \
         --prune-threshold "$PRUNE_THRESHOLD" \
@@ -222,6 +228,7 @@ else
         --output-dir "$OUTPUT_DIR" \
         --exp-name "$EXP_NAME" \
         --cluster-cache-dir "$OUTPUT_DIR" \
+        --embedding-cache-dir "$EMBEDDING_CACHE_DIR" \
         --resume-search \
         --schema "$CLIMBMIX_DIR/config/schema_stem.yaml" \
         --skip-target

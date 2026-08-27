@@ -28,11 +28,25 @@ class EmbeddingClusterDiscovery:
         token_counts: Optional[npt.NDArray[np.int64]],
         metadata_manager: Optional[object],
         cache_dir: Optional[str] = None,
+        embedding_cache_dir: Optional[str] = None,
     ) -> Tuple[list, npt.NDArray[np.int64]]:
         from climbmix.core.cluster_merge import preprocess_pipeline
 
         config = self._config
         device = config.embedding_device
+
+        # Pool-level caches (embeddings + K-means) live in a STABLE directory
+        # outside the fingerprinted output dir when embedding_cache_dir is set:
+        # changing K_enhanced / merge_distance archives the output dir but must
+        # not re-embed the pool. Run-level artifacts (merge profile) stay in
+        # cache_dir (the output dir) and archive normally.
+        emb_cache = os.path.join(embedding_cache_dir, "embedding_cache.npz") if embedding_cache_dir else (
+            os.path.join(cache_dir, "embedding_cache.npz") if cache_dir else None)
+        kmeans_cache = (
+            os.path.join(embedding_cache_dir, f"kmeans_K{config.K_init}.npz")
+            if embedding_cache_dir else None
+        )
+        profile_path = os.path.join(cache_dir, "merge_profile.json") if cache_dir else None
 
         sample_size = config.embedding_sample_size
         if sample_size and sample_size > 0 and metadata_manager is not None:
@@ -64,9 +78,12 @@ class EmbeddingClusterDiscovery:
                     embedding_model=config.embedding_model,
                     K_init=config.K_init,
                     K_enhanced=config.K_enhanced,
+                    K_max=config.K_max,
                     prune_threshold=config.prune_threshold,
                     merge_distance=config.merge_distance,
-                    embedding_cache=os.path.join(cache_dir, "embedding_cache.npz") if cache_dir else None,
+                    embedding_cache=emb_cache,
+                    kmeans_cache=kmeans_cache,
+                    profile_path=profile_path,
                     device=device,
                 )
 
@@ -103,9 +120,12 @@ class EmbeddingClusterDiscovery:
             embedding_model=config.embedding_model,
             K_init=config.K_init,
             K_enhanced=config.K_enhanced,
+            K_max=config.K_max,
             prune_threshold=config.prune_threshold,
             merge_distance=config.merge_distance,
-            embedding_cache=os.path.join(cache_dir, "embedding_cache.npz") if cache_dir else None,
+            embedding_cache=emb_cache,
+            kmeans_cache=kmeans_cache,
+            profile_path=profile_path,
             device=device,
             embedding_truncate_len=config.embedding_truncate_len,
         )
