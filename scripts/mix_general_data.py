@@ -2,7 +2,8 @@
 """
 Mix STEM data with ClimbMix general data for anti-forgetting during mid-training.
 
-Document-level mixing: 70% STEM + 30% ClimbMix.
+Document-level mixing: STEM + ClimbMix general data (default 70/30, configurable
+via --stem-ratio / mix_data(stem_ratio=...)).
 Downloads ClimbMix shards from the end (6541 backwards) to avoid overlap with pretrain data (shards 0-999).
 Adaptive shard count: downloads only as many ClimbMix shards as needed based on STEM data size.
 
@@ -132,8 +133,13 @@ def endless_generator(gen_func, files):
         yield from gen
 
 
-def mix_data(stem_dir, climb_files, output_dir, num_output_files, batch_per_file=BATCH_PER_FILE, num_npu=8):
-    """Mix 70% STEM + 30% ClimbMix at document level.
+def mix_data(stem_dir, climb_files, output_dir, num_output_files, batch_per_file=BATCH_PER_FILE, num_npu=8, stem_ratio=None):
+    """Mix STEM + ClimbMix general data at document level.
+
+    stem_ratio: fraction of output docs drawn from STEM (default: module
+    STEM_RATIO, i.e. 0.7). Callers that loaded this module (proxy_runner /
+    target_runner) MUST pass their own ratio — the module default silently
+    diverged from their shard-count calculation when it differed from 0.7.
 
     Crash safety: shards are written to temp names and renamed into place; a
     .done marker is written only after everything (incl. the val shard copy)
@@ -142,14 +148,26 @@ def mix_data(stem_dir, climb_files, output_dir, num_output_files, batch_per_file
     """
     if not climb_files:
         raise ValueError("No ClimbMix files available. Download failed?")
+    ratio = STEM_RATIO if stem_ratio is None else stem_ratio
+    if not (0.0 < ratio < 1.0):
+        raise ValueError(f"stem_ratio must be in (0, 1), got {ratio}")
 
     os.makedirs(output_dir, exist_ok=True)
 
     done_marker = os.path.join(output_dir, ".done")
     if os.path.exists(done_marker):
-        print(f"  Mix already complete (.done), skipping: {output_dir}")
         with open(done_marker) as f:
-            return json.load(f).get("n_train_shards", 0)
+            done_info = json.load(f)
+        recorded = done_info.get("stem_ratio")
+        # A .done from a different ratio is stale output (the pipeline
+        # fingerprint normally archives the dir before we get here; this
+        # guard covers direct CLI reuse of an output dir).
+        if recorded is None or float(recorded) != ratio:
+            print(f"  .done records stem_ratio={recorded}, requested {ratio} "
+                  f"-> remixin (stale output)")
+        else:
+            print(f"  Mix already complete (.done), skipping: {output_dir}")
+            return done_info.get("n_train_shards", 0)
 
     leftovers = [f for f in os.listdir(output_dir)
                  if f.startswith("shard_") or f.endswith(".tmp.parquet")]
@@ -181,7 +199,7 @@ def mix_data(stem_dir, climb_files, output_dir, num_output_files, batch_per_file
     print(f"  STEM: {len(stem_files)} train shards from {stem_dir}")
     print(f"  ClimbMix: {len(climb_files)} shards")
     print(f"  Output: {num_output_files} files x {batch_per_file} docs each (rg_size={rg_size})")
-    print(f"  Ratio: {STEM_RATIO*100:.0f}% STEM + {(1-STEM_RATIO)*100:.0f}% ClimbMix")
+    print(f"  Ratio: {ratio*100:.0f}% STEM + {(1-ratio)*100:.0f}% ClimbMix")
 
     stem_gen = endless_generator(stream_texts_uniform, stem_files)
     climb_gen = endless_generator(stream_texts_uniform, climb_files)
@@ -194,7 +212,7 @@ def mix_data(stem_dir, climb_files, output_dir, num_output_files, batch_per_file
 
     try:
         while file_idx < num_output_files:
-            if random.random() < STEM_RATIO:
+            if random.random() < ratio:
                 txt = next(stem_gen)
             else:
                 txt = next(climb_gen)
@@ -224,7 +242,8 @@ def mix_data(stem_dir, climb_files, output_dir, num_output_files, batch_per_file
 
     with open(done_marker, "w") as f:
         json.dump({"n_train_shards": file_idx, "has_val": bool(val_file),
-                   "batch_per_file": batch_per_file, "rg_size": rg_size}, f)
+                    "batch_per_file": batch_per_file, "rg_size": rg_size,
+                    "stem_ratio": ratio}, f)
 
     print(f"  Done: {file_idx} train + 1 val shard -> {output_dir}")
     return file_idx

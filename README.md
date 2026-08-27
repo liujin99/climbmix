@@ -75,7 +75,11 @@ d28 参数从 checkpoint `meta_*.json` 自动读取（三层 fallback: GPTConfig
 ```
 climbmix/
 ├── docs/
-│   └── proxy_and_model_analysis.md     # 分析文档
+│   ├── paper_deviations.md             # 与论文 (arXiv:2504.13161) 的逐项偏差 + 一致性审计
+│   ├── scoring_metric_design.md        # SNR 评分设计 + proxy/target 训练量对比
+│   ├── proxy_and_model_analysis.md     # 分析文档
+│   ├── embedding_performance.md        # 嵌入性能
+│   └── nan_investigation.md            # stella NaN 修复调查
 ├── runs/                                # Shell scripts
 │   ├── run_climbmix.sh                  # Main entry: full pipeline d20 search + d28 target (NPU)
 │   ├── speedrun_climbmix.sh             # End-to-end validation (minimal data + steps)

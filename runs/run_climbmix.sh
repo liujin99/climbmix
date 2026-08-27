@@ -357,6 +357,19 @@ run_eval() {
         --device-batch-size="$EVAL_DEVICE_BATCH_SIZE" \
         --model-tag="$tag" --model-type=mid 2>&1 | tee "$OUTPUT_DIR/eval_${name}.log"
     )
+    # base_eval writes a step-only CSV name (mid_model_{step}.csv) into the
+    # shared base dir; both arms train the same step count, so the second
+    # eval would overwrite the first. Evals are sequential here — archive
+    # the newest CSV per arm right after its eval (Step 8 reads the LOGS,
+    # this preserves the raw 4-column CSVs for the final analysis).
+    local newest
+    newest=$(ls -t "$NANOCHAT_BASE_DIR"/base_eval/mid_model_*.csv 2>/dev/null | head -1)
+    if [ -n "$newest" ]; then
+        cp -f "$newest" "$OUTPUT_DIR/eval_${name}.csv"
+        echo "  Archived $(basename "$newest") -> eval_${name}.csv"
+    else
+        echo "  WARNING: no mid_model_*.csv found after eval ${name}"
+    fi
 }
 
 if [ -f "$OUTPUT_DIR/.done_eval_climb" ]; then

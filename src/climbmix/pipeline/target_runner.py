@@ -288,6 +288,7 @@ class TargetRunner:
             mix_mod.mix_data(
                 stem_temp_dir, climb_files, mixture_data_dir,
                 num_output_files, detected_batch, num_npu=nproc,
+                stem_ratio=self.stem_ratio,
             )
             print(f"  [Target] Mixed {stem_docs:,} STEM + "
                   f"~{int(stem_docs * (1-self.stem_ratio) / self.stem_ratio):,} general")
