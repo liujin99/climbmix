@@ -38,7 +38,8 @@ Predictor ranks candidates → optimal mixture α*
 Target training: d28 mid-train with α* + 30% ClimbMix (same mixing)
   ↓
 STEM benchmark eval (arc_easy, arc_challenge, mmlu_stem, gpqa_diamond, gsm8k_cot, math_cot_500)
-  + random-baseline comparison (same doc count, seed 42)
+  + random-baseline comparison (equal cluster weights 1/K, paper App. C.1;
+    same token cap and same shortfall policy as the CLIMB arm, seed 42)
   ↓
 Output: report + sampled_dataset.parquet + target_result.json
 ```

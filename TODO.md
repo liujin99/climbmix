@@ -42,6 +42,7 @@
 - **Stream-based mixing**: stream_texts_uniform + endless_generator, memory-efficient (no full List[str] loading)
 - **STEM eval metric**: --eval-benchmarks=stem → CSV "STEM" row parsed as stem_metric; SNR-weighted acc+NLL z-score (see docs/scoring_metric_design.md)
 - **Continual pre-training**: all stages anneal from base checkpoint, lr_scale=1.0, warmup=0.0, warmdown=0.9
+- **Random baseline = equal cluster weights (paper App. C.1)**: "each cluster is assigned an equal and uniform weight" — NOT a doc-uniform draw (that would weight clusters by natural size, i.e. feed the pool's skew). `prepare_random_baseline.py` now runs the CLIMB arm's own selector (`select_data_by_mixture`) with α_k=1/K, the same `--target-tokens` cap, and the same shortfall policy (cluster < quota → take all docs, no duplication, no redistribution — data_selector's existing behavior), so both arms degrade identically and stay comparable. The paper documents no small-cluster policy and needs none (800B tokens / 21 clusters / 40B budget → ~1.9B-token quota per cluster, only a <0.24% cluster would fall short); our smaller pools can hit shortfalls — loudly logged + recorded in `.done` (planned vs effective weights, shortfall cluster ids). Labels come from `cluster_cache.npz` with a length-mismatch hard fail (pool changed since cache); token counts from the pool's precomputed char-count column (no full-text scan of the pool)
 
 ## Remaining
 

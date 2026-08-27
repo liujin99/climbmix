@@ -255,10 +255,15 @@ python3 "$CLIMBMIX_DIR/scripts/prepare_shards.py" \
 if [ -f "$RANDOM_SHARDS/.done" ]; then
     echo "  Random baseline: already complete (.done), skip"
 else
-    DOC_COUNT=$(python3 -c "import pyarrow.parquet as pq; print(pq.ParquetFile('$OUTPUT_DIR/sampled_dataset.parquet').metadata.num_rows)")
+    # Paper App. C.1: equal uniform cluster weights (1/K), same token cap as
+    # the CLIMB arm — NOT a doc-uniform draw (that would weight clusters by
+    # their natural size). Shortfall policy mirrors the CLIMB arm's selector.
     python3 "$CLIMBMIX_DIR/scripts/prepare_random_baseline.py" \
         --data-dir "$DATA_DIR" --output-dir "$RANDOM_SHARDS" \
-        --num-docs "$DOC_COUNT" --seed 42 --num-npu "$NUM_NPU"
+        --cluster-cache "$OUTPUT_DIR/cluster_cache.npz" \
+        --schema "$CLIMBMIX_DIR/config/schema_stem.yaml" \
+        --target-tokens "$TARGET_TOKENS" \
+        --seed 42 --num-npu "$NUM_NPU"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════

@@ -1,13 +1,33 @@
 """Prepare random baseline dataset for CLIMB validation.
 
-Sample N documents randomly from the data pool, matching the doc count
-of the CLIMB selected dataset. Last shard is the val split (real docs,
-nanochat convention: last file = val).
+Paper (Appendix C.1): "Random: randomly select data for language model
+training, where each cluster is assigned an equal and uniform weight."
 
-Streaming-safe: only parquet METADATA is read in pass 1 (row counts);
-pass 2 reads each file once and keeps only its sampled share, so peak
-memory is ~1 file + the sample (~GBs on the 116M-doc pool) instead of
-the whole pool (~1TB of Python strings).
+So the baseline is NOT a uniform draw over documents — that would weight
+clusters by their natural size. It is the SAME mixture-weighted selection
+machinery as the CLIMB arm (sampling.data_selector.select_data_by_mixture)
+with the weights pinned to uniform alpha_k = 1/K:
+
+  - per-cluster token quota = (1/K) * target_tokens
+  - cluster smaller than its quota: take ALL its docs — no duplication, no
+    redistribution; the identical shortfall policy the CLIMB arm's selector
+    applies to overweight clusters, so both arms degrade the same way and
+    stay comparable. The paper documents no small-cluster policy: its pool
+    (800B tokens / 21 clusters, 40B budget) makes shortfalls unlikely
+    (~1.9B-token quota per cluster); our smaller pools can hit them, and
+    mirroring the CLIMB arm is the deviation-free choice (loudly logged).
+  - same token budget cap as the CLIMB arm (--target-tokens)
+
+Cluster labels come from the search stage's cluster_cache.npz (final_labels,
+pool doc order == ShardMetadataManager order). A length mismatch fails
+loudly — the pool changed after the cache was written (the fingerprint gate
+normally prevents this).
+
+Last shard is the val split (real docs, nanochat convention: last file=val).
+
+Memory: only parquet METADATA plus the precomputed char-count column are
+read for the pool scan (no full text load); texts are read only for the
+selected docs. Peak memory ~ selected sample.
 
 Crash safety: shards are written to temp names and renamed into place; a
 .done marker is written only after everything succeeded. Shards without
@@ -20,81 +40,103 @@ across ranks, so every shard must contain at least num_npu row groups
 
 import argparse
 import json
-import os
 import math
+import os
 import random
+import sys
+
+import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
-def sample_documents(data_dir: str, num_docs: int) -> list:
-    """Uniformly sample num_docs texts from all *.parquet files in data_dir.
-
-    Pass 1 reads row counts from metadata only. The sample is allocated
-    across files proportionally (largest remainder), then each file is read
-    once and its share is drawn with random.sample. The result is shuffled
-    so the val tail (taken later) is unbiased w.r.t. file order.
-    """
-    shard_files = sorted(
-        f for f in os.listdir(data_dir) if f.endswith(".parquet")
-    )
-    if not shard_files:
-        raise FileNotFoundError(f"No *.parquet files in {data_dir}")
-
-    file_rows = []
-    for sf in shard_files:
-        path = os.path.join(data_dir, sf)
-        try:
-            file_rows.append((path, pq.ParquetFile(path).metadata.num_rows))
-        except Exception:
-            print(f"  WARNING: could not read metadata for {sf}, skipping")
-    total_docs = sum(r for _, r in file_rows)
-    if total_docs == 0:
-        raise FileNotFoundError(f"No readable parquet data in {data_dir}")
-
-    n_want = min(num_docs, total_docs)
-
-    # Proportional allocation with largest-remainder rounding
-    alloc = [n_want * rows // total_docs for _, rows in file_rows]
-    rem = n_want - sum(alloc)
-    if rem > 0:
-        frac_order = sorted(
-            range(len(file_rows)),
-            key=lambda i: -(n_want * file_rows[i][1] % total_docs),
-        )
-        for i in range(rem):
-            alloc[frac_order[i % len(frac_order)]] += 1
-
-    sampled = []
-    for (path, rows), k in zip(file_rows, alloc):
-        if k <= 0 or rows == 0:
-            continue
-        try:
-            table = pq.read_table(path, columns=["text"])
-        except Exception:
-            print(f"  WARNING: could not read {path}, skipping")
-            continue
-        idx = random.sample(range(rows), min(k, rows))
-        sampled.extend(table.take(idx)["text"].to_pylist())
-        del table
-
-    random.shuffle(sampled)
-    return sampled
+from climbmix.core.types import MixtureWeights
+from climbmix.data.column_schema import DatasetSchema
+from climbmix.data.metadata_manager import ShardMetadataManager
+from climbmix.sampling.data_selector import select_data_by_mixture
+from climbmix.utils.token_estimate import parse_token_count
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Equal-cluster-weight random baseline (paper App. C.1)")
     parser.add_argument("--data-dir", required=True)
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--num-docs", type=int, required=True)
+    parser.add_argument("--cluster-cache", required=True,
+                        help="cluster_cache.npz from the search stage "
+                             "(final_labels, pool doc order)")
+    parser.add_argument("--schema", default=None,
+                        help="column schema YAML (default: manager's default)")
+    parser.add_argument("--target-tokens", type=parse_token_count, default=0,
+                        help="Token budget, same cap as the CLIMB arm's "
+                             "--target-tokens (0 = all available; suffixes "
+                             "2B/10M/500K supported)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-npu", type=int, default=8)
     args = parser.parse_args()
 
+    done_marker = os.path.join(args.output_dir, ".done")
+    if os.path.exists(done_marker):
+        print(f"  Random baseline already complete (.done), skipping")
+        return
+
     random.seed(args.seed)
 
-    sampled = sample_documents(args.data_dir, args.num_docs)
-    n = len(sampled)
+    schema = DatasetSchema.from_yaml(args.schema) if args.schema else None
+    mm = ShardMetadataManager(args.data_dir, schema=schema,
+                              cache_dir=args.data_dir)
+
+    labels = np.load(args.cluster_cache,
+                     allow_pickle=False)["final_labels"].astype(np.int64)
+    if len(labels) != mm.num_docs:
+        raise SystemExit(
+            f"ERROR: cluster cache has {len(labels):,} labels but the pool has "
+            f"{mm.num_docs:,} docs. The data pool changed after the cluster "
+            f"cache was written — rerun the search stage (the fingerprint gate "
+            f"normally prevents this).")
+
+    token_counts = mm.estimate_token_counts()
+    K = len(np.unique(labels[labels >= 0]))
+    target_tokens = args.target_tokens or int(token_counts.sum())
+
+    print(f"\n[Random] Equal-weight baseline: K={K} clusters, "
+          f"alpha_k=1/{K}, target_tokens={target_tokens:,}")
+
+    uniform = MixtureWeights(weights=np.full(K, 1.0 / K, dtype=np.float64))
+    selected, _ = select_data_by_mixture(
+        labels, uniform, token_counts=token_counts,
+        target_tokens=target_tokens, seed=args.seed,
+    )
+
+    sel_labels = labels[selected]
+    sel_tokens = token_counts[selected]
+    cluster_docs = np.bincount(sel_labels, minlength=K).tolist()
+    cluster_tokens = np.bincount(sel_labels, weights=sel_tokens,
+                                 minlength=K).tolist()
+    avail_docs = np.bincount(labels[labels >= 0], minlength=K).tolist()
+    quota_tokens = target_tokens // K
+
+    print(f"[Random] Per-cluster plan (quota={quota_tokens:,} tokens each):")
+    shortfall = []
+    for k in range(K):
+        short = cluster_tokens[k] < quota_tokens * 0.999
+        if short:
+            shortfall.append(k)
+        marker = "  <- SHORTFALL (took all docs, no duplication)" if short else ""
+        print(f"  [{k:>2d}] avail {avail_docs[k]:>9,} docs "
+              f"({cluster_tokens[k] if short else quota_tokens:>12,} tok) "
+              f"-> took {cluster_docs[k]:>9,} docs{marker}")
+    if shortfall:
+        print(f"[Random] NOTE: {len(shortfall)}/{K} clusters cannot fill their "
+              f"1/K quota (same policy as the CLIMB arm: take all, no "
+              f"duplication, no redistribution) — effective weights deviate "
+              f"from uniform for those clusters")
+    n = len(selected)
+    print(f"[Random] Selected {n:,} docs, "
+          f"{int(sum(cluster_tokens)):,} tokens "
+          f"(planned {target_tokens:,})")
 
     if n < 4 * args.num_npu:
         raise SystemExit(
@@ -104,10 +146,13 @@ def main():
             f"no row group hang forever before the first all_reduce."
         )
 
+    texts = mm.read_texts(selected)
+    random.shuffle(texts)
+
     # Real val split (tail of the sampled data), same policy as prepare_shards.py
     val_n = min(256, max(2 * args.num_npu, n // 100))
-    train_texts = sampled[:n - val_n]
-    val_texts = sampled[n - val_n:]
+    train_texts = texts[:n - val_n]
+    val_texts = texts[n - val_n:]
 
     shard_size = 10000
     n_train = len(train_texts)
@@ -121,11 +166,6 @@ def main():
     rg_size = max(1, last_shard_docs // (args.num_npu * 2))
 
     os.makedirs(args.output_dir, exist_ok=True)
-
-    done_marker = os.path.join(args.output_dir, ".done")
-    if os.path.exists(done_marker):
-        print(f"  Random baseline already complete (.done), skipping")
-        return
 
     # Shards without .done = crashed partial run: wipe and redo.
     leftovers = [f for f in os.listdir(args.output_dir)
@@ -150,10 +190,18 @@ def main():
     _atomic_write(f"shard_{n_shards:05d}.parquet", pa.table({"text": val_texts}), 1)
 
     with open(done_marker, "w") as f:
-        json.dump({"n_train_shards": n_shards, "val_docs": val_n,
-                   "rg_size": rg_size, "num_npu": args.num_npu, "seed": args.seed}, f)
+        json.dump({
+            "n_train_shards": n_shards, "val_docs": val_n,
+            "rg_size": rg_size, "num_npu": args.num_npu, "seed": args.seed,
+            "K": K, "target_tokens": target_tokens,
+            "planned_weights": [1.0 / K] * K,
+            "effective_doc_shares": [d / n for d in cluster_docs],
+            "cluster_docs": cluster_docs,
+            "cluster_tokens": cluster_tokens,
+            "shortfall_clusters": shortfall,
+        }, f, indent=2)
 
-    print(f"Random baseline: {n} docs -> {n_shards} shards (rg_size={rg_size}) "
+    print(f"[Random] Baseline: {n} docs -> {n_shards} shards (rg_size={rg_size}) "
           f"+ 1 val shard ({val_n} docs, rg_size=1) -> {args.output_dir}")
 
 
