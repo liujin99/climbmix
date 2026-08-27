@@ -53,7 +53,10 @@ def main():
     # ── Discovery ──
     parser.add_argument("--discovery-method", type=str, default="embedding_cluster",
                         choices=["embedding_cluster", "quality_cluster"])
-    parser.add_argument("--K-enhanced", type=int, default=10)
+    parser.add_argument("--K-enhanced", type=int, default=3,
+                        help="Floor on final cluster count (safety bound, default 3; "
+                             "set to the paper's fixed K_enhanced, e.g. 10, for "
+                             "paper-faithful semantics)")
     parser.add_argument("--K-max", type=int, default=15,
                         help="Cap on final cluster count (search-budget bound); "
                              "K_final = clamp(natural_K(tau), K-enhanced, K-max)")
@@ -237,7 +240,9 @@ def main():
     print(f"              {config.proxy.training_iterations} iterations, lr_scale={config.proxy.lr_scale}, warmup={config.proxy.warmup}, warmdown={config.proxy.warmdown}")
     print(f"              phase1={config.proxy.phase1_checkpoint_path or 'none'}")
     print(f"  Target:     {config.target.model_tag}")
-    print(f"  Discovery:  {config.discovery.method} (K_enhanced={config.discovery.K_enhanced})")
+    print(f"  Discovery:  {config.discovery.method} "
+          f"(K band [{config.discovery.K_enhanced}, {config.discovery.K_max}], "
+          f"tau={config.discovery.merge_distance})")
     print(f"  Search:     {config.search.num_iterations} iterations, {configs_per_iter} = {sum(configs_per_iter)} configs")
     print(f"  Metric:     {config.val_tasks} ({config.metric_direction})")
     print(f"  Eval:       benchmarks={config.eval_benchmarks}, max_per_task="

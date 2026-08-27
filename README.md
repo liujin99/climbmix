@@ -21,7 +21,8 @@ training backend via **method A** (subprocess calls).
 STEM Data Pool (100B parquet, 116M docs, 1000 shards)
   ↓
 Embedding Cluster (stella_en_400M_v5 → FAISS K-means K_init=1000 →
-  prune (threshold 3.0) + band merge (τ=0.9) → K ∈ [10, 15])
+   prune (threshold 3.0) + band merge (τ=0.9) → K ∈ [3, 15]; per-run
+   merge_profile.json + printed tuning advice)
   ↓
 Iterative Bootstrapping Search:
   Iteration 1: Dirichlet sample 20 configs → d20 proxy train+eval → fit predictor
@@ -188,8 +189,8 @@ python scripts/run_climb.py --help
 --proxy-target-tokens 200M # Per-experiment data cap (0 = all; accepts 2B/10M/500K/1.5B)
 --target-tokens 1B        # Cap for final target data selection (0 = all)
 --K-init 1000             # Initial K-means clusters before prune+merge
---K-enhanced 10           # Cluster-count floor (paper's K_enhanced)
---K-max 15                # Cluster-count cap; K_final = clamp(natural_K(0.9), 10, 15)
+--K-enhanced 3            # Cluster-count floor (safety bound; set to paper's K for fixed-K semantics)
+--K-max 15                # Cluster-count cap; K_final = clamp(natural_K(0.9), 3, 15)
 --configs-per-iter 20,10,5  # Search: 20 random + 10+5 predictor-guided
 --npu-per-exp 1           # NPUs per proxy experiment (0=all sequential; 1=8 parallel)
 --device-type npu          # NPU (default) or cpu

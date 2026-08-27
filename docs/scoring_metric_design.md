@@ -257,7 +257,7 @@ d20 (scaling=435M) 是 proxy 深度，d14 (scaling=164M) 和 d28 (scaling=1138M)
 
 | 维度 | 内容 | 说明 |
 |------|------|------|
-| 输入 X | mixture_weights (10 维) | K_enhanced=10 个 cluster 的权重向量 |
+| 输入 X | mixture_weights (K 维) | K 个 cluster 的权重向量 (池自适应, 见 cluster band) |
 | 目标 y | -score | 取负（LightGBM 做 minimization, score 要 maximize） |
 
 ### 7.2 正则化参数
@@ -298,7 +298,7 @@ Stage 0: 数据加载
 
 Stage 1: 聚类发现 (ClusterDiscovery)
   ├─ sentence embedding 聚类
-  ├─ K_base=3 粗聚类 + K_enhanced=10 细聚类
+  ├─ K_init 粗聚类 → band merge → K_final ∈ [K_enhanced, K_max] (池自适应)
   └─ 输出: cluster labels + per-cluster token counts
 
 Stage 2: 迭代搜索 (IterativeBootstrapper)

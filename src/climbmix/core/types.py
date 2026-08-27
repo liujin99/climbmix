@@ -251,11 +251,14 @@ class ClusterDiscoveryConfig:
     method: str = "embedding_cluster"
     K_init: int = 1000
     # Cluster-count band: K_final = clamp(natural_K(merge_distance), K_enhanced, K_max).
-    # K_enhanced is the FLOOR (paper's fixed target; min search dimensionality),
-    # K_max the CAP (search-budget bound). Inside the band the distance guard
-    # refuses to merge semantically distinct clusters; beyond K_max closest-pair
+    # K_enhanced is the FLOOR — a permissive safety bound (default 3) against
+    # degenerate collapse on coarse pools, so the pool's natural structure is
+    # followed down to very few clusters; set it to the paper's fixed
+    # K_enhanced (e.g. 10 or 20) for paper-faithful semantics. K_max is the
+    # CAP (search-budget bound). Inside the band the distance guard refuses
+    # to merge semantically distinct clusters; beyond K_max closest-pair
     # forced merges keep heterogeneous pools within budget (see cluster_merge.py).
-    K_enhanced: int = 10
+    K_enhanced: int = 3
     K_max: int = 15
     embedding_model: str = "NovaSearch/stella_en_400M_v5"
     embedding_truncate_len: int = 512

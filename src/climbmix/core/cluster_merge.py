@@ -4,8 +4,9 @@ CLIMB Step 2: Cluster pruning and merging.
 Paper details (Section 2.1, "Cluster merging"):
   1. Cluster-level pruning: remove low-quality clusters based on quality scores
      (threshold=3.0), retaining K_pruned clusters
-  2. Merge clusters by centroid Euclidean distance (threshold=1.5)
-     into K_enhanced < K_pruned < K_init clusters
+  2. Merge clusters "according to the distance between centroids" into
+     K_enhanced < K_pruned < K_init clusters (the paper text gives no numeric
+     threshold; we use a tau-guarded band instead — see below)
 
 Quality labels (configurable via config/quality_columns.yaml):
   STEM: stem_relevance, knowledge_value, notation_fidelity,
@@ -157,6 +158,103 @@ def suggest_elbow(profile):
     return best_k, best_gap
 
 
+def _sample_profile(profile, max_points=12):
+    """Evenly spaced profile entries (first and last always kept) for display."""
+    if len(profile) <= max_points:
+        return list(profile)
+    idxs = sorted(set(
+        int(round(i)) for i in np.linspace(0, len(profile) - 1, max_points)))
+    return [profile[i] for i in idxs]
+
+
+def diagnose_merge_profile(
+    profile: List[Tuple[int, float]],
+    merge_distance: float,
+    k_floor: Optional[int],
+    k_max: Optional[int],
+    k_final: int,
+    stop_reason: str,
+    forced: bool,
+    elbow_k: Optional[int],
+    natural_k_table: Dict[float, Optional[int]],
+) -> List[str]:
+    """Preliminary tuning advice for the user, derived from THIS pool's profile.
+
+    Decision table (what the user should look at):
+      guard stop inside band   -> parameters fine, no change needed
+      forced merges            -> raise K_max if natural_K slightly above cap;
+                                  otherwise keep (paper fixes K by budget too)
+      floor stop               -> pool naturally coarser than the floor
+      tau swing across table   -> how trustworthy natural_K is
+      elbow vs natural_K(tau)  -> independent cross-check
+
+    Returns a list of advice lines ("OK" / "!" / "info" markers included);
+    printed after clustering and stored in merge_profile.json.
+    """
+    advice: List[str] = []
+    if not profile:
+        advice.append("no merges were needed (K already within the band) — nothing to tune")
+        return advice
+
+    nk_now = natural_k_from_profile(profile, merge_distance)
+    vals = [k for k in natural_k_table.values() if k is not None]
+
+    if vals:
+        lo, hi = min(vals), max(vals)
+        if hi - lo <= 1:
+            advice.append(f"✓ natural_K is stable across tau ({lo}-{hi}): robust "
+                          f"structure, the exact tau value barely matters")
+        elif hi - lo <= 3:
+            advice.append(f"· natural_K is mildly tau-sensitive ({lo}-{hi}): acceptable; "
+                          f"tau={merge_distance} sits mid-table")
+        else:
+            advice.append(f"· natural_K swings {lo}-{hi} across tau: no sharp structure — "
+                          f"keep tau={merge_distance} or trust the elbow (K={elbow_k})")
+
+    if elbow_k is not None and nk_now is not None:
+        if abs(elbow_k - nk_now) <= 2:
+            advice.append(f"✓ elbow (K={elbow_k}) agrees with natural_K(tau)={nk_now} — "
+                          f"high confidence")
+        elif abs(elbow_k - nk_now) >= 5:
+            advice.append(f"· elbow (K={elbow_k}) disagrees with natural_K(tau)={nk_now} — "
+                          f"structure ambiguous; consider the elbow as an alternative")
+
+    if stop_reason == "guard" and not forced:
+        advice.append(f"✓ natural structure (K={k_final}) falls inside the band "
+                      f"[{k_floor}, {k_max}] — parameters OK, no change needed")
+    elif forced:
+        if nk_now is not None and k_max is not None and nk_now <= k_max + 3:
+            advice.append(f"! pool slightly richer than the cap (natural_K(tau)={nk_now} > "
+                          f"K_max={k_max}): consider raising K_CLUSTER_MAX/--K-max to "
+                          f"{nk_now} if the search budget allows")
+        elif nk_now is not None:
+            advice.append(f"! pool much richer than the cap (natural_K(tau)={nk_now} >> "
+                          f"K_max={k_max}): forced merges are by design (the paper also "
+                          f"merges to a budget-fixed K); raise the cap only if the search "
+                          f"budget allows")
+        else:
+            advice.append(f"! no natural_K at tau={merge_distance} before the cap: "
+                          f"structure richer than the band — forced merges are by design "
+                          f"(the paper also fixes K by budget)")
+    elif stop_reason == "floor":
+        hint = ""
+        stricter = [(t, k) for t, k in sorted(natural_k_table.items())
+                    if k is not None and t < merge_distance]
+        if stricter:
+            t, k = stricter[-1]
+            hint = f"; a stricter tau would keep more clusters (tau={t} -> K={k})"
+        advice.append(f"· pool is naturally coarse: merges stayed legal all the way to "
+                      f"the floor (K pinned at {k_floor}){hint}")
+        if k_floor is not None and k_floor > 3:
+            advice.append(f"· to follow an even coarser natural structure, lower "
+                          f"K_ENHANCED/--K-enhanced below {k_floor}")
+
+    advice.append("knobs: MERGE_DISTANCE (tau) / K_ENHANCED (floor) / K_CLUSTER_MAX "
+                  "(cap) — or --merge-distance/--K-enhanced/--K-max; re-merge after "
+                  "a knob change costs seconds (embeddings are pool-cached)")
+    return advice
+
+
 def merge_clusters_by_distance(
     cluster_labels: npt.NDArray[np.int64],
     centroids: npt.NDArray[np.float32],
@@ -170,13 +268,14 @@ def merge_clusters_by_distance(
 
     Band stop rule (pool-adaptive K, bounded by the search budget):
 
-    1. floor:  stop when K <= target_K            (min search dimensionality)
+    1. floor:  stop when K <= target_K            (safety bound against
+                degenerate collapse on coarse pools)
     2. guard:  stop when closest-pair distance > merge_distance AND K <= K_max
-               (never force-merge semantically distinct clusters inside the
-               band — the pool's natural structure wins)
+                (never force-merge semantically distinct clusters inside the
+                band — the pool's natural structure wins)
     3. cap:    when K > K_max and distance > merge_distance, merge anyway
-               (closest-pair first, logged) so heterogeneous pools still end
-               within the search budget.
+                (closest-pair first, logged) so heterogeneous pools still end
+                within the search budget.
 
     Result: K_final = clamp(natural_K(merge_distance), target_K, K_max).
 
@@ -184,19 +283,20 @@ def merge_clusters_by_distance(
     similarity as d^2 = 2(1 - cos); the default 0.9 means clusters must be
     ~60% similar to be mergeable. The paper instead merges to a fixed
     K_enhanced regardless of distance; the band is a deliberate deviation
-    (documented) that keeps the paper's floor semantics while refusing
-    forced merges inside the band.
+    (documented). The default floor is a permissive safety bound — set
+    target_K to the paper's K_enhanced (e.g. 10 or 20) for paper-faithful
+    fixed-K semantics.
 
-    profile_path: if set, writes merge_profile.json with the full
-    (K, closest-pair distance) dendrogram cut profile, natural K at
-    candidate taus, and an elbow suggestion — the audit trail for K
-    decisions on each data pool.
+    After merging, a diagnostics block is printed (sampled distance profile,
+    natural_K at candidate taus, elbow, and tuning advice) and stored in
+    merge_profile.json — the audit trail for K decisions on each data pool.
 
     Args:
         cluster_labels: Per-document cluster labels (after pruning).
         centroids: Cluster centroids.
         merge_distance: Max centroid distance for a merge to be legal (tau).
-        target_K: Floor on the final cluster count (paper's K_enhanced).
+        target_K: Floor on the final cluster count (safety bound; pass the
+               paper's K_enhanced for paper-faithful fixed-K semantics).
         K_max: Cap on the final cluster count (search-budget bound); the
                distance guard is only honored at or below K_max.
         profile_path: Optional path for merge_profile.json.
@@ -325,15 +425,38 @@ def merge_clusters_by_distance(
     print(f"[Merge] Final K={len(final_ids)} clusters from K_init={K} "
           f"(stop={stop_reason}, forced_merges_beyond_tau={forced_warning_shown})")
 
-    # ── Diagnostics: dendrogram cut profile for THIS pool ──
-    natural_ks = {}
-    for tau in (0.7, 0.8, 0.9, 1.0, 1.2):
-        nk = natural_k_from_profile(profile, tau)
-        natural_ks[f"{tau}"] = nk if nk is not None else f"<={len(final_ids)}"
+    # ── Diagnostics: dendrogram cut profile + tuning advice for THIS pool ──
+    natural_k_table = {tau: natural_k_from_profile(profile, tau)
+                       for tau in (0.7, 0.8, 0.9, 1.0, 1.2)}
     elbow_k, elbow_gap = suggest_elbow(profile)
-    print("[Merge] natural_K(tau): " + ", ".join(f"{t}→{k}" for t, k in natural_ks.items()))
+    if elbow_gap < 1e-3:
+        elbow_k = None  # flat profile — the "jump" is noise, not a suggestion
+    advice = diagnose_merge_profile(
+        profile, merge_distance, target_K, K_max, len(final_ids),
+        stop_reason, forced_warning_shown, elbow_k, natural_k_table)
+
+    nk_disp = {t: (k if k is not None else f"<={len(final_ids)}")
+               for t, k in natural_k_table.items()}
+    print("\n" + "─" * 66)
+    print(f"  Merge profile diagnostics  "
+          f"(band [{target_K}, {K_max}], tau={merge_distance})")
+    print("─" * 66)
+    if profile:
+        print("  closest-pair distance by K (merge order, sampled):")
+        cells = [f"K={k}→{d:.2f}" for k, d in _sample_profile(profile)]
+        width = max(len(c) for c in cells) + 2
+        for r in range(0, len(cells), 4):
+            print("    " + " ".join(c.ljust(width) for c in cells[r:r + 4]).rstrip())
+    else:
+        print("  (no merges were needed — K was already within the band)")
+    print("  natural_K(tau): " + ", ".join(f"{t}→{nk_disp[t]}" for t in sorted(nk_disp)))
     if elbow_k is not None and elbow_gap > 0:
-        print(f"[Merge] Elbow suggestion: K={elbow_k} (largest distance jump {elbow_gap:.4f})")
+        print(f"  elbow: K={elbow_k} (largest distance jump {elbow_gap:.4f})")
+    print(f"  result: K_final={len(final_ids)}  stop_reason={stop_reason}")
+    print("  diagnosis:")
+    for line in advice:
+        print(f"    {line}")
+    print("─" * 66)
 
     if profile_path:
         import json
@@ -346,9 +469,10 @@ def merge_clusters_by_distance(
             "stop_reason": stop_reason,
             "forced_merges_beyond_tau": forced_warning_shown,
             "profile": [{"K": k, "closest_pair_dist": round(d, 6)} for k, d in profile],
-            "natural_K": natural_ks,
+            "natural_K": {f"{t}": nk_disp[t] for t in sorted(nk_disp)},
             "elbow_K": elbow_k,
             "elbow_gap": round(float(elbow_gap), 6),
+            "advice": advice,
         }
         with open(profile_path, "w") as f:
             json.dump(profile_data, f, indent=2)
@@ -396,7 +520,7 @@ def preprocess_pipeline(
     token_counts: Optional[npt.NDArray[np.int64]] = None,
     embedding_model: str = "NovaSearch/stella_en_400M_v5",
     K_init: int = 1000,
-    K_enhanced: int = 21,
+    K_enhanced: int = 3,
     K_max: Optional[int] = None,
     prune_threshold: float = 3.0,
     merge_distance: float = 0.9,
@@ -491,7 +615,7 @@ def preprocess_pipeline(
 
     elapsed = time.time() - t0
     print(f"\n[Preprocess] Complete in {elapsed:.1f}s")
-    print(f"  K_init={K_init} → K_enhanced={len(cluster_info)}")
+    print(f"  K_init={K_init} → K_final={len(cluster_info)} (floor={K_enhanced}, cap={K_max})")
     print(f"  Total docs: {sum(c.num_docs for c in cluster_info)}")
     print(f"  Total tokens: {sum(c.num_tokens for c in cluster_info)}")
 
