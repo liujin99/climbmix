@@ -149,16 +149,31 @@ def check_tag(tag_dir, skip_optim=False):
             print(f"    → dbs=4 需 {observed_act:.1f}G > 预算 {act_budget:.1f}G,"
                   f" 与实测 OOM 自洽")
 
-    # ── H1/H2 判定 ──
+    # ── H1/H2 判定 + dbs 投影 ──
     print(f"\n  ── 判定 ──")
     if matrix_dtypes == {"float32"}:
         print("    ✓ H1 证实: 矩阵主权重为 fp32 (代码设计一致)")
-        print("      → 生产 dbs=2 预算紧张, 依赖 unified memory 换页; 建议维持 dbs=1")
     elif matrix_dtypes == {"bfloat16"}:
         print("    ✓ H2 证实: 矩阵主权重为 bf16 (与当前代码设计不同, 历史产物)")
-        print("      → 静态更小, dbs=2 值得用 speedrun 实测峰值外推试跑")
     else:
         print(f"    ? 矩阵 dtype 混合: {matrix_dtypes} — 需人工解读")
+    if observed_act > 0:
+        # 标定: 2026-08-27 dbs=4 run 在 allocated≈27.5G 处撞墙 (差 66 MiB),
+        # 即该次激活需求 ≈ observed_act。假设激活随 dbs 线性 → 每份 ≈ /4。
+        per_dbs = observed_act / 4.0
+        static_gib = static / 1024**3
+        print(f"    dbs 投影 (峰值 allocated ≈ 静态 {static_gib:.1f}G + "
+              f"{per_dbs:.2f}G × dbs; 实测墙 ≈ {WALL_GIB}G):")
+        for dbs in (1, 2, 4):
+            proj = static_gib + per_dbs * dbs
+            if dbs == 4:
+                note = "← 标定点 (实测撞墙, 差 66 MiB)"
+            elif proj < WALL_GIB - 1.5:
+                note = "纯 HBM 内, 留碎片余量 ✓"
+            else:
+                note = "贴近墙, 需 unified memory 换页"
+            print(f"      dbs={dbs}: ≈ {proj:.1f} GiB   {note}")
+        print("    (以 speedrun dbs=1 实测 'Peak memory usage' 作第二标定点复核)")
 
 
 def main():
