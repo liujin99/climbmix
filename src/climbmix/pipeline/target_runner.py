@@ -336,8 +336,14 @@ class TargetRunner:
             # 打碎 NPU 内存 → optimizer.step() OOM (quadmix af525ee)。
             "--sample-every", "-1",
             # 训练内 benchmark eval 与紧随其后的外部 base_eval 重复
-            # (speedrun 实测 ~2h10m/次), 关掉; val bpb 仍是训练信号。
+            # (speedrun 实测 ~2h10m/次), 关掉。
             "--core-metric-every", "-1",
+            # 默认 eval_every=100 在 step 0 必跑 1280 个 val forward,
+            # 碎片化 allocator → optimizer Phase-1 的 2G stacked_grads
+            # 连续分配失败 (2026-08-28 dbs=1 实测 22.24G alloc OOM;
+            # quadmix 显式 -1, 同堆叠路径 390 步无 OOM)。d28 峰值
+            # ~24.2G vs 天花板 ~24.5G, 余量 <0.3G, allocator 必须干净。
+            "--eval-every", "-1",
             "--data-dir", mixture_data_dir,
         ]
         return cmd

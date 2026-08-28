@@ -69,10 +69,15 @@ TARGET_WARMDOWN="${TARGET_WARMDOWN:-0.9}"
 # d28 Step-6 OOM: 对齐 quadmix/nanochat_mid_compare/run_stem_experiment.sh
 # (dev/dataset-schema 分支, 同一 nanochat-npu repo + 同一 d28 ckpt) 的实证配置:
 #   DEVICE_BATCH_SIZE=1 + 完整 NPU env 块 (runs/lib/npu_env.sh, 含 unified
-#   memory) + --sample-every=-1 (采样会打碎 NPU 内存, quadmix af525ee 修复)。
-# 2026-08-27 实测: dbs=8 与 dbs=4 都在第一个 forward ~27.5G/29.5G 撞墙
-# (fp32 主权重 + fp32 梯度 ~13G 静态 + 激活)。dbs=1 是唯一被实证过的值。
-# dbs 只影响 micro-batch 切分 (total batch 1,048,576 不变), 两臂同值 → 可比。
+#   memory) + --sample-every=-1 + --eval-every=-1 (quadmix 两者都显式关)。
+# 根因 (2026-08-28): DistMuonAdamW Phase-1 为每个 Muon shape 组 stack
+# 全量梯度副本 (optim.py:515-519, 当前组另需 2× 最大组 ~4G 瞬时) → 峰值
+# ≈ 静态 16G + 副本 5.3G + 2G + 通讯 ~1G ≈ 24.2G, 距 torch 实际天花板
+# ~24.5G (29.49 − ~4.7G CANN/HCCL) 余量 <0.3G; 而 --eval-every 默认 100
+# 在 step 0 必跑 1280 个 val forward → allocator 段碎片化 → 2G 连续分配
+# 失败 (dbs=1 实测 22.24G alloc OOM; quadmix 干净路径 390 步全过)。
+# dbs=8/4/2 在第一个 forward 撞 26.9-27.5G 墙 (静态+激活, 实测全灭)。
+# dbs 只影响 micro-batch 切分 (total batch 524,288 不变), 两臂同值 → 可比。
 # 生产若想升 dbs: 先看 speedrun 日志的 "Peak memory usage" 实测余量。
 MID_DEVICE_BATCH_SIZE="${MID_DEVICE_BATCH_SIZE:-1}"
 # flat = 零裁剪文档打包 (DeepSeek V3 式), 与 proxy 搜索阶段及 quadmix 实验同口径
@@ -318,6 +323,7 @@ run_mid_train() {
         --device-batch-size="$MID_DEVICE_BATCH_SIZE" \
         --loader="$MID_TRAIN_LOADER" \
         --sample-every=-1 \
+        --eval-every=-1 \
         --run="${name}_mid" --model-tag="$tag" \
         --data-dir="$data_dir" 2>&1 | tee "$OUTPUT_DIR/mid_train_${name}.log"
     )

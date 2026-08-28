@@ -5,12 +5,15 @@
 #  背景 (d28 Step-6 OOM 调查): 代码读出 nanochat-npu 的设计是
 #  "bf16 计算 + fp32 主权重存储" (gpt.py Linear 注释; 无 set_default_dtype;
 #  init_weights 只把 embeddings cast 成 bf16)。但 ckpt 是历史训练产物,
-#  文件内部实际 dtype 未验证过 —— 这决定生产升 dbs>=2 的显存预算:
-#    fp32 主权重: 静态(参数+梯度+优化器分片) ~17G → dbs=2 大概率靠换页
-#    bf16 主权重: 静态 ~11G → dbs=2 纯 HBM 可行, 且快一倍
+#  文件内部实际 dtype 未验证过 —— dtype 决定静态驻留 (fp32 主权重 ~16G
+#  vs bf16 ~11G)。2026-08-28 终局: 真正的墙是 optimizer Phase-1 梯度
+#  堆叠 (dbs 无关 ~+7G) + forward 激活 (dbs=2 已 26.9G 撞墙) →
+#  生产锁 dbs=1 + --eval-every=-1 (quadmix 同路径实证), dtype 检查转为
+#  记录性质。
 #
 #  输出: 每个 tag 的分类 dtype/字节表 + ws=8 下每卡静态驻留估计 +
-#  激活预算 + H1(fp32)/H2(bf16) 判定 + meta 是否记录 dtype 的确认。
+#  optimizer step 峰值模型 (Muon shape 组实算) + H1(fp32)/H2(bf16) 判定
+#  + meta 是否记录 dtype 的确认。
 #
 #  用法 (服务器):
 #    python3 scripts/diagnostics/check_ckpt_dtype.py            # 扫全部 tag
@@ -29,8 +32,14 @@ from collections import defaultdict
 import torch
 
 HBM_GIB = 29.49          # 910B4 单卡
-CANN_CTX_GIB = 1.0       # CANN/HCCL 上下文粗估
-WALL_GIB = 27.5          # 2026-08-27 dbs=4/dbs=8 观测的 OOM 水位 (allocated)
+WALL_GIB = 27.5          # forward 撞墙水位 (dbs=8/4, 2026-08-27 无 env 块形态;
+                         #  dbs=2 带 env 块 26.9G 同样撞 → dbs>=2 全灭)
+TORCH_CEIL_GIB = 24.5    # optimizer 形态下 torch 可 reserve 上限
+                         #  (29.49 − ~4.7G CANN/HCCL 非张量占用;
+                         #   2026-08-28 Step-6 OOM 实测: 22.24G alloc,
+                         #   2.0G 请求失败, reserved 24.52G)
+COMM_SLACK_GIB = 1.0     # Phase-1 杂项粗估 (reduce_scatter 输出分片/AdamW
+                         #  grad_slice/padding), 2026-08-28 实测反推
 
 
 def load_lazy(path):
@@ -135,21 +144,23 @@ def check_tag(tag_dir, skip_optim=False):
     # ── 静态预算推算 (ws=8 每卡) ──
     grads_bytes = params_bytes          # 梯度 dtype 跟参数 (fp32 主权重设计)
     static = params_bytes + grads_bytes + optim_bytes  # 优化器已按 rank 分片
-    act_budget = HBM_GIB - CANN_CTX_GIB - static / 1024**3
-    observed_act = WALL_GIB - static / 1024**3  # 反推 dbs=4 撞墙时激活占量
 
-    print(f"\n  ── ws=8 每卡静态驻留估计 ──")
-    print(f"    参数 {fmt_gib(params_bytes)} + 梯度 {fmt_gib(grads_bytes)}"
+    # Muon 组按 shape 分堆 (DistMuonAdamW 只 stack 同 shape 参数, optim.py:506)
+    shape_groups = defaultdict(int)
+    for key, t in data.items():
+        if key.startswith("transformer.h.") and t.dim() == 2:
+            shape_groups[t.shape] += t.numel() * t.element_size()
+    matrix_bytes = sum(shape_groups.values())
+    largest_group = max(shape_groups.values()) if shape_groups else 0
+
+    static_gib = static / 1024**3
+    print(f"\n  ── ws=8 每卡驻留估计 (2026-08-28 模型修正) ──")
+    print(f"    静态: 参数 {fmt_gib(params_bytes)} + 梯度 {fmt_gib(grads_bytes)}"
           f" + 优化器分片 {fmt_gib(optim_bytes)} = {fmt_gib(static)}")
-    print(f"    HBM {HBM_GIB} - CANN ~{CANN_CTX_GIB} - 静态 → 激活预算 ≈ {act_budget:.2f} GiB")
-    if observed_act > 0:
-        print(f"    反推 dbs=4 撞墙时激活 ≈ {observed_act:.2f} GiB"
-              f" (观测 {WALL_GIB} - 静态)")
-        if observed_act > act_budget:
-            print(f"    → dbs=4 需 {observed_act:.1f}G > 预算 {act_budget:.1f}G,"
-                  f" 与实测 OOM 自洽")
+    print(f"    Muon 矩阵 {fmt_gib(matrix_bytes)} / {len(shape_groups)} 个 shape 组,"
+          f" 最大组 {fmt_gib(largest_group)}")
 
-    # ── H1/H2 判定 + dbs 投影 ──
+    # ── H1/H2 判定 + 峰值模型 ──
     print(f"\n  ── 判定 ──")
     if matrix_dtypes == {"float32"}:
         print("    ✓ H1 证实: 矩阵主权重为 fp32 (代码设计一致)")
@@ -157,23 +168,23 @@ def check_tag(tag_dir, skip_optim=False):
         print("    ✓ H2 证实: 矩阵主权重为 bf16 (与当前代码设计不同, 历史产物)")
     else:
         print(f"    ? 矩阵 dtype 混合: {matrix_dtypes} — 需人工解读")
-    if observed_act > 0:
-        # 标定: 2026-08-27 dbs=4 run 在 allocated≈27.5G 处撞墙 (差 66 MiB),
-        # 即该次激活需求 ≈ observed_act。假设激活随 dbs 线性 → 每份 ≈ /4。
-        per_dbs = observed_act / 4.0
-        static_gib = static / 1024**3
-        print(f"    dbs 投影 (峰值 allocated ≈ 静态 {static_gib:.1f}G + "
-              f"{per_dbs:.2f}G × dbs; 实测墙 ≈ {WALL_GIB}G):")
-        for dbs in (1, 2, 4):
-            proj = static_gib + per_dbs * dbs
-            if dbs == 4:
-                note = "← 标定点 (实测撞墙, 差 66 MiB)"
-            elif proj < WALL_GIB - 1.5:
-                note = "纯 HBM 内, 留碎片余量 ✓"
-            else:
-                note = "贴近墙, 需 unified memory 换页"
-            print(f"      dbs={dbs}: ≈ {proj:.1f} GiB   {note}")
-        print("    (以 speedrun dbs=1 实测 'Peak memory usage' 作第二标定点复核)")
+    # 2026-08-28 修正: 旧"激活随 dbs 线性"投影被实测推翻 (dbs=2 与 dbs=4
+    # 只差 0.6G, 且 dbs=2 在 forward 即 26.9G 撞墙)。主导项是 dbs 无关的
+    # optimizer Phase-1 堆叠: 每个 Muon shape 组各分配一份 stacked_grads
+    # (≈ 全量矩阵梯度副本), 当前组还要 grad_stack + stacked_grads 2× 最大组
+    # 瞬时 (optim.py:515-519)。d28 标定: 22.24G alloc + 2.0G 请求失败。
+    peak_opt = (static_gib + matrix_bytes / 1024**3
+                + largest_group / 1024**3 + COMM_SLACK_GIB)
+    print(f"    optimizer step 峰值 ≈ 静态 {static_gib:.1f}G + stacked 副本"
+          f" {matrix_bytes / 1024**3:.1f}G + 最大组瞬时 {largest_group / 1024**3:.1f}G"
+          f" + 通讯 {COMM_SLACK_GIB:.1f}G ≈ {peak_opt:.1f}G (dbs 无关)")
+    margin = TORCH_CEIL_GIB - peak_opt
+    print(f"    vs torch 天花板 ~{TORCH_CEIL_GIB:.1f}G → 余量 {margin:+.1f}G:"
+          f" {'紧 — allocator 必须干净 (--eval-every=-1)' if margin < 1 else '可行'}")
+    print(f"    → dbs>=2 在 forward 撞 ~{WALL_GIB}G 墙 (2026-08-27/28 实测"
+          " dbs=8/4/2 全灭) → 生产锁 dbs=1 + --eval-every=-1")
+    print("    (speedrun 的 'Peak memory usage' 实测仅作记录复核;"
+          " 不再用于 dbs 投影)")
 
 
 def main():
