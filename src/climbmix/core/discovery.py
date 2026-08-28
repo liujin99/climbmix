@@ -47,6 +47,14 @@ class EmbeddingClusterDiscovery:
             if embedding_cache_dir else None
         )
         profile_path = os.path.join(cache_dir, "merge_profile.json") if cache_dir else None
+        prune_profile_path = os.path.join(cache_dir, "prune_profile.json") if cache_dir else None
+
+        quality_columns = None
+        domain_names = None
+        schema = getattr(metadata_manager, "schema", None) if metadata_manager is not None else None
+        if schema is not None:
+            quality_columns = list(schema.quality_cols)
+            domain_names = getattr(schema, "domain_names", None)
 
         sample_size = config.embedding_sample_size
         if sample_size and sample_size > 0 and metadata_manager is not None:
@@ -85,6 +93,10 @@ class EmbeddingClusterDiscovery:
                     kmeans_cache=kmeans_cache,
                     profile_path=profile_path,
                     device=device,
+                    quality_columns=quality_columns,
+                    domain_labels=cluster_labels[sample_indices] if cluster_labels is not None else None,
+                    domain_names=domain_names,
+                    prune_profile_path=prune_profile_path,
                 )
 
                 final_labels = self._assign_remaining_by_domain(
@@ -128,6 +140,10 @@ class EmbeddingClusterDiscovery:
             profile_path=profile_path,
             device=device,
             embedding_truncate_len=config.embedding_truncate_len,
+            quality_columns=quality_columns,
+            domain_labels=cluster_labels,
+            domain_names=domain_names,
+            prune_profile_path=prune_profile_path,
         )
 
         return cluster_info, final_labels
@@ -255,6 +271,7 @@ class QualityClusterDiscovery:
     ) -> Tuple[list, npt.NDArray[np.int64]]:
         from climbmix.core.cluster_merge import (
             compute_cluster_quality,
+            diagnose_prune_profile,
             prune_clusters,
             merge_clusters_by_distance,
             build_cluster_info,
@@ -306,6 +323,18 @@ class QualityClusterDiscovery:
 
         cluster_quality = compute_cluster_quality(
             labels, quality_scores, prune_threshold=config.prune_threshold,
+        )
+
+        schema = getattr(metadata_manager, "schema", None) if metadata_manager is not None else None
+        diagnose_prune_profile(
+            labels,
+            quality_scores,
+            token_counts=token_counts,
+            prune_threshold=config.prune_threshold,
+            quality_columns=list(schema.quality_cols) if schema is not None else None,
+            domain_labels=cluster_labels,
+            domain_names=getattr(schema, "domain_names", None) if schema is not None else None,
+            profile_path=os.path.join(cache_dir, "prune_profile.json") if cache_dir else None,
         )
 
         pruned_labels, pruned_centroids, _ = prune_clusters(

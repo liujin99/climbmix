@@ -126,6 +126,293 @@ def prune_clusters(
     return pruned_labels, pruned_centroids, old_to_new
 
 
+def _cluster_quality_matrix(
+    cluster_labels: npt.NDArray[np.int64],
+    quality_scores: npt.NDArray[np.float64],
+    token_counts: Optional[npt.NDArray[np.int64]] = None,
+) -> Tuple[npt.NDArray[np.float64], npt.NDArray[np.int64], Optional[npt.NDArray[np.float64]], int]:
+    """Aggregate per-doc quality into per-cluster per-column means.
+
+    One np.bincount pass per quality column (plus one for counts and one for
+    tokens) instead of a boolean-mask pass per cluster — the same K=1000
+    aggregates compute_cluster_quality derives, but keeping the column axis
+    so the analysis can show WHERE a cluster is weak.
+
+    Returns (col_means (K, C), counts (K,), token_sums (K,) or None,
+    n_docs_excluded) with rows for empty clusters zeroed.
+    """
+    q = quality_scores
+    if q.ndim == 1:
+        q = q.reshape(-1, 1)
+    valid = cluster_labels >= 0
+    ids = cluster_labels[valid]
+    K = int(ids.max()) + 1 if len(ids) else 0
+    counts = np.bincount(ids, minlength=K).astype(np.int64)
+    sums = np.zeros((K, q.shape[1]), dtype=np.float64)
+    for j in range(q.shape[1]):
+        sums[:, j] = np.bincount(ids, weights=q[valid, j], minlength=K)
+    nonzero = counts > 0
+    col_means = np.zeros_like(sums)
+    col_means[nonzero] = sums[nonzero] / counts[nonzero, None]
+    token_sums = None
+    if token_counts is not None:
+        token_sums = np.bincount(
+            ids, weights=token_counts[valid].astype(np.float64), minlength=K)
+    return col_means, counts, token_sums, int((~valid).sum())
+
+
+def diagnose_prune_profile(
+    cluster_labels: npt.NDArray[np.int64],
+    quality_scores: Optional[npt.NDArray[np.float64]],
+    token_counts: Optional[npt.NDArray[np.int64]] = None,
+    prune_threshold: float = 3.0,
+    quality_columns: Optional[List[str]] = None,
+    domain_labels: Optional[npt.NDArray[np.int64]] = None,
+    domain_names: Optional[List[str]] = None,
+    profile_path: Optional[str] = None,
+) -> List[str]:
+    """Analysis of per-cluster average quality BEFORE pruning is applied.
+
+    Mirrors diagnose_merge_profile: the prune step has always used per-cluster
+    average quality (compute_cluster_quality → prune_clusters), but the user
+    sees only two summary lines. This block shows, for THIS pool's K_init
+    clusters:
+
+      - distribution of cluster average quality (percentiles)
+      - threshold sweep: clusters / docs / tokens kept at candidate thresholds
+        (the prune-side analogue of natural_K(tau))
+      - per-quality-column cluster means — the flat average hides WHERE a
+        cluster is weak (e.g. high stem_relevance, low rigor_coherence)
+      - column-disagreement clusters (max-min column mean > spread threshold)
+      - per-domain quality breakdown (which domains the pruning would bite)
+      - advice lines derived from all of the above
+
+    Pure analysis: pruning behavior is unchanged. Printed after clustering and
+    stored in prune_profile.json (run-level audit, next to merge_profile.json).
+
+    Returns the list of advice lines.
+    """
+    import json
+
+    def _finish_no_quality(reason: str) -> List[str]:
+        advice = [reason]
+        print("\n" + "─" * 66)
+        print(f"  Prune profile diagnostics  (threshold={prune_threshold})")
+        print("─" * 66)
+        print(f"  {reason}")
+        print("─" * 66)
+        if profile_path:
+            with open(profile_path, "w") as f:
+                json.dump({"prune_threshold": prune_threshold,
+                           "quality_available": False, "advice": advice}, f, indent=2)
+            print(f"[Prune] Profile written → {profile_path}")
+        return advice
+
+    if quality_scores is None or quality_scores.size == 0:
+        return _finish_no_quality(
+            "no quality scores — pruning is skipped, all clusters kept")
+    if np.all(quality_scores == 0):
+        return _finish_no_quality(
+            "all-zero quality scores — pruning is skipped, all clusters kept")
+
+    q = quality_scores if quality_scores.ndim > 1 else quality_scores.reshape(-1, 1)
+    n_cols = q.shape[1]
+    col_names = list(quality_columns) if quality_columns else [f"q{j}" for j in range(n_cols)]
+
+    n_nan = int(np.isnan(q).any(axis=1).sum())
+    q = np.nan_to_num(q, nan=0.0)
+
+    col_means, counts, token_sums, n_excluded = _cluster_quality_matrix(
+        cluster_labels, q, token_counts=token_counts)
+    nonempty = counts > 0
+    if not nonempty.any():
+        return _finish_no_quality("no valid cluster labels — nothing to analyze")
+
+    K = int(nonempty.sum())
+    cluster_avg = col_means[nonempty].mean(axis=1)
+    cl_counts = counts[nonempty]
+    cl_tokens = token_sums[nonempty] if token_sums is not None else None
+    total_docs = int(cl_counts.sum())
+    total_tokens = float(cl_tokens.sum()) if cl_tokens is not None else None
+
+    pct = np.percentile(cluster_avg, [5, 25, 50, 75, 95])
+    dist_summary = {
+        "min": round(float(cluster_avg.min()), 4),
+        "p5": round(float(pct[0]), 4), "p25": round(float(pct[1]), 4),
+        "p50": round(float(pct[2]), 4), "p75": round(float(pct[3]), 4),
+        "p95": round(float(pct[4]), 4),
+        "max": round(float(cluster_avg.max()), 4),
+    }
+
+    # ── Threshold sweep (fixed 1-5 ladder inside the observed range; fall
+    # back to distribution quantiles for other scales) ──
+    lo, hi = float(cluster_avg.min()), float(cluster_avg.max())
+    ladder = [t for t in (2.0, 2.5, 2.75, 3.0, 3.25, 3.5, 3.75, 4.0) if lo < t < hi]
+    if not ladder:
+        ladder = [float(np.quantile(cluster_avg, x))
+                  for x in (0.1, 0.25, 0.5, 0.75, 0.9)]
+        ladder = [t for t in ladder if lo < t < hi]
+    if lo < prune_threshold < hi:
+        ladder.append(float(prune_threshold))
+    thresholds = sorted(set(round(t, 4) for t in ladder if t is not None))
+
+    sweep = []
+    for t in thresholds:
+        kept = cluster_avg >= t
+        row = {
+            "threshold": t,
+            "clusters_kept": int(kept.sum()),
+            "docs_kept_pct": round(float(cl_counts[kept].sum()) / total_docs * 100, 2),
+        }
+        if cl_tokens is not None and total_tokens > 0:
+            row["tokens_kept_pct"] = round(float(cl_tokens[kept].sum()) / total_tokens * 100, 2)
+        sweep.append(row)
+
+    # ── Per-column cluster means ──
+    per_column = {}
+    for j, name in enumerate(col_names):
+        v = col_means[nonempty, j]
+        per_column[name] = {
+            "mean": round(float(v.mean()), 4),
+            "p25": round(float(np.percentile(v, 25)), 4),
+            "p75": round(float(np.percentile(v, 75)), 4),
+        }
+
+    # ── Column disagreement: clusters whose column means spread wider than
+    # 25% of the observed quality range (1.0 on the 1-5 STEM scale) ──
+    q_range = max(float(q.max() - q.min()), 1e-9)
+    spread_thresh = 0.25 * q_range
+    spread = col_means[nonempty].max(axis=1) - col_means[nonempty].min(axis=1)
+    spread_clusters = spread > spread_thresh
+    spread_doc_pct = (float(cl_counts[spread_clusters].sum()) / total_docs * 100
+                      if spread_clusters.any() else 0.0)
+    column_spread = {
+        "threshold": round(float(spread_thresh), 4),
+        "clusters_above": int(spread_clusters.sum()),
+        "docs_share_pct": round(spread_doc_pct, 2),
+    }
+
+    # ── Per-domain breakdown ──
+    by_domain = []
+    if domain_labels is not None and len(domain_labels) == len(cluster_labels):
+        doc_q = q.mean(axis=1)
+        valid = cluster_labels >= 0
+        dom_valid = domain_labels[valid]
+        doc_q_valid = doc_q[valid]
+        for d in np.unique(dom_valid[dom_valid >= 0]):
+            dmask = dom_valid == d
+            dname = domain_names[int(d)] if domain_names and int(d) < len(domain_names) \
+                else f"domain {int(d)}"
+            by_domain.append({
+                "domain": dname,
+                "docs_pct": round(float(dmask.sum()) / total_docs * 100, 2),
+                "doc_quality_mean": round(float(doc_q_valid[dmask].mean()), 4),
+            })
+        by_domain.sort(key=lambda r: -r["docs_pct"])
+
+    # ── Advice (same ✓/·/! convention as the merge diagnostics) ──
+    advice: List[str] = []
+    cur_kept = cluster_avg >= prune_threshold
+    n_pruned = K - int(cur_kept.sum())
+    if cl_tokens is not None and total_tokens > 0:
+        tok_kept_pct = float(cl_tokens[cur_kept].sum()) / total_tokens * 100
+    else:
+        tok_kept_pct = float(cl_counts[cur_kept].sum()) / total_docs * 100
+
+    if n_pruned == 0:
+        advice.append(f"✓ threshold={prune_threshold} prunes nothing — all {K} "
+                      f"clusters pass (pool is uniformly above the bar)")
+    elif 100 - tok_kept_pct > 50:
+        advice.append(f"! threshold={prune_threshold} would drop "
+                      f"{100 - tok_kept_pct:.0f}% of tokens ({n_pruned}/{K} clusters) — "
+                      f"heavy; the sweep above shows lighter options")
+    else:
+        advice.append(f"· threshold={prune_threshold} prunes {n_pruned}/{K} clusters "
+                      f"({100 - tok_kept_pct:.1f}% tokens removed)")
+
+    if tok_kept_pct < 90:
+        lighter = [r["threshold"] for r in sweep
+                   if r.get("tokens_kept_pct", r["docs_kept_pct"]) >= 90]
+        if lighter:
+            advice.append(f"· to keep ≥90% of tokens, threshold ≤ {max(lighter)}")
+
+    weakest = min(per_column, key=lambda n: per_column[n]["mean"])
+    advice.append(f"· weakest column: {weakest} (mean {per_column[weakest]['mean']:.2f}) "
+                  f"— it drives most of the pruning")
+
+    if spread_doc_pct > 20:
+        advice.append(f"· {column_spread['clusters_above']} clusters ({spread_doc_pct:.0f}% "
+                      f"of docs) spread >{spread_thresh:.1f} across columns — the flat "
+                      f"average hides WHERE they are weak; per-column rules are a "
+                      f"possible refinement")
+
+    if len(by_domain) >= 2:
+        qualities = [r["doc_quality_mean"] for r in by_domain]
+        gap = max(qualities) - min(qualities)
+        if gap > spread_thresh:
+            best = by_domain[qualities.index(max(qualities))]["domain"]
+            worst = by_domain[qualities.index(min(qualities))]["domain"]
+            advice.append(f"· domain quality gap {gap:.2f} ({best} vs {worst}) — "
+                          f"pruning would bite unevenly across domains")
+
+    if n_nan > 0:
+        advice.append(f"! {n_nan:,} docs have NaN quality scores — treated as 0 in "
+                      f"this analysis (dragging their clusters down); fix the data")
+    if n_excluded > 0:
+        advice.append(f"info: {n_excluded:,} docs excluded from clustering "
+                      f"(label -1: NaN/zero embeddings)")
+
+    # ── Print block (mirrors the merge diagnostics layout) ──
+    print("\n" + "─" * 66)
+    print(f"  Prune profile diagnostics  "
+          f"(threshold={prune_threshold}, {K} clusters, {total_docs:,} docs)")
+    print("─" * 66)
+    print("  cluster avg quality: " + " ".join(
+        f"{k}={v}" for k, v in dist_summary.items()))
+    print("  threshold sweep (kept clusters / docs / tokens):")
+    for row in sweep:
+        cur = "  ← current" if abs(row["threshold"] - prune_threshold) < 1e-9 else ""
+        tok = f", {row['tokens_kept_pct']:.1f}% tokens" if "tokens_kept_pct" in row else ""
+        print(f"    t={row['threshold']:<5.2f} → {row['clusters_kept']:>4} clusters, "
+              f"{row['docs_kept_pct']:.1f}% docs{tok}{cur}")
+    print("  per-column cluster means (p25/mean/p75):")
+    for name in col_names:
+        s = per_column[name]
+        print(f"    {name:<20} {s['p25']:.2f} / {s['mean']:.2f} / {s['p75']:.2f}")
+    print(f"  column spread >{spread_thresh:.1f}: {column_spread['clusters_above']} "
+          f"clusters ({column_spread['docs_share_pct']:.1f}% docs)")
+    if by_domain:
+        print("  by domain: " + " | ".join(
+            f"{r['domain']} {r['docs_pct']:.0f}% docs q={r['doc_quality_mean']:.2f}"
+            for r in by_domain))
+    print("  diagnosis:")
+    for line in advice:
+        print(f"    {line}")
+    print("─" * 66)
+
+    if profile_path:
+        profile_data = {
+            "prune_threshold": prune_threshold,
+            "quality_available": True,
+            "n_clusters": K,
+            "n_docs": total_docs,
+            "quality_columns": col_names,
+            "cluster_avg_quality": dist_summary,
+            "threshold_sweep": sweep,
+            "per_column": per_column,
+            "column_spread": column_spread,
+            "by_domain": by_domain,
+            "nan_quality_docs": n_nan,
+            "excluded_docs": n_excluded,
+            "advice": advice,
+        }
+        with open(profile_path, "w") as f:
+            json.dump(profile_data, f, indent=2, ensure_ascii=False)
+        print(f"[Prune] Profile written → {profile_path}")
+
+    return advice
+
+
 def natural_k_from_profile(profile, tau):
     """Largest K whose closest-pair distance already exceeds tau.
 
@@ -530,6 +817,10 @@ def preprocess_pipeline(
     device: str = "cpu",
     metadata_manager: Optional[object] = None,
     embedding_truncate_len: int = 512,
+    quality_columns: Optional[List[str]] = None,
+    domain_labels: Optional[npt.NDArray[np.int64]] = None,
+    domain_names: Optional[List[str]] = None,
+    prune_profile_path: Optional[str] = None,
 ) -> Tuple[List[ClusterInfo], npt.NDArray[np.int64]]:
     """
     Full CLIMB preprocessing pipeline: embed → cluster → prune → merge → build info.
@@ -551,6 +842,12 @@ def preprocess_pipeline(
             pool-keyed; survives K_enhanced/merge_distance changes).
         profile_path: Where to write merge_profile.json (run-level audit).
         device: Device for embedding.
+        quality_columns: Quality column names (for the prune diagnostics).
+        domain_labels: Per-document domain labels (for the prune diagnostics;
+            must align with quality_scores' rows).
+        domain_names: Human-readable domain names indexed by domain id.
+        prune_profile_path: Where to write prune_profile.json (run-level
+            audit of the per-cluster quality analysis).
 
     Returns:
         Tuple of (cluster_info_list, final_cluster_labels).
@@ -583,6 +880,17 @@ def preprocess_pipeline(
     )
 
     cluster_quality = compute_cluster_quality(cluster_labels, quality_scores, prune_threshold=prune_threshold)
+
+    diagnose_prune_profile(
+        cluster_labels,
+        quality_scores,
+        token_counts=token_counts,
+        prune_threshold=prune_threshold,
+        quality_columns=quality_columns,
+        domain_labels=domain_labels,
+        domain_names=domain_names,
+        profile_path=prune_profile_path,
+    )
 
     pruned_labels, pruned_centroids, _ = prune_clusters(
         cluster_labels, centroids, cluster_quality, threshold=prune_threshold,
