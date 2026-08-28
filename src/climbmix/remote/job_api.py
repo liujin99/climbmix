@@ -54,6 +54,13 @@ class JobAPI(Protocol):
     def status(self, job_id: str) -> JobStatus: ...
     def logs(self, job_id: str, tail: int = 50) -> str: ...
     def cancel(self, job_id: str) -> None: ...
+    # Optional capacity probe (dynamic scheduling): the number of jobs that
+    # could be submitted RIGHT NOW without a quota rejection, or None when
+    # the backend has no query API (executor then falls back to
+    # submit-rejected backoff only). Implementations normalize cards ->
+    # jobs themselves (free_cards // npu_per_job) since only they know the
+    # job shape.
+    def free_job_slots(self) -> Optional[int]: ...
 
 
 class MockJobAPI:
@@ -74,6 +81,15 @@ class MockJobAPI:
         os.makedirs(self._log_dir, exist_ok=True)
         self.submit_count = 0
         self.submit_attempts = 0
+        # Dynamic capacity model (tests simulate the fluctuating shared
+        # pool): max_job_slots = the pool's concurrent-job capacity. None
+        # disables the model entirely (free_job_slots() -> None, submit is
+        # never capacity-rejected) — the plain behavioral fake. With a value,
+        # submit raises TransientSubmitError when the pool is full and
+        # free_job_slots() reports live headroom; the value may be MUTATED
+        # while jobs run (pool grows/shrinks).
+        self.max_job_slots: Optional[int] = None
+        self.max_inflight = 0  # observed in-flight peak (diagnostic)
         # Test injection knobs (capacity simulation):
         #   fail_submits_remaining: next N submit ATTEMPTS raise
         #     TransientSubmitError ("pool full") — exercises backoff/retry.
@@ -81,6 +97,23 @@ class MockJobAPI:
         #     a hard fleet error (bad image/auth).
         self.fail_submits_remaining = 0
         self.fail_submits_hard = 0
+
+    def _inflight_locked(self) -> int:
+        n = 0
+        for job in self._jobs.values():
+            if job["cancelled"]:
+                continue
+            if job["proc"].poll() is None:
+                n += 1
+            else:
+                job["rc"] = job["proc"].returncode
+        return n
+
+    def free_job_slots(self) -> Optional[int]:
+        with self._lock:
+            if self.max_job_slots is None:
+                return None
+            return max(0, self.max_job_slots - self._inflight_locked())
 
     def submit(self, name: str, command: List[str],
                env: Optional[Dict[str, str]] = None,
@@ -95,6 +128,11 @@ class MockJobAPI:
             if self.fail_submits_hard > 0:
                 self.fail_submits_hard -= 1
                 raise RuntimeError("mock hard submit error (bad image)")
+            if (self.max_job_slots is not None
+                    and self._inflight_locked() >= self.max_job_slots):
+                raise TransientSubmitError(
+                    f"mock pool full: {self.max_job_slots}-job capacity "
+                    f"reached")
         job_id = f"mock-{uuid.uuid4().hex[:12]}"
         log_path = os.path.join(self._log_dir, f"{job_id}.log")
         popen_env = os.environ.copy()
@@ -110,6 +148,8 @@ class MockJobAPI:
                 "rc": None, "cancelled": False,
             }
             self.submit_count += 1
+            self.max_inflight = max(self.max_inflight,
+                                    self._inflight_locked())
         return job_id
 
     def _get(self, job_id: str) -> dict:
@@ -175,6 +215,11 @@ class ModelArtsJobAPI:
     raise TransientSubmitError (executor backs off and retries — the pool
     fluctuates); everything else raises RuntimeError (hard, burns the
     config like any experiment failure).
+    free_job_slots() (M1): if the region/pool exposes a quota-usage query
+    API, return free_cards // npu_per_job so the executor's capacity
+    monitor can grow/shrink the in-flight limit while a batch runs.
+    Returning None (default) is valid: the executor then falls back to
+    submit-rejected backoff only.
     The interface below is final; only the SDK calls are missing.
     """
 
@@ -186,6 +231,9 @@ class ModelArtsJobAPI:
                 f"ModelArtsJobAPI: real adapter pending M1 environment survey "
                 f"(docs/remote_setup.md). Missing env config: {missing}. "
                 f"For local simulation use MockJobAPI.")
+
+    def free_job_slots(self) -> Optional[int]:
+        return None  # M1: quota-usage query API, cards // npu_per_job
 
     def submit(self, name: str, command: List[str],
                env: Optional[Dict[str, str]] = None,

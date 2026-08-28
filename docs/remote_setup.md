@@ -41,9 +41,14 @@ and stage fingerprints unchanged.
       PENDING and queue server-side? Which HTTP/SDK error codes/texts mean
       "retryable" (map them to `TransientSubmitError` in
       `ModelArtsJobAPI.submit`) vs hard (bad image/auth/spec → RuntimeError)?
-- [ ] Is there a quota/usage QUERY API (free cards right now)? If yes, M3+
-      can pre-check capacity before each submission round instead of
-      learning it from rejections alone.
+- [ ] Is there a quota/usage QUERY API (free cards right now)? If yes,
+      implement `ModelArtsJobAPI.free_job_slots()` (return
+      `free_cards // npu_per_job`, None while unsupported): the executor's
+      capacity monitor already re-probes every poll interval and grows/
+      shrinks the in-flight limit mid-batch — the 98-exp/16-card scenario
+      then drains as idle cards appear. Without it the executor falls back
+      to fixed-cap + submit-rejected backoff (correct, just slower to
+      react).
 - [ ] Preemption: can a running job be reclaimed by the pool (→ would justify
       job-level checkpoint chaining later), or do jobs always run to
       terminal state?

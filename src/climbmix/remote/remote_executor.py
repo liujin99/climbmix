@@ -37,11 +37,12 @@ scores it NaN and a resume re-runs it).
 import glob
 import json
 import os
+import queue
 import re
 import shutil
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -209,6 +210,15 @@ class RemoteExecutor(ProxyRunner):
         # First hard submit error (bad image/auth): recorded so sibling
         # configs in the same batch burn fast instead of wasting prep.
         self._submit_hard_error: Optional[str] = None
+        # Dynamic in-flight capacity (queue-consumer scheduling): workers
+        # take configs from a queue only while inflight < cap_limit; a
+        # capacity monitor thread (started per batch when the JobAPI
+        # supports free_job_slots()) adjusts cap_limit as the shared pool
+        # fluctuates. Shrinking NEVER kills in-flight jobs — the limit
+        # floors at the current inflight count and only gates new pickups.
+        self._cap_cond = threading.Condition()
+        self._cap_limit = remote_config.max_concurrent_jobs
+        self._cap_inflight = 0
 
         if job_api is not None:
             self.job_api = job_api
@@ -358,6 +368,52 @@ class RemoteExecutor(ProxyRunner):
                 f"local mid checkpoint vanished between marker check and "
                 f"upload: {ckpt_dir}")
         self._upload_dir(ckpt_dir, f"{result_uri.rstrip('/')}/mid_checkpoint")
+
+    # ── dynamic capacity management ──
+
+    def _probe_slots(self) -> Optional[int]:
+        """free_job_slots() when the JobAPI supports capacity queries,
+        else None. The value is adapter-normalized: the number of jobs
+        that could be submitted RIGHT NOW (the adapter divides free cards
+        by npu_per_job itself)."""
+        probe = getattr(self.job_api, "free_job_slots", None)
+        if probe is None:
+            return None
+        try:
+            return int(probe())
+        except Exception:
+            return None
+
+    def _adjust_capacity_limit(self, slots: Optional[int]) -> None:
+        if slots is None:
+            return
+        with self._cap_cond:
+            target = max(0, min(self.remote.max_concurrent_jobs, slots))
+            # floor at inflight: a shrink never kills running jobs, it only
+            # stops NEW pickups until capacity returns
+            self._cap_limit = max(target, self._cap_inflight)
+            self._cap_cond.notify_all()
+
+    def _capacity_monitor(self, stop_event: threading.Event) -> None:
+        """Periodically probe the pool and resize the in-flight limit while
+        a batch runs. The shared pool fluctuates (10-200 cards): growth
+        wakes queued workers immediately (new jobs start as capacity
+        appears — the user-facing 'dynamically detect idle cards' behavior);
+        shrink just queues pickups."""
+        while not stop_event.is_set():
+            self._adjust_capacity_limit(self._probe_slots())
+            stop_event.wait(self.remote.poll_interval_s)
+
+    def _acquire_slot(self) -> None:
+        with self._cap_cond:
+            while self._cap_inflight >= self._cap_limit:
+                self._cap_cond.wait()
+            self._cap_inflight += 1
+
+    def _release_slot(self) -> None:
+        with self._cap_cond:
+            self._cap_inflight -= 1
+            self._cap_cond.notify_all()
 
     # ── dynamic submission ──
 
@@ -630,6 +686,50 @@ class RemoteExecutor(ProxyRunner):
             return self.npu_devices // self.npu_per_exp
         return 0
 
+    def _remote_worker_loop(
+        self,
+        q: "queue.Queue[int]",
+        results: List[Optional[ProxyResult]],
+        remote_configs: List[MixtureConfig],
+        offset: int,
+        experiment_id_base: int,
+        output_dir: Optional[str],
+    ) -> None:
+        """Queue consumer: pick the next queued config, wait for an
+        in-flight SLOT (dynamic capacity), run its full lifecycle
+        (prep -> submit -> wait -> materialize), release the slot, repeat.
+        Queue items are GLOBAL results indices (offset + remote index) so
+        local-slice slots are never clobbered. Taking from the queue only
+        after acquiring a slot means queued configs are NEVER prepped early
+        (no OBS/disk pileup for the ~90 configs waiting behind a 16-card
+        pool), and a finished job frees its slot instantly — the next
+        config starts with ZERO backoff delay. Per-exp failure keeps the
+        burn semantics (inf/0.0 result)."""
+        while True:
+            try:
+                gidx = q.get_nowait()
+            except queue.Empty:
+                return
+            exp_id = experiment_id_base + gidx
+            try:
+                self._acquire_slot()
+                try:
+                    results[gidx] = self._run_remote_experiment(
+                        remote_configs[gidx - offset], exp_id, output_dir)
+                finally:
+                    self._release_slot()
+            except Exception as e:
+                print(f"  [Exp {exp_id}] FAILED: {e}")
+                results[gidx] = ProxyResult(
+                    mixture_config=remote_configs[gidx - offset],
+                    validation_loss=float("inf"),
+                    validation_accuracy=0.0,
+                    validation_nll=float("inf"),
+                    per_task_accuracies={},
+                    per_task_nlls={},
+                    metadata={"experiment_id": exp_id, "error": str(e)},
+                )
+
     def run_batch(
         self,
         configs: List[MixtureConfig],
@@ -640,7 +740,18 @@ class RemoteExecutor(ProxyRunner):
         """Same contract as ProxyRunner.run_batch (probed by the bootstrapper
         for experiment_id_base). Mixed fleet when local_parallel: the first
         _local_slots() configs run via the parent's local parallel path, the
-        rest as remote jobs; all concurrent, results merged in input order."""
+        rest as remote jobs; all concurrent, results merged in input order.
+
+        Remote side is a DYNAMIC queue: workers (up to max_concurrent_jobs)
+        pull configs only while the in-flight limit allows it. The limit
+        starts from a synchronous capacity probe (16 free cards, k=2 ->
+        8 jobs start immediately) and a monitor thread keeps re-probing:
+        capacity appearing mid-run wakes queued workers instantly (a 98-exp
+        iteration with a 16-card pool drains as cards free up / the pool
+        grows, across as many submission rounds as the pool dictates).
+        Without capacity queries (free_job_slots -> None) the limit simply
+        stays at max_concurrent_jobs and submit-rejected backoff handles
+        over-admission."""
         if self.remote.local_parallel and self._local_slots() > 0:
             n_local = self._local_slots()
             local_configs = configs[:n_local]
@@ -652,41 +763,48 @@ class RemoteExecutor(ProxyRunner):
 
         results: List[Optional[ProxyResult]] = [None] * len(configs)
 
-        n_threads = self.remote.max_concurrent_jobs + (1 if local_configs else 0)
-        with ThreadPoolExecutor(max_workers=n_threads) as pool:
-            futures = {}
-            if local_configs:
-                fut = pool.submit(
-                    super().run_batch, local_configs,
-                    data_dir=data_dir, output_dir=output_dir,
-                    experiment_id_base=experiment_id_base)
-                futures[fut] = -1  # local slice marker
-            for i, cfg in enumerate(remote_configs):
-                fut = pool.submit(
-                    self._run_remote_experiment, cfg,
-                    experiment_id_base + offset + i, output_dir)
-                futures[fut] = offset + i
+        # (re)set per-batch dynamic capacity; synchronous initial probe
+        with self._cap_cond:
+            self._cap_limit = self.remote.max_concurrent_jobs
+            self._cap_inflight = 0
+        initial_slots = self._probe_slots()
+        self._adjust_capacity_limit(initial_slots)
+        stop = threading.Event()
+        monitor = None
+        if initial_slots is not None:
+            monitor = threading.Thread(
+                target=self._capacity_monitor, args=(stop,),
+                name="remote-capacity-monitor", daemon=True)
+            monitor.start()
 
-            for future in as_completed(futures):
-                idx = futures[future]
-                if idx == -1:
-                    local_results = future.result()
-                    for j, r in enumerate(local_results):
+        remote_q: "queue.Queue[int]" = queue.Queue()
+        for i in range(len(remote_configs)):
+            remote_q.put(offset + i)  # GLOBAL results index
+
+        # Worker threads at the UPPER bound: when the pool grows mid-batch
+        # the monitor raises the limit and parked workers wake up to pick
+        # queued configs. With few configs, surplus workers find an empty
+        # queue and exit immediately.
+        n_threads = self.remote.max_concurrent_jobs + (1 if local_configs else 0)
+        try:
+            with ThreadPoolExecutor(max_workers=n_threads) as pool:
+                local_future = None
+                if local_configs:
+                    local_future = pool.submit(
+                        super().run_batch, local_configs,
+                        data_dir=data_dir, output_dir=output_dir,
+                        experiment_id_base=experiment_id_base)
+                for _ in range(self.remote.max_concurrent_jobs):
+                    pool.submit(
+                        self._remote_worker_loop, remote_q, results,
+                        remote_configs, offset, experiment_id_base,
+                        output_dir)
+                if local_future is not None:
+                    for j, r in enumerate(local_future.result()):
                         results[j] = r
-                    continue
-                try:
-                    results[idx] = future.result()
-                except Exception as e:
-                    exp_id = experiment_id_base + idx
-                    print(f"  [Exp {exp_id}] FAILED: {e}")
-                    results[idx] = ProxyResult(
-                        mixture_config=configs[idx],
-                        validation_loss=float("inf"),
-                        validation_accuracy=0.0,
-                        validation_nll=float("inf"),
-                        per_task_accuracies={},
-                        per_task_nlls={},
-                        metadata={"experiment_id": exp_id, "error": str(e)},
-                    )
+        finally:
+            stop.set()
+            if monitor is not None:
+                monitor.join(timeout=self.remote.poll_interval_s * 3)
 
         return results
