@@ -6,9 +6,10 @@
 #  不关注结果质量, 只确认所有步骤跑通无报错
 #
 #  设置:
-#    - 5 个 parquet 文件 (~580K docs), 其中 20K 条子采样做 embedding/聚类
+#    - Step 0 从 DATA_DIR 流式切出 ${SPEED_SHARDS}×${SPEED_SHARD_DOCS} docs
+#      (默认 10×100K = 1M), 其中 20K 条子采样做 embedding/聚类
 #      (merge 超参校准用, EMBEDDING_SAMPLE_SIZE 可调)
-#    - configs=2,3,2 (7 个), proxy_steps=50, target_steps=50
+#    - configs=6,6,6 (18 个; N≥10 解锁验证集切分+早停路径), proxy_steps=50, target_steps=50
 #    - 8 NPU 做 embedding, 1 NPU/experiment 做 proxy search
 #    - 70% STEM + 30% ClimbMix general data (含 proxy 实验内混合 + Step 5 混合;
 #      首次运行会下载 3 个 ClimbMix 分片到 GENERAL_DATA_DIR, 之后复用缓存;
@@ -40,6 +41,13 @@ export PYTHONPATH="${CLIMBMIX_DIR}/src:${PYTHONPATH:-}"
 EXP_NAME="${EXP_NAME:-speedrun}"
 DATA_DIR="${DATA_DIR:-/home/ma-user/work/100B_stem_parquet_filtered}"
 SPEED_DATA="/tmp/speedrun_data"
+# Step-0 池形态: 从 DATA_DIR 流式切出 N 个精确 X docs 的 shard (旧做法 =
+# 原样复制前 5 个 part 文件, 行数不受控)。1M docs 扩大 mixture 采样池;
+# pool-keyed embedding 缓存自动换键 (重新 embed 20K 条, 一次性)。
+# 改任一值 → search 指纹变 → stage_gate 归档整个目录重跑 (search 下游
+# 全依赖数据形态, 语义正确)。.spec 标记防不同形态的陈旧池被复用。
+SPEED_SHARDS="${SPEED_SHARDS:-10}"
+SPEED_SHARD_DOCS="${SPEED_SHARD_DOCS:-100000}"
 NANOCHAT_DIR="${NANOCHAT_DIR:-/home/ma-user/work/nanochat-npu}"
 NANOCHAT_BASE_DIR="${NANOCHAT_BASE_DIR:-/home/ma-user/work/nanochat_model_dir}"
 GENERAL_DATA_DIR="${GENERAL_DATA_DIR:-$NANOCHAT_BASE_DIR/climbmix_shards}"
@@ -52,6 +60,7 @@ TARGET_STEPS=50
 # (iterative_bootstrapper._fit_predictor_with_val), 让唯一一次重跑
 # 覆盖生产全部路径; 追求最快冒烟可 CONFIGS_PER_ITER=2,3,2 覆盖。
 CONFIGS_PER_ITER="${CONFIGS_PER_ITER:-6,6,6}"
+TOTAL_CONFIGS="$(echo "$CONFIGS_PER_ITER" | awk -F, '{s=0;for(i=1;i<=NF;i++)s+=$i;print s}')"
 SEARCH_NUM_ITERATIONS="${SEARCH_NUM_ITERATIONS:-3}"
 K_ENHANCED="${K_ENHANCED:-3}"
 K_CLUSTER_MAX="${K_CLUSTER_MAX:-15}"
@@ -167,6 +176,8 @@ FP_SEARCH_PARAMS=(
     "proxy_num_iterations=$PROXY_NUM_ITERATIONS"
     "proxy_target_tokens=$PROXY_TARGET_TOKENS"
     "configs_per_iter=$CONFIGS_PER_ITER"
+    "speed_shards=$SPEED_SHARDS"
+    "speed_shard_docs=$SPEED_SHARD_DOCS"
     "search_num_iterations=$SEARCH_NUM_ITERATIONS"
     "K_enhanced=$K_ENHANCED"
     "K_cluster_max=$K_CLUSTER_MAX"
@@ -214,7 +225,7 @@ run_stage_gate
 echo -e "\n════════════════════════════════════════════════════════════"
 echo "  ClimbMix Speedrun: d${PROXY_DEPTH} → d${TARGET_DEPTH}  |  $OUTPUT_DIR"
 echo "  ${NUM_NPU}x910B4, ${NPU_PER_EXP} NPU/exp ($((NUM_NPU / NPU_PER_EXP)) parallel)"
-echo "  Data: 5 parquet files | Configs: ${CONFIGS_PER_ITER} | Steps: ${PROXY_NUM_ITERATIONS}"
+echo "  Data: ${SPEED_SHARDS} shards × ${SPEED_SHARD_DOCS} docs | Configs: ${CONFIGS_PER_ITER} (${TOTAL_CONFIGS} total) | Steps: ${PROXY_NUM_ITERATIONS}"
 echo "════════════════════════════════════════════════════════════"
 
 python3 -c "import torch_npu; import torch; assert torch.npu.is_available(), 'NPU not available'" || { echo "✗ NPU not available"; exit 1; }
@@ -228,14 +239,68 @@ done
 ( cd "$NANOCHAT_DIR" && python3 -c "from scripts.base_eval import prepare_eval_data; prepare_eval_data('stem')" 2>/dev/null ) || true
 
 # ═══════════════════════════════════════════════════════════════════════
-#  Step 0: Prepare small data (5 parquet files)
+#  Step 0: Prepare speedrun pool (${SPEED_SHARDS} shards × ${SPEED_SHARD_DOCS} docs)
+#  流式读取 DATA_DIR/part-*.parquet, 按 20K 行 batch 累积, 每满
+#  ${SPEED_SHARD_DOCS} 行写一个 shard (跨源文件无缝拼接, 峰值内存 ≈
+#  一个 shard)。池不足 → 硬失败并列出可用行数。
 # ═══════════════════════════════════════════════════════════════════════
-echo -e "\n===== Step 0: Prepare small data (5 parquet files) =====\n"
+echo -e "\n===== Step 0: Prepare speedrun pool (${SPEED_SHARDS} shards × ${SPEED_SHARD_DOCS} docs) =====\n"
 
-if [ ! -d "$SPEED_DATA" ] || [ "$(ls "$SPEED_DATA"/*.parquet 2>/dev/null | wc -l)" -lt 5 ]; then
+cur_spec="$(cat "$SPEED_DATA/.spec" 2>/dev/null || true)"
+if [ "$cur_spec" != "shards=${SPEED_SHARDS} docs=${SPEED_SHARD_DOCS}" ] \
+   || [ "$(ls "$SPEED_DATA"/*.parquet 2>/dev/null | wc -l)" -lt "$SPEED_SHARDS" ]; then
     mkdir -p "$SPEED_DATA"
-    rm -f "$SPEED_DATA"/*.parquet "$SPEED_DATA"/*.npz 2>/dev/null
-    ls "$DATA_DIR"/part-*.parquet 2>/dev/null | head -5 | xargs -I{} cp {} "$SPEED_DATA/"
+    rm -f "$SPEED_DATA"/*.parquet "$SPEED_DATA"/*.npz "$SPEED_DATA"/.spec 2>/dev/null
+    python3 - "$DATA_DIR" "$SPEED_DATA" "$SPEED_SHARDS" "$SPEED_SHARD_DOCS" <<'PY'
+import glob, os, sys
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+data_dir, out_dir = sys.argv[1], sys.argv[2]
+n_shards, shard_docs = int(sys.argv[3]), int(sys.argv[4])
+
+srcs = sorted(glob.glob(os.path.join(data_dir, "part-*.parquet")))
+if not srcs:
+    sys.exit(f"ERROR: no part-*.parquet under {data_dir}")
+
+need = n_shards * shard_docs
+schema = None
+buf, buf_rows = [], 0
+shard_i = 0
+total_rows = 0
+
+for f in srcs:
+    if shard_i >= n_shards:
+        break
+    pf = pq.ParquetFile(f)
+    total_rows += pf.metadata.num_rows
+    for b in pf.iter_batches(batch_size=20000):
+        if schema is None:
+            schema = b.schema
+        elif not b.schema.equals(schema, check_metadata=False):
+            sys.exit(f"ERROR: schema mismatch in {f} vs earlier files")
+        buf.append(b)
+        buf_rows += b.num_rows
+        while buf_rows >= shard_docs and shard_i < n_shards:
+            table = pa.Table.from_batches(buf, schema=schema)
+            out = os.path.join(out_dir, f"part-{shard_i:03d}.parquet")
+            pq.write_table(table.slice(0, shard_docs), out, compression="zstd")
+            print(f"  shard {shard_i:03d}/{n_shards}: {shard_docs} docs")
+            tail = table.slice(shard_docs)
+            buf, buf_rows = tail.to_batches(), tail.num_rows
+            shard_i += 1
+        if shard_i >= n_shards:
+            break
+
+if shard_i < n_shards:
+    sys.exit(f"ERROR: pool under {data_dir} holds {total_rows} docs < "
+             f"{need} required ({n_shards} x {shard_docs}); "
+             f"lower SPEED_SHARDS/SPEED_SHARD_DOCS or point DATA_DIR elsewhere")
+print(f"  pool ready: {shard_i} shards x {shard_docs} docs = {shard_i * shard_docs} docs")
+PY
+    echo "shards=${SPEED_SHARDS} docs=${SPEED_SHARD_DOCS}" > "$SPEED_DATA/.spec"
+else
+    echo "  Pool already prepared (spec match): $SPEED_DATA"
 fi
 echo "Speedrun data files:"
 ls -lh "$SPEED_DATA"/*.parquet
@@ -406,7 +471,7 @@ echo ""
 echo "  Verified code paths:"
 echo "    ✓ Embedding (fallback path, 0% NaN)"
 echo "    ✓ Clustering (FAISS K-means + merge)"
-echo "    ✓ Proxy search (ProxyRunner: mix + mid_train + eval × 7 configs)"
+echo "    ✓ Proxy search (ProxyRunner: mix + mid_train + eval × ${TOTAL_CONFIGS} configs)"
 echo "    ✓ Data selection (mixture weights → sampled_dataset)"
 echo "    ✓ Shard preparation (prepare_shards.py)"
 echo "    ✓ General data mixing (mix_general_data.py, stem_ratio=$STEM_RATIO)"
