@@ -23,6 +23,49 @@ from climbmix.core.types import (
     MixtureConfig,
     IterationResult,
 )
+from climbmix.core.predictor import LightGBMPredictor
+
+
+def generate_predictor_scatter(
+    output_dir: str,
+    predictor_eval: List[Dict[str, Any]],
+    maximize: bool,
+) -> Optional[str]:
+    """Paper Fig.9-style scatter: predictor predictions vs ground truth on
+    held-out pairs (pooled across rounds). Returns None when no pairs exist."""
+    preds: List[float] = []
+    targets: List[float] = []
+    for e in predictor_eval:
+        preds.extend(e.get("val_preds") or [])
+        targets.extend(e.get("val_targets") or [])
+    if len(preds) < 2:
+        return None
+
+    # Predictor targets are loss-like (lower = better); flip to score space
+    # (higher = better) when the metric is accuracy/maximize so the chart
+    # reads the same way as the iteration table.
+    sign = -1.0 if maximize else 1.0
+    p = sign * np.array(preds, dtype=np.float64)
+    t = sign * np.array(targets, dtype=np.float64)
+    better = "higher" if maximize else "lower"
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.scatter(t, p, s=30, alpha=0.75, color="#4C72B0", edgecolors="none")
+    lims = [float(min(t.min(), p.min())), float(max(t.max(), p.max()))]
+    pad = 0.05 * (lims[1] - lims[0] + 1e-9)
+    lims = [lims[0] - pad, lims[1] + pad]
+    ax.plot(lims, lims, "--", color="gray", linewidth=1, label="perfect prediction")
+    ax.set_xlabel(f"actual held-out score ({better} = better)")
+    ax.set_ylabel(f"predicted score ({better} = better)")
+    ax.set_title(f"Predictor quality: predicted vs actual (n={len(p)}, pooled)")
+    ax.legend()
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+
+    path = os.path.join(output_dir, "predictor_scatter.png")
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return path
 
 
 def generate_markdown_report(
@@ -34,6 +77,7 @@ def generate_markdown_report(
     stats: dict,
     stage_times: Dict[str, float],
     elapsed_seconds: float,
+    search_state: Optional[dict] = None,
 ) -> str:
     K = len(cluster_info)
     labels = [c.label for c in cluster_info]
@@ -77,13 +121,142 @@ def generate_markdown_report(
 
     lines.append("## Iteration Summary")
     lines.append("")
-    lines.append("| Iter | Configs | Trained | Best Score | Predictor R\u00b2 |")
-    lines.append("|---|---|---|---|---|")
+    lines.append("| Iter | Configs | Trained | Best Score | val R\u00b2 | val \u03c1 | online \u03c1 |")
+    lines.append("|---|---|---|---|---|---|---|")
     for r in iter_results:
         score_str = f"{r.best_score:.4f}" if r.best_score is not None else "N/A"
         r2_str = f"{r.predictor_r2:.4f}" if r.predictor_r2 is not None else "N/A"
-        lines.append(f"| {r.iteration} | {r.n_configs} | {r.n_trained} | {score_str} | {r2_str} |")
+        rho_str = (f"{r.predictor_spearman:.4f}"
+                   if r.predictor_spearman is not None else "N/A")
+        online_str = (f"{r.online_spearman:.4f}"
+                      if r.online_spearman is not None else "N/A")
+        lines.append(
+            f"| {r.iteration} | {r.n_configs} | {r.n_trained} | {score_str} "
+            f"| {r2_str} | {rho_str} | {online_str} |")
     lines.append("")
+
+    # Predictor / pruning visibility: prefer the persisted search state
+    # (canonical + carries the held-out pairs); fall back to the in-memory
+    # iteration results (e.g. no-resume runs, old state files).
+    predictor_eval = (search_state or {}).get("predictor_eval") or []
+    online_eval = (search_state or {}).get("online_eval") or []
+    pruning_history = (search_state or {}).get("pruning_history") or []
+    if not predictor_eval:
+        predictor_eval = [
+            {"iteration": r.iteration, "val_r2": r.predictor_r2,
+             "val_spearman": r.predictor_spearman}
+            for r in iter_results if r.predictor_r2 is not None
+        ]
+    if not online_eval:
+        online_eval = [
+            {"iteration": r.iteration, "n": None, "spearman": r.online_spearman}
+            for r in iter_results if r.online_spearman is not None
+        ]
+    if not pruning_history:
+        pruning_history = [
+            dict(r.pruning, iteration=r.iteration)
+            for r in iter_results if r.pruning
+        ]
+    online_n_by_iter = {e.get("iteration"): e.get("n") for e in online_eval}
+
+    lines.append("## Predictor Quality (LightGBM, paper D.10)")
+    lines.append("")
+    lines.append(
+        "Per-round predictor metrics. val = held-out split of the accumulated\n"
+        "configs (exists from accumulated N\u226510); online = rank agreement\n"
+        "between predictions made **before** training a round's configs and\n"
+        "their actual scores (no split needed). Paper D.10 reports 94%\n"
+        "held-out Spearman at 112 configs / 350M proxy \u2014 a smaller N here\n"
+        "necessarily reads lower; that is a budget artifact, not a bug.")
+    lines.append("")
+    if predictor_eval or online_eval:
+        lines.append("| Iter | Val n | val R\u00b2 | val Spearman | online \u03c1 (n) |")
+        lines.append("|---|---|---|---|---|")
+        iters = sorted({e.get("iteration") for e in predictor_eval} |
+                       {e.get("iteration") for e in online_eval})
+        pe_by_iter = {e.get("iteration"): e for e in predictor_eval}
+        oe_by_iter = {e.get("iteration"): e for e in online_eval}
+        for it in iters:
+            pe = pe_by_iter.get(it) or {}
+            oe = oe_by_iter.get(it) or {}
+            n_val = pe.get("n_val")
+            n_val_str = str(n_val) if n_val is not None else "N/A"
+            v_r2 = pe.get("val_r2")
+            v_r2_str = f"{v_r2:.4f}" if v_r2 is not None else "N/A"
+            v_rho = pe.get("val_spearman")
+            v_rho_str = f"{v_rho:.4f}" if v_rho is not None else "N/A"
+            o_rho = oe.get("spearman")
+            o_n = oe.get("n")
+            if o_rho is not None:
+                o_str = f"{o_rho:.4f}" + (f" ({o_n})" if o_n is not None else "")
+            else:
+                o_str = "N/A"
+            lines.append(f"| {it} | {n_val_str} | {v_r2_str} | {v_rho_str} | {o_str} |")
+        lines.append("")
+
+        pooled_preds: List[float] = []
+        pooled_targets: List[float] = []
+        for e in predictor_eval:
+            pooled_preds.extend(e.get("val_preds") or [])
+            pooled_targets.extend(e.get("val_targets") or [])
+        if len(pooled_preds) >= 2:
+            pooled_rho = LightGBMPredictor._spearman(
+                np.array(pooled_preds, dtype=np.float64),
+                np.array(pooled_targets, dtype=np.float64),
+            )
+            if np.isfinite(pooled_rho):
+                lines.append(
+                    f"**Pooled held-out Spearman: \u03c1 = {pooled_rho:.4f}** "
+                    f"({len(pooled_preds)} pairs across rounds; each predicted "
+                    f"by that round's predictor)")
+                lines.append("")
+    else:
+        lines.append("_No predictor-eval data (accumulated N < 10 throughout \u2014 "
+                     "e.g. speedrun budget \u2014 and no online backtest records)._")
+        lines.append("")
+
+    maximize = getattr(config, "metric_direction", "minimize") == "maximize"
+    scatter_path = generate_predictor_scatter(output_dir, predictor_eval, maximize)
+    if scatter_path:
+        lines.append("![Predictor: predicted vs actual]"
+                     f"({os.path.basename(scatter_path)})")
+        lines.append("")
+
+    lines.append("## Search Pruning (top-N narrowing)")
+    lines.append("")
+    lines.append(
+        "Paper \u00a72.2 pruning is selection-level: each guided round ranks the\n"
+        "candidate pool with the predictor and only the top-N band is\n"
+        "eligible for verbatim sampling \u2014 candidates below the cutoff are\n"
+        "never proxy-trained (in addition to the per-round budget decay).\n"
+        "Iteration 1 samples from the token-count Dirichlet prior (no\n"
+        "predictor yet, nothing pruned).")
+    lines.append("")
+    if pruning_history:
+        lines.append("| Iter | Pool | Novel | Top-N | Top % | Sampled | "
+                     "Excluded (never trained) |")
+        lines.append("|---|---|---|---|---|---|---|")
+        total_excluded = 0
+        for e in pruning_history:
+            pool = e.get("pool")
+            novel = e.get("novel", pool)
+            top_n = e.get("top_n")
+            sampled = e.get("sampled")
+            excluded = (novel - top_n) if (novel is not None
+                                           and top_n is not None) else None
+            if excluded is not None:
+                total_excluded += excluded
+            top_pct = (f"{100.0 * top_n / max(1, novel):.1f}%"
+                       if top_n is not None and novel else "N/A")
+            lines.append(
+                f"| {e.get('iteration')} | {pool} | {novel} | {top_n} "
+                f"| {top_pct} | {sampled} | {excluded} |")
+        lines.append(f"| | | | | | **total** | **{total_excluded}** |")
+        lines.append("")
+    else:
+        lines.append("_No guided rounds recorded (single-iteration search or "
+                     "old state file)._")
+        lines.append("")
 
     lines.append("## Stage Timing")
     lines.append("")

@@ -236,6 +236,13 @@ class IterationResult:
     predictor: Optional[Any] = None
     predictor_r2: Optional[float] = None
     predictor_spearman: Optional[float] = None
+    # Online backtest: Spearman between the predictor's predictions for this
+    # round's configs (made BEFORE training them) and their actual scores.
+    # Available on guided rounds regardless of accumulated-N (unlike the
+    # held-out val split, which needs N>=10).
+    online_spearman: Optional[float] = None
+    # Guided-round narrowing record: pool/novel/top_n/sampled/cutoff.
+    pruning: Optional[Dict[str, Any]] = None
     best_config: Optional[MixtureConfig] = None
     best_score: Optional[float] = None
     best_loss: Optional[float] = None

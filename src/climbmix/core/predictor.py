@@ -137,6 +137,13 @@ class LightGBMPredictor:
                         verbose=False,
                     )],
                 )
+            best_iter = getattr(self._model, "best_iteration_", None)
+            if best_iter is not None and best_iter < self.config.n_estimators:
+                print(f"[Predictor] Early stopping: best_iteration="
+                      f"{best_iter}/{self.config.n_estimators} trees")
+            else:
+                print(f"[Predictor] No early stopping: used all "
+                      f"{self.config.n_estimators} trees")
         else:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")

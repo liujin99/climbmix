@@ -207,11 +207,16 @@ class CLIMBPipeline:
         # Stage 5: Save outputs
         _t = time.time()
         print("\n[Stage 5] Saving outputs")
+        search_extras = {
+            "predictor_eval": bootstrapper.predictor_eval,
+            "online_eval": bootstrapper.online_eval,
+            "pruning_history": bootstrapper.pruning_history,
+        }
         self._save_outputs(
             output_dir, optimal_weights, iter_results,
             cluster_info, final_labels, selected_indices,
             token_counts, texts_loaded, mm,
-            stats, stage_times, t_start,
+            stats, stage_times, t_start, search_extras,
         )
         stage_times["stage5_save"] = time.time() - _t
 
@@ -391,7 +396,7 @@ class CLIMBPipeline:
         output_dir, optimal_weights, iter_results,
         cluster_info, cluster_labels, selected_indices,
         token_counts, texts, metadata_manager,
-        stats, stage_times, t_start,
+        stats, stage_times, t_start, search_extras=None,
     ):
         weights_dict = optimal_weights.mixture_weights.to_dict(
             cluster_labels=[c.label for c in cluster_info]
@@ -422,6 +427,8 @@ class CLIMBPipeline:
                     "n_trained": r.n_trained,
                     "best_score": r.best_score,
                     "predictor_r2": r.predictor_r2,
+                    "predictor_spearman": r.predictor_spearman,
+                    "online_spearman": r.online_spearman,
                 }
                 for r in iter_results
             ],
@@ -476,5 +483,6 @@ class CLIMBPipeline:
             output_dir, self.config, cluster_info,
             optimal_weights, iter_results, stats,
             stage_times, elapsed,
+            search_state=search_extras,
         )
         print(f"[Save] Markdown report -> {report_path}")

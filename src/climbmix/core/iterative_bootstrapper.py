@@ -25,7 +25,7 @@ from climbmix.core.types import (
     BENCHMARK_SIZES,
 )
 from climbmix.core.dirichlet_sampler import DirichletSampler
-from climbmix.core.predictor import get_predictor
+from climbmix.core.predictor import get_predictor, LightGBMPredictor
 from climbmix.utils.io_utils import atomic_write_json, load_json_state
 
 
@@ -65,6 +65,11 @@ class IterativeBootstrapper:
         # held-out Spearman; we also persist the (pred, actual) pairs so a
         # Fig.9-style analysis is possible post hoc without re-running).
         self._predictor_eval: List[Dict[str, Any]] = []
+        # Online backtest per guided round: predictor predictions made BEFORE
+        # training vs actual scores of that round's configs.
+        self._online_eval: List[Dict[str, Any]] = []
+        # Guided-round narrowing records (pool -> novel -> top-N -> sampled).
+        self._pruning_history: List[Dict[str, Any]] = []
         self.w_floor = config.search.w_floor
         self.state_path = state_path
         self._last_completed_iter = 0
@@ -111,6 +116,8 @@ class IterativeBootstrapper:
                 for d in self._accumulated_per_benchmark
             ],
             "predictor_eval": self._predictor_eval,
+            "online_eval": self._online_eval,
+            "pruning_history": self._pruning_history,
             "pending": self._pending,
         }
         atomic_write_json(self.state_path, state)
@@ -170,9 +177,12 @@ class IterativeBootstrapper:
             self._accumulated_per_benchmark = [
                 (d["acc"], d["nll"]) for d in state["accumulated_per_benchmark"]
             ]
-            # Tolerant: state files written before the predictor_eval
-            # feature lack the key (resume behavior unchanged for them).
+            # Tolerant: state files written before the predictor_eval /
+            # online_eval / pruning_history features lack the keys (resume
+            # behavior unchanged for them).
             self._predictor_eval = state.get("predictor_eval") or []
+            self._online_eval = state.get("online_eval") or []
+            self._pruning_history = state.get("pruning_history") or []
             self._last_completed_iter = state["last_completed_iter"]
             self._pending = state.get("pending")
         except (KeyError, TypeError, ValueError):
@@ -318,22 +328,32 @@ class IterativeBootstrapper:
         offset = 0
         scores = (np.array(self._accumulated_scores, dtype=np.float64)
                   if self._accumulated_scores else np.array([], dtype=np.float64))
+        # Re-attach persisted per-iteration metrics so the report after a
+        # resume is as complete as after a fresh run.
+        eval_by_iter = {e.get("iteration"): e for e in self._predictor_eval}
+        online_by_iter = {e.get("iteration"): e.get("spearman")
+                          for e in self._online_eval}
+        pruning_by_iter = {e.get("iteration"): e for e in self._pruning_history}
         for k, n in enumerate(self.config.search.configs_per_iter):
             if offset + n > len(self._accumulated_configs):
                 break
             chunk_configs = self._accumulated_configs[offset:offset + n]
             chunk_scores = scores[offset:offset + n]
             best_idx = self._best_index(chunk_scores) if len(chunk_scores) else 0
+            pe = eval_by_iter.get(k + 1) or {}
             results.append(IterationResult(
                 iteration=k + 1,
                 n_configs=n,
                 n_trained=n,
                 predictor=self._predictor,
-                predictor_r2=None,
+                predictor_r2=pe.get("val_r2"),
+                predictor_spearman=pe.get("val_spearman"),
                 best_config=chunk_configs[best_idx] if chunk_configs else None,
                 best_score=float(chunk_scores[best_idx]) if len(chunk_scores) else None,
                 all_configs=chunk_configs,
                 all_scores=chunk_scores,
+                online_spearman=online_by_iter.get(k + 1),
+                pruning=pruning_by_iter.get(k + 1),
             ))
             offset += n
         return results
@@ -414,6 +434,9 @@ class IterativeBootstrapper:
 
         t0 = time.time()
 
+        sampled_predictions: Optional[List[Optional[float]]] = None
+        pruning_info: Optional[Dict[str, Any]] = None
+
         if preset_configs is not None:
             new_configs = list(preset_configs)
             print(f"[Iter {iteration}] Restored {len(new_configs)} pending configs from saved state")
@@ -437,7 +460,8 @@ class IterativeBootstrapper:
             if len(novel_configs) == 0:
                 novel_configs = pool_configs
 
-            ranked_indices = self._predictor.predict_and_rank(novel_configs)
+            novel_predictions = self._predictor.predict(novel_configs)
+            ranked_indices = np.argsort(novel_predictions).tolist()
 
             top_n = min(self.config.search.sample_from_top_m * 3, len(novel_configs))
             top_configs = [novel_configs[i] for i in ranked_indices[:top_n]]
@@ -445,6 +469,40 @@ class IterativeBootstrapper:
             new_configs = self._sample_verbatim_from_top(
                 top_configs, ranked_indices, novel_configs, n_configs, iteration,
             )
+
+            # Pruning record + display: paper §2.2's pruning is
+            # selection-level narrowing — candidates outside the top-N are
+            # never proxy-trained (plus the budget decay across iterations).
+            cutoff = (float(novel_predictions[ranked_indices[top_n - 1]])
+                      if top_n > 0 else None)
+            pruning_info = {
+                "iteration": iteration,
+                "pool": int(pool_size),
+                "novel": int(len(novel_configs)),
+                "top_n": int(top_n),
+                "sampled": int(len(new_configs)),
+                "cutoff": cutoff,
+            }
+            self._pruning_history.append(pruning_info)
+            print(f"[Iter {iteration}] Pruning: pool {pool_size} -> novel "
+                  f"{len(novel_configs)} -> top-{top_n} "
+                  f"({100.0 * top_n / max(1, len(novel_configs)):.1f}%) -> "
+                  f"sampled {len(new_configs)} verbatim (no perturbation); "
+                  f"{len(novel_configs) - top_n} below-cutoff candidates "
+                  f"never trained")
+            if cutoff is not None:
+                print(f"[Iter {iteration}] Top-{top_n} predicted-target band: "
+                      f"[{float(novel_predictions[ranked_indices[0]]):.3f}, "
+                      f"{cutoff:.3f}] (targets: lower = better)")
+
+            # Predictions for the configs we are ABOUT to train, recorded
+            # before training — the honest input of the online backtest
+            # below (no val split needed, works at any N).
+            pred_by_obj = {
+                id(c): float(novel_predictions[i])
+                for i, c in enumerate(novel_configs)
+            }
+            sampled_predictions = [pred_by_obj.get(id(c)) for c in new_configs]
 
         for i, c in enumerate(new_configs):
             c.config_id = len(self._accumulated_configs) + i
@@ -518,6 +576,42 @@ class IterativeBootstrapper:
         best_score = float(scores_arr[best_idx])
         best_loss = None
 
+        # Online backtest: rank agreement between the predictions recorded
+        # above (made by the PREVIOUS predictor, before this round trained)
+        # and the actual scores. Unlike the held-out val split this needs no
+        # N>=10, so speedrun-sized runs get a predictor-quality signal too.
+        online_spearman = None
+        online_n = 0
+        if sampled_predictions is not None:
+            actual_targets = (
+                -scores_arr if self.metric_direction == "maximize" else scores_arr
+            )
+            bt_pairs = [
+                (p, float(t))
+                for p, t in zip(sampled_predictions, actual_targets)
+                if p is not None and np.isfinite(t)
+            ]
+            online_n = len(bt_pairs)
+            if online_n >= 2:
+                online_spearman = LightGBMPredictor._spearman(
+                    np.array([x[0] for x in bt_pairs], dtype=np.float64),
+                    np.array([x[1] for x in bt_pairs], dtype=np.float64),
+                )
+                rho_str = (f"{online_spearman:.3f}"
+                           if np.isfinite(online_spearman) else "nan")
+                print(f"[Iter {iteration}] Online backtest: Spearman "
+                      f"rho={rho_str} (n={online_n}; predictions made before "
+                      f"training vs actual scores)")
+            self._online_eval.append({
+                "iteration": iteration,
+                "n": online_n,
+                "spearman": (
+                    float(online_spearman)
+                    if online_spearman is not None and np.isfinite(online_spearman)
+                    else None
+                ),
+            })
+
         iter_result = IterationResult(
             iteration=iteration,
             n_configs=n_configs,
@@ -528,6 +622,12 @@ class IterativeBootstrapper:
             best_score=best_score,
             all_configs=trained_configs,
             all_scores=scores_arr,
+            online_spearman=(
+                float(online_spearman)
+                if online_spearman is not None and np.isfinite(online_spearman)
+                else None
+            ),
+            pruning=pruning_info,
         )
 
         if val_configs_split is not None:
@@ -558,6 +658,9 @@ class IterativeBootstrapper:
             print(f"  Predictor val R\u00b2: {iter_result.predictor_r2:.4f}")
             if iter_result.predictor_spearman is not None:
                 print(f"  Predictor val Spearman: {iter_result.predictor_spearman:.4f}")
+        if iter_result.online_spearman is not None:
+            print(f"  Online backtest Spearman: {iter_result.online_spearman:.4f} "
+                  f"(n={online_n})")
 
         return iter_result
 
@@ -690,6 +793,18 @@ class IterativeBootstrapper:
     @property
     def predictor(self):
         return self._predictor
+
+    @property
+    def predictor_eval(self) -> List[Dict[str, Any]]:
+        return self._predictor_eval
+
+    @property
+    def online_eval(self) -> List[Dict[str, Any]]:
+        return self._online_eval
+
+    @property
+    def pruning_history(self) -> List[Dict[str, Any]]:
+        return self._pruning_history
 
     @property
     def iteration_results(self) -> List[IterationResult]:
