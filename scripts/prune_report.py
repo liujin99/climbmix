@@ -19,12 +19,14 @@ instant and a later run with the same sample size reuses them.
 
 Typical (server, full 100B pool, first run):
   python3 scripts/prune_report.py --data-dir /home/ma-user/work/100B_stem_parquet_filtered
-  # ~20-40 min: one-time full-pool metadata scan (cached next to the shards),
-  # then ~18 min single-NPU embedding of the 100K sample (~95 docs/s) +
-  # minutes of K-means.  --sample-size 200000 doubles precision for ~35 min
-  # embedding; a smaller 20K is fast (~4 min) but leaves only ~20 docs per
-  # K_init=1000 cluster (cluster-mean SE ~0.11-0.22 — same order as the
-  # 0.25 threshold steps, sweep tails over-dispersed).
+  # Analyzes a seed-42 subset of 100 shards (~12M docs; metadata scan and
+  # text reads touch only those shards): ~2-4 min metadata + ~18 min
+  # single-NPU embedding of the 100K doc-level sample + minutes of K-means.
+  # --sample-shards 0 switches to the full 1000-shard pool (~20-40 min scan,
+  # same 100K sample); --sample-size 200000 doubles precision for ~35 min
+  # embedding. Smaller samples are fast but leave fewer docs per K_init=1000
+  # cluster (20K → ~20/cluster, cluster-mean SE ~0.11-0.22 — same order as
+  # the 0.25 threshold steps).
 Re-run: seconds (all caches hit).
 
 No NPU? --embedding-device cpu works (20K docs ≈ tens of minutes).
@@ -37,6 +39,39 @@ import sys
 import time
 
 
+def _select_shard_dir(data_dir: str, n_shards: int, work_root: str) -> str:
+    """Directory of symlinks to n_shards seed-42-random shards of data_dir.
+
+    Stratified-ish subsampling: N shards × (sample_size/N docs each on
+    average) instead of scanning all 1000 shards. Dilutes shard-level skew
+    across N shards (vs picking a few whole shards) while cutting the
+    metadata scan / text I/O / memory by ~1000/N. The symlink names keep the
+    original basenames so pool-cache keys stay content-addressed.
+
+    Deterministic: same data_dir + n_shards → same selection.
+    """
+    import glob
+    import numpy as np
+    shards = sorted(glob.glob(os.path.join(data_dir, "*.parquet")))
+    if len(shards) <= n_shards:
+        return data_dir  # nothing to subsample
+    rng = np.random.default_rng(42)
+    selected = sorted(rng.choice(len(shards), size=n_shards, replace=False))
+    tag = f"shards{n_shards}_of_{len(shards)}"
+    out_dir = os.path.join(work_root, tag)
+    os.makedirs(out_dir, exist_ok=True)
+    n_linked = 0
+    for i in selected:
+        src = shards[int(i)]
+        dst = os.path.join(out_dir, os.path.basename(src))
+        if not os.path.islink(dst) and not os.path.exists(dst):
+            os.symlink(src, dst)
+            n_linked += 1
+    print(f"[Report] Shard subsample: {n_shards}/{len(shards)} shards "
+          f"({n_linked} new symlinks) → {out_dir}")
+    return out_dir
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Discovery-only prune/merge profile report for a data pool")
@@ -45,6 +80,13 @@ def main():
     parser.add_argument("--schema", default=None,
                         help="DatasetSchema YAML (default: config/schema_stem.yaml "
                              "next to this repo)")
+    parser.add_argument("--sample-shards", type=int, default=100,
+                        help="analyze a seed-42 random subset of N shards "
+                             "(default 100 of ~1000: metadata scan/I/O/memory "
+                             "cut ~10x, shard-level skew diluted across 100 "
+                             "shards; 0 = all shards). Each selected shard "
+                             "contributes ~sample_size/N docs to the doc-level "
+                             "sample, so doc-level randomness is preserved")
     parser.add_argument("--sample-size", type=int, default=100000,
                         help="docs to embed+cluster, sampled with the pipeline's "
                              "seed-42 scheme (default 100000: ~100 docs per "
@@ -95,13 +137,18 @@ def main():
           f"prune_threshold={prune_threshold}")
     print("=" * 70)
 
-    # ── Stage 0: full-pool metadata (domain + quality + char_count).
-    # One-time scan of every shard; the .npz lands next to the parquets and
-    # is reused by every later run (incl. production Step 0).
+    # ── Stage 0: shard subsample + metadata (domain + quality + char_count).
+    # With --sample-shards>0, only the selected shards are scanned (symlinked
+    # into a work dir; cache lands next to the symlinks, keyed by the subset's
+    # manifest, and is reused across re-runs with the same N).
     t0 = time.time()
-    mm = ShardMetadataManager(args.data_dir, schema=schema, cache_dir=args.data_dir)
+    analyze_dir = args.data_dir
+    if args.sample_shards and args.sample_shards > 0:
+        analyze_dir = _select_shard_dir(args.data_dir, args.sample_shards,
+                                        os.path.join(output_dir, ".work"))
+    mm = ShardMetadataManager(analyze_dir, schema=schema, cache_dir=analyze_dir)
     n_total = mm.num_docs
-    print(f"[Report] Pool: {n_total:,} docs "
+    print(f"[Report] Pool: {n_total:,} docs in {analyze_dir} "
           f"(metadata {'cached' if time.time() - t0 < 5 else 'scanned fresh'}, "
           f"{time.time() - t0:.0f}s)")
 
@@ -127,11 +174,11 @@ def main():
     )
     config = CLIMBConfig(
         discovery=disc_cfg,
-        data_dir=args.data_dir,
+        data_dir=analyze_dir,
         embedding_cache_dir=embedding_cache_root,
         schema_path=schema_path,
     )
-    pool_cache_dir = CLIMBPipeline(config)._pool_embedding_cache_dir(args.data_dir)
+    pool_cache_dir = CLIMBPipeline(config)._pool_embedding_cache_dir(analyze_dir)
     if pool_cache_dir:
         print(f"[Report] Pool-level embedding/kmeans cache: {pool_cache_dir}")
 

@@ -48,11 +48,19 @@ def _read_shard_metadata(shard_path: str, schema_dict: dict) -> dict:
     basename = os.path.basename(shard_path)
     parsed_idx = _parse_shard_idx(basename)
 
-    # Domain/cluster column — convert string to int if needed
+    # Domain/cluster column — convert string to int if needed.
+    # With schema domain_names, code against THAT fixed category order so
+    # the int codes mean the same thing in every shard (pd.Categorical's
+    # default codes are per-shard first-appearance order — two shards whose
+    # first domain differs would silently swap ids). Unknown values → -1.
     domain_col = schema_dict["domain_col"]
     domain_data = pf[domain_col]
+    domain_names = schema_dict.get("domain_names")
     if pd.api.types.is_numeric_dtype(domain_data):
         domain_arr = domain_data.to_numpy(dtype=np.int64)
+    elif domain_names:
+        domain_arr = pd.Categorical(
+            domain_data, categories=list(domain_names)).codes.astype(np.int64)
     else:
         domain_arr = pd.Categorical(domain_data).codes.astype(np.int64)
 
@@ -233,6 +241,7 @@ class ShardMetadataManager:
 
         schema_dict = {
             "domain_col": self._schema.domain_col,
+            "domain_names": self._schema.domain_names,
             "quality_cols": list(self._schema.quality_cols),
             "text_col": self._schema.text_col,
             "char_count_col": self._schema.char_count_col,
@@ -363,8 +372,10 @@ class ShardMetadataManager:
             print(f"[ShardMetadataManager] Failed to save cache: {e}")
 
     def _schema_key(self) -> str:
+        domain_names = self._schema.domain_names or []
         return (
             f"{self._schema.domain_col}"
+            f":{','.join(domain_names)}"
             f":{','.join(self._schema.quality_cols)}"
             f":{self._schema.text_col}"
             f":{self._schema.char_count_col}"
