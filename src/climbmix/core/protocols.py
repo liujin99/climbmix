@@ -61,3 +61,20 @@ class Predictor(Protocol):
     def predict(self, configs: List[MixtureConfig]) -> npt.NDArray[np.float64]: ...
     def predict_and_rank(self, configs: List[MixtureConfig]) -> List[int]: ...
     def score(self, configs: List[MixtureConfig], losses: npt.NDArray[np.float64]) -> float: ...
+
+
+@runtime_checkable
+class ExpExecutor(Protocol):
+    """Execution backend for proxy experiments (the contract the iterative
+    bootstrapper relies on — it duck-types run_batch and probes for the
+    optional experiment_id_base kwarg). Implementations: ProxyRunner (local
+    subprocesses) and RemoteExecutor (ModelArts jobs, results materialize as
+    local exp_XXXX dirs)."""
+
+    def run_batch(
+        self,
+        configs: List[MixtureConfig],
+        data_dir: Optional[str] = None,
+        output_dir: Optional[str] = None,
+        experiment_id_base: int = 0,
+    ) -> List: ...

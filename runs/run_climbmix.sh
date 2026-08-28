@@ -113,6 +113,33 @@ OUTPUT_DIR="${OUTPUT_DIR:-$CLIMBMIX_DIR/result/${EXP_NAME}_current}"
 # 改名为已完成形态 result/${EXP_NAME}_<ts> (stage_gate.sh 生命周期)
 COMPLETION_MARKERS=(".done_eval_climb" ".done_eval_random")
 
+# ── Remote execution fleet (ModelArts jobs + OBS data plane) ──
+# 生产混合舰队: 本地 8 卡 + 远端 ModelArts 作业并行跑 proxy 实验。
+# 全部为"执行形态"参数 (传输/配额/路径), 不改变实验语义 — 与 NUM_NPU
+# 同一策略, 刻意不进 stage 指纹 (stage_gate.sh:51 先例: 池形状可变)。
+# REMOTE_ENABLED=1 时 Step 1-3 的 search 用 RemoteExecutor:
+#   - 本地: 混数据 + 上传分片到 OBS + 提交作业 + 回收结果为本地 exp_XXXX
+#   - 远端作业: 下载分片 -> torchrun mid_train -> base_eval -> 结果上 OBS
+#   - REMOTE_LOCAL_PARALLEL=1 (默认): 主节点本地卡也加入舰队 — 前
+#     NUM_NPU/NPU_PER_EXP 个配置走本地并行, 其余远端作业, 全程并发
+#   - REMOTE_NPU_PER_JOB 默认 = NPU_PER_EXP (k 全舰队一致, 分数可比性,
+#     docs/parallel_k_selection.md); 想让本地卡出力需 NPU_PER_EXP < NUM_NPU
+# 前置 (M1, docs/remote_setup.md): 镜像/配额/AK-SK 勘察 + 大资产上 OBS
+# (nanochat-npu 代码, d20 ckpt, tokenizer, eval_bundle/stem)。
+# 验证 (M3): scripts/dispatch_remote.py 单发 exp + Δstem_metric < 0.002。
+REMOTE_ENABLED="${REMOTE_ENABLED:-0}"
+REMOTE_LOCAL_PARALLEL="${REMOTE_LOCAL_PARALLEL:-1}"
+REMOTE_OBS_PREFIX="${REMOTE_OBS_PREFIX:-}"
+REMOTE_BACKEND="${REMOTE_BACKEND:-modelarts}"     # modelarts | mock (本地仿真)
+REMOTE_IMAGE="${REMOTE_IMAGE:-}"                  # SWR 镜像 URI
+REMOTE_FLAVOR="${REMOTE_FLAVOR:-}"                # 910B4 规格名
+REMOTE_POOL_NAME="${REMOTE_POOL_NAME:-}"          # 专属池 (可空)
+REMOTE_NPU_PER_JOB="${REMOTE_NPU_PER_JOB:-$NPU_PER_EXP}"  # 每作业卡数 (单 exp 不跨节点)
+REMOTE_MAX_JOBS="${REMOTE_MAX_JOBS:-14}"          # 最大并发作业数
+REMOTE_STORAGE_KIND="${REMOTE_STORAGE_KIND:-moxing}"  # 容器内存储后端
+REMOTE_STORAGE_ROOT="${REMOTE_STORAGE_ROOT:-}"    # mock 后端专用: 假 OBS 根目录
+REMOTE_JOB_TIMEOUT_H="${REMOTE_JOB_TIMEOUT_H:-6}" # 单作业超时 (小时)
+
 # ── HF download endpoint ──
 # The corporate proxy (proxy.modelarts.com) selectively rejects Python's bare
 # CONNECT tunnels to huggingface.co (observed: 90+ consecutive 503s across two
@@ -199,6 +226,54 @@ source "$CLIMBMIX_DIR/runs/lib/stage_gate.sh"
 run_stage_gate
 
 # ── Pre-flight ──
+# Remote fleet config generation (REMOTE_* -> RemoteConfig JSON). Execution-
+# shape only; deliberately absent from FP_SEARCH_PARAMS (num_npu precedent).
+REMOTE_CONFIG_ARG=""
+if [ "$REMOTE_ENABLED" = "1" ]; then
+    case "$REMOTE_OBS_PREFIX" in
+        obs://*) ;;
+        "") echo "✗ REMOTE_ENABLED=1 requires REMOTE_OBS_PREFIX (obs://bucket/prefix)"; exit 1 ;;
+        *) echo "✗ REMOTE_OBS_PREFIX must start with obs:// (got: $REMOTE_OBS_PREFIX)"; exit 1 ;;
+    esac
+    mkdir -p "$OUTPUT_DIR"
+    REMOTE_CONFIG_PATH="$OUTPUT_DIR/remote_config.json"
+    REMOTE_CONFIG_ARG="--remote-config $REMOTE_CONFIG_PATH"
+    if [ "$REMOTE_LOCAL_PARALLEL" = "1" ]; then REMOTE_LP_JSON=true; else REMOTE_LP_JSON=false; fi
+    python3 - "$REMOTE_CONFIG_PATH" <<PYEOF
+import json, sys
+cfg = {
+    "obs_prefix": "$REMOTE_OBS_PREFIX",
+    "backend": "$REMOTE_BACKEND",
+    "image": "$REMOTE_IMAGE",
+    "flavor": "$REMOTE_FLAVOR",
+    "pool_name": "$REMOTE_POOL_NAME",
+    "npu_per_job": int("${REMOTE_NPU_PER_JOB}"),
+    "max_concurrent_jobs": int("${REMOTE_MAX_JOBS}"),
+    "local_parallel": $REMOTE_LP_JSON,
+    "storage_kind": "$REMOTE_STORAGE_KIND",
+    "storage_root": "$REMOTE_STORAGE_ROOT",
+    "job_timeout_s": float("${REMOTE_JOB_TIMEOUT_H}") * 3600.0,
+    "job_env": {"HF_ENDPOINT": "${HF_ENDPOINT}"},
+}
+with open(sys.argv[1], "w") as f:
+    json.dump(cfg, f, indent=2)
+PYEOF
+    echo "  Remote fleet: ${REMOTE_MAX_JOBS} jobs x ${REMOTE_NPU_PER_JOB} NPU (backend=${REMOTE_BACKEND}, prefix=${REMOTE_OBS_PREFIX})"
+    if [ "$REMOTE_LOCAL_PARALLEL" = "1" ]; then
+        if [ "$NPU_PER_EXP" -lt 1 ] || [ "$NPU_PER_EXP" -ge "$NUM_NPU" ] || [ $((NUM_NPU % NPU_PER_EXP)) -ne 0 ]; then
+            echo "  ⚠ REMOTE_LOCAL_PARALLEL=1 but NPU_PER_EXP=${NPU_PER_EXP} does not slice NUM_NPU=${NUM_NPU}: master-node NPUs will IDLE (need a proper divisor < NUM_NPU)"
+        elif [ "$REMOTE_NPU_PER_JOB" != "$NPU_PER_EXP" ]; then
+            echo "  ⚠ remote k (REMOTE_NPU_PER_JOB=$REMOTE_NPU_PER_JOB) != local k (NPU_PER_EXP=$NPU_PER_EXP): k should stay fleet-wide fixed for score comparability"
+        else
+            echo "  Hybrid fleet: local $((NUM_NPU / NPU_PER_EXP)) x ${NPU_PER_EXP} NPU + ${REMOTE_MAX_JOBS} remote jobs x ${REMOTE_NPU_PER_JOB} NPU"
+        fi
+    fi
+    [ "$REMOTE_BACKEND" = "mock" ] || [ "$REMOTE_STORAGE_KIND" = "local" ] || {
+        # real backend: image+flavor are mandatory (fail here, not mid-search)
+        [ -n "$REMOTE_IMAGE" ] && [ -n "$REMOTE_FLAVOR" ] || { echo "✗ REMOTE_ENABLED=1 (real backend) requires REMOTE_IMAGE and REMOTE_FLAVOR"; exit 1; }
+    }
+fi
+
 echo -e "\n════════════════════════════════════════════════════════════"
 echo "  ClimbMix: d${PROXY_DEPTH} proxy → d${TARGET_DEPTH} target  |  $OUTPUT_DIR"
 echo "  NPU: ${NUM_NPU}x910B4, npu_per_exp=${NPU_PER_EXP} ($((NUM_NPU / NPU_PER_EXP)) parallel)"
@@ -259,6 +334,7 @@ else
         --embedding-cache-dir "$EMBEDDING_CACHE_DIR" \
         --resume-search \
         --schema "$CLIMBMIX_DIR/config/schema_stem.yaml" \
+        $REMOTE_CONFIG_ARG \
         --skip-target
 fi
 

@@ -126,6 +126,16 @@ def main():
     # ── Dry run ──
     parser.add_argument("--dry-run", action="store_true")
 
+    # ── Remote execution (production mixed fleet; execution-SHAPE only —
+    # deliberately NOT fingerprinted, same policy as num_npu) ──
+    parser.add_argument("--remote-config", type=str, default="",
+                        help="RemoteConfig JSON file: dispatch proxy "
+                             "experiments as ModelArts jobs (OBS data plane). "
+                             "Empty = local execution only. All knobs are "
+                             "transport/quota shape — none change experiment "
+                             "semantics, so this flag is excluded from the "
+                             "stage fingerprints.")
+
     # ── Cache / Resume ──
     parser.add_argument("--cluster-cache-dir", type=str, default=None,
                         help="Directory with cached cluster info (skip embedding clustering if exists)")
@@ -256,8 +266,17 @@ def main():
     proxy_runner = None
     target_runner = None
     if not args.dry_run:
-        from climbmix.pipeline.proxy_runner import ProxyRunner
-        proxy_runner = ProxyRunner(config)
+        if args.remote_config:
+            from climbmix.remote.remote_executor import RemoteConfig, RemoteExecutor
+            remote_config = RemoteConfig.from_json_file(args.remote_config)
+            proxy_runner = RemoteExecutor(config, remote_config)
+            print(f"  Remote:     {remote_config.backend} backend, "
+                  f"{remote_config.max_concurrent_jobs} concurrent jobs x "
+                  f"{remote_config.npu_per_job} NPU"
+                  + (" + local NPUs (hybrid fleet)" if remote_config.local_parallel else ""))
+        else:
+            from climbmix.pipeline.proxy_runner import ProxyRunner
+            proxy_runner = ProxyRunner(config)
 
         if not args.skip_target:
             from climbmix.pipeline.target_runner import TargetRunner

@@ -42,6 +42,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from climbmix.core.types import MixtureConfig, MixtureWeights, ProxyResult, CLIMBConfig
 from climbmix.sampling.data_selector import select_data_by_mixture
+from climbmix.pipeline.nanochat_cmds import (
+    build_mid_train_cmd as _nc_build_mid_train_cmd,
+    build_eval_cmd as _nc_build_eval_cmd,
+    build_subprocess_env as _nc_build_subprocess_env,
+    make_eval_base_dir as _nc_make_eval_base_dir,
+    claim_eval_csv as _nc_claim_eval_csv,
+    parse_eval_results as _nc_parse_eval_results,
+)
 
 
 class ProxyRunner:
@@ -242,7 +250,32 @@ class ProxyRunner:
 
         csv_path = self._claim_eval_csv(exp_dir, model_tag, eval_base)
 
-        self._copy_mid_checkpoint(model_tag, exp_dir)
+        return self._finalize_exp(
+            exp_dir=exp_dir, model_tag=model_tag,
+            mixture_config=mixture_config, experiment_id=experiment_id,
+            csv_path=csv_path, mid_rc=mid_rc, eval_rc=eval_rc,
+            t_start=t_start, copy_ckpt=True,
+        )
+
+    def _finalize_exp(
+        self,
+        exp_dir: str,
+        model_tag: str,
+        mixture_config: MixtureConfig,
+        experiment_id: int,
+        csv_path: Optional[str],
+        mid_rc: int,
+        eval_rc: int,
+        t_start: float,
+        copy_ckpt: bool = True,
+    ) -> ProxyResult:
+        """Shared tail of run_experiment (local AND remote executors):
+        copy the mid checkpoint, parse the claimed/downloaded CSV, write
+        meta.json, return the ProxyResult. Kept on ProxyRunner so remote
+        results produce byte-identical meta.json shape (resume depends on it).
+        """
+        if copy_ckpt:
+            self._copy_mid_checkpoint(model_tag, exp_dir)
         per_task, val_accuracy, stem_metric, per_task_nlls, stem_nll = \
             self._parse_eval_results(csv_path)
 
@@ -556,57 +589,13 @@ class ProxyRunner:
         nproc_per_node: Optional[int] = None,
         master_port: Optional[int] = None,
     ) -> List[str]:
-        nproc = nproc_per_node or self.npu_devices
-        cmd = [
-            "torchrun", "--standalone",
-            f"--nproc_per_node={nproc}",
-        ]
-        if master_port is not None:
-            cmd += ["--master_port", str(master_port)]
-        cmd += [
-            "-m", "scripts.mid_train", "--",
-            "--run", model_tag,
-            "--device-type", self.device_type,
-            "--model-tag", model_tag,
-            "--num-iterations", str(self.proxy_num_iterations),
-            "--lr-scale", str(self.proxy_lr_scale),
-            "--warmup-ratio", str(self.proxy_warmup),
-            "--warmdown-ratio", str(self.proxy_warmdown),
-            # Base checkpoints save optimizer state as PER-RANK SHARDS
-            # (optim_<step>_rank<r>.pt; 8-rank pretrain -> lm_head/wte
-            # moments are [vocab/8, n_embd]). This proxy runs at a different
-            # world size (npu_per_exp), and torch's load_state_dict does NOT
-            # shape-check state tensors: the mismatched shard is silently
-            # assigned and explodes at the first AdamW lerp_ (aclnnInplaceLerp
-            # EZ1001 "32768 and 4096 cannot broadcast", speedrun 2026-08-26).
-            # Fresh optimizer state is also the CLIMB-correct semantics: proxy
-            # experiments are short fine-tunes compared ACROSS mixtures, so
-            # every candidate must get identical (cold) optimizer state.
-            # LR inheritance is unaffected: lrs come from the pretrain meta
-            # (user_config), and the batch_ratio LR adjustment inside the
-            # load_optimizer block is a no-op here (proxy inherits
-            # total_batch_size from the same checkpoint).
-            "--load-optimizer", "0",
-            # flat = 零裁剪文档打包 (DeepSeek V3 式)。与 target 阶段
-            # (speedrun/run_climbmix Step 6) 及 quadmix STEM 实验保持同一
-            # 口径 —— "proxy 分数预测 target 表现" 的前提是数据打包方式一致。
-            # bos_bestfit 会裁掉 ~35% token, 且两阶段混用会使预测迁移失真。
-            "--loader", "flat",
-            # mid_train 默认 sample_every=500 会在 step 500 及 last_step 触发
-            # Engine.generate_batch(), 打碎 NPU 内存 → optimizer.step() OOM
-            # (quadmix af525ee 用崩溃换来的修复, 直接移植)。
-            "--sample-every", "-1",
-            # Disable the IN-TRAINING benchmark eval (--core-metric-every,
-            # default 500, fires unconditionally at last_step). The external
-            # base_eval right after training scores the same benchmarks
-            # anyway; the in-training copy measured ~2h10m per experiment on
-            # the speedrun (gsm8k_cot ~50min + math_cot_500 ~49min + 26 more
-            # tasks) — pure duplication. Val bpb (--eval-every) stays on as
-            # the training signal.
-            "--core-metric-every", "-1",
-            "--data-dir", mixture_data_dir,
-        ]
-        return cmd
+        return _nc_build_mid_train_cmd(
+            model_tag, mixture_data_dir, self.device_type,
+            self.proxy_num_iterations, self.proxy_lr_scale,
+            self.proxy_warmup, self.proxy_warmdown,
+            nproc_per_node=nproc_per_node, master_port=master_port,
+            npu_devices=self.npu_devices,
+        )
 
     def _build_eval_cmd(
         self,
@@ -614,29 +603,12 @@ class ProxyRunner:
         nproc_per_node: Optional[int] = None,
         master_port: Optional[int] = None,
     ) -> List[str]:
-        nproc = nproc_per_node or self.npu_devices
-        cmd = [
-            "torchrun", "--standalone",
-            f"--nproc_per_node={nproc}",
-        ]
-        if master_port is not None:
-            cmd += ["--master_port", str(master_port)]
-        cmd += [
-            "-m", "scripts.base_eval", "--",
-            "--eval", "core",
-            "--eval-benchmarks", self.eval_benchmarks,
-            "--model-tag", model_tag,
-            "--model-type", "mid",
-            "--device-type", self.device_type,
-        ]
-        # Subsample cap for cheap proxy evals: base_eval shuffles each task
-        # with a FIXED seed (random.Random(1337)) before truncating
-        # (base_eval.py:356-359), so every experiment scores the SAME subset
-        # — scores stay comparable across candidate mixtures. -1 (default) =
-        # full eval sets (production); the speedrun passes a small cap.
-        if self.eval_max_per_task and self.eval_max_per_task > 0:
-            cmd += ["--max-per-task", str(self.eval_max_per_task)]
-        return cmd
+        return _nc_build_eval_cmd(
+            model_tag, self.device_type, self.eval_benchmarks,
+            self.eval_max_per_task,
+            nproc_per_node=nproc_per_node, master_port=master_port,
+            npu_devices=self.npu_devices,
+        )
 
     def _run_subprocess(
         self,
@@ -648,23 +620,15 @@ class ProxyRunner:
         base_dir_override: Optional[str] = None,
     ) -> int:
         log_path = os.path.join(exp_dir, f"{stage_name}.log")
-        env = os.environ.copy()
-        env["PYTHONPATH"] = self.nanochat_dir + ":" + env.get("PYTHONPATH", "")
-        # base_dir_override: private NANOCHAT_BASE_DIR for eval subprocesses
-        # (per-experiment symlink farm) — see _make_eval_base_dir.
-        env["NANOCHAT_BASE_DIR"] = base_dir_override or self.nanochat_base_dir
-
-        if device_ids is not None:
-            # ASCEND_RT_VISIBLE_DEVICES is the torch_npu-documented pinning var
-            # (logical npu:k = k-th entry of the mask). ASCEND_VISIBLE_DEVICES
-            # alone may be ignored by the runtime, which would pile every exp
-            # of a parallel batch onto physical device 0. Set both (the
-            # embedding workers pin with the RT var for the same reason).
-            env["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(str(d) for d in device_ids)
-            env["ASCEND_VISIBLE_DEVICES"] = ",".join(str(d) for d in device_ids)
-            env["RANK_SIZE"] = str(len(device_ids))
-        if master_port is not None:
-            env["MASTER_PORT"] = str(master_port)
+        # Env construction is shared with the remote worker (single source
+        # of truth — nanochat_cmds.build_subprocess_env): PYTHONPATH,
+        # NANOCHAT_BASE_DIR (with private-base-dir override for eval),
+        # NPU device pinning (both ASCEND vars + RANK_SIZE), MASTER_PORT.
+        env = _nc_build_subprocess_env(
+            self.nanochat_dir, self.nanochat_base_dir,
+            device_ids=device_ids, master_port=master_port,
+            base_dir_override=base_dir_override,
+        )
 
         print(f"  [{stage_name}] started (log: {log_path})")
         with open(log_path, "w") as log_f:
@@ -771,139 +735,16 @@ class ProxyRunner:
     # ── private eval base dir (parallel-safe CSV attribution) ──
 
     def _make_eval_base_dir(self, exp_dir: str, model_tag: str) -> str:
-        """Private NANOCHAT_BASE_DIR for this experiment's eval subprocess.
-
-        base_eval.py writes its results CSV to
-        {base_dir}/base_eval/mid_model_{step:06d}.csv — a step-only name with
-        NO model tag (base_eval.py:537) — and every proxy experiment finishes
-        at the same final step. With the shared base dir, two concurrent
-        evals overwrite each other's CSV and the wrong scores get attributed
-        silently (which used to force eval serialization behind a global
-        lock). A private base dir makes the collision physically impossible
-        and lets evals run fully in parallel.
-
-        Everything the eval READS is symlinked to the real shared data; the
-        two things it WRITES ({base_eval}/ CSV, {report}/) are private real
-        dirs inside exp_dir.
-        """
-        eval_base = os.path.join(exp_dir, "_eval_base")
-        # Rebuild from scratch on every eval attempt: a previously crashed
-        # eval may have left a partial CSV or download in the private dirs.
-        shutil.rmtree(eval_base, ignore_errors=True)
-
-        # Model checkpoint — mid_train just succeeded (or the marker verified
-        # it), so it must exist; refuse to eval anything else (fail-fast).
-        mid_src = os.path.join(self.nanochat_base_dir, "mid_checkpoints", model_tag)
-        if not os.path.isdir(mid_src):
-            raise FileNotFoundError(
-                f"mid checkpoint for eval not found: {mid_src} — refusing to "
-                f"evaluate a missing/stale model")
-        os.makedirs(os.path.join(eval_base, "mid_checkpoints"))
-        os.symlink(mid_src, os.path.join(eval_base, "mid_checkpoints", model_tag))
-
-        # Tokenizer — required by build_model (get_tokenizer / token_bytes).
-        tok_src = os.path.join(self.nanochat_base_dir, "tokenizer")
-        if not os.path.isdir(tok_src):
-            raise FileNotFoundError(
-                f"tokenizer not found at {tok_src} — eval cannot run")
-        os.symlink(tok_src, os.path.join(eval_base, "tokenizer"))
-
-        # Eval datasets: symlink when present (normal case — the shell
-        # pre-flight downloads them once). When absent, skip the link and let
-        # base_eval download its own copy into the private dir (correct but
-        # slow); warn so the operator can pre-download once instead.
-        for name in ("eval_bundle", "eval_stem"):
-            src = os.path.join(self.nanochat_base_dir, name)
-            if os.path.isdir(src):
-                os.symlink(src, os.path.join(eval_base, name))
-            else:
-                print(f"  [Eval] WARNING: {src} not found — eval will download "
-                      f"{name} into the private dir (slow)")
-
-        # Private writable output dirs (CSV + report); never shared.
-        os.makedirs(os.path.join(eval_base, "base_eval"), exist_ok=True)
-        os.makedirs(os.path.join(eval_base, "report"), exist_ok=True)
-        return eval_base
+        """Private NANOCHAT_BASE_DIR for this experiment's eval subprocess
+        (see nanochat_cmds.make_eval_base_dir — shared with the remote worker)."""
+        return _nc_make_eval_base_dir(self.nanochat_base_dir, exp_dir, model_tag)
 
     def _claim_eval_csv(self, exp_dir: str, model_tag: str, eval_base: str) -> Optional[str]:
         """Move the CSV written by THIS eval from its private base dir into
-        exp_dir.
-
-        The private dir was rebuilt empty immediately before the eval
-        subprocess started, so any mid_model_*.csv in it is unambiguously
-        ours — no lock and no mtime heuristics needed. Moving it out also
-        gives resume/debug a per-experiment record at eval_{model_tag}.csv.
-        """
-        csv_dir = os.path.join(eval_base, "base_eval")
-        try:
-            names = [f for f in os.listdir(csv_dir)
-                     if f.startswith("mid_model_") and f.endswith(".csv")]
-        except OSError:
-            names = []
-        if not names:
-            print(f"  [Eval] WARNING: base_eval exited 0 but wrote no CSV in "
-                  f"{csv_dir} — scores for {model_tag} will be NaN")
-            return None
-        newest = max(names,
-                     key=lambda f: os.path.getmtime(os.path.join(csv_dir, f)))
-        src = os.path.join(csv_dir, newest)
-        dst = os.path.join(exp_dir, f"eval_{model_tag}.csv")
-        shutil.move(src, dst)
-        print(f"  [Eval] Claimed {newest} -> {dst}")
-        return dst
+        exp_dir (see nanochat_cmds.claim_eval_csv)."""
+        return _nc_claim_eval_csv(exp_dir, model_tag, eval_base)
 
     def _parse_eval_results(self, csv_path: Optional[str]) -> tuple:
-        """Parse the eval CSV previously claimed into exp_dir by
-        _claim_eval_csv. csv_path=None (eval produced no readable output)
-        yields per_task=None — the search scores this experiment NaN."""
-        per_task: Optional[Dict[str, float]] = None
-        per_task_nlls: Optional[Dict[str, float]] = None
-        val_accuracy: float = 0.0
-        stem_metric: Optional[float] = None
-        stem_nll: float = 0.0
-
-        if csv_path is not None:
-            per_task = {}
-            per_task_nlls = {}
-            with open(csv_path) as f:
-                for line in f:
-                    parts = [p.strip() for p in line.strip().split(",")]
-                    if len(parts) >= 3:
-                        task_name = parts[0]
-                        centered_val = parts[2]
-                        nll_val = parts[3] if len(parts) >= 4 else "0.0"
-                        if task_name == "STEM":
-                            try:
-                                stem_metric = float(centered_val)
-                            except ValueError:
-                                pass
-                            try:
-                                stem_nll = float(nll_val)
-                            except ValueError:
-                                stem_nll = 0.0
-                            continue
-                        if task_name == "CORE":
-                            continue
-                        try:
-                            per_task[task_name] = float(centered_val)
-                        except ValueError:
-                            continue
-                        try:
-                            per_task_nlls[task_name] = float(nll_val)
-                        except ValueError:
-                            per_task_nlls[task_name] = 0.0
-
-        if stem_metric is not None:
-            val_accuracy = stem_metric
-        elif per_task:
-            task_subset = [per_task[t] for t in self.val_tasks if t in per_task]
-            if task_subset:
-                val_accuracy = sum(task_subset) / len(task_subset)
-
-        if stem_nll == 0.0 and per_task_nlls:
-            nll_subset = [per_task_nlls[t] for t in self.val_tasks if t in per_task_nlls]
-            if nll_subset:
-                stem_nll = sum(nll_subset) / len(nll_subset)
-
-        print(f"  [Eval] stem_metric={stem_metric}, val_accuracy={val_accuracy:.4f}, stem_nll={stem_nll:.4f}")
-        return per_task, val_accuracy, stem_metric, per_task_nlls, stem_nll
+        """Parse the eval CSV previously claimed/downloaded into exp_dir
+        (see nanochat_cmds.parse_eval_results)."""
+        return _nc_parse_eval_results(csv_path, self.val_tasks)
