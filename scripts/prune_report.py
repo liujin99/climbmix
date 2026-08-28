@@ -20,7 +20,11 @@ instant and a later run with the same sample size reuses them.
 Typical (server, full 100B pool, first run):
   python3 scripts/prune_report.py --data-dir /home/ma-user/work/100B_stem_parquet_filtered
   # ~20-40 min: one-time full-pool metadata scan (cached next to the shards),
-  # then ~1 min NPU embedding of the 20K sample + seconds of K-means.
+  # then ~18 min single-NPU embedding of the 100K sample (~95 docs/s) +
+  # minutes of K-means.  --sample-size 200000 doubles precision for ~35 min
+  # embedding; a smaller 20K is fast (~4 min) but leaves only ~20 docs per
+  # K_init=1000 cluster (cluster-mean SE ~0.11-0.22 — same order as the
+  # 0.25 threshold steps, sweep tails over-dispersed).
 Re-run: seconds (all caches hit).
 
 No NPU? --embedding-device cpu works (20K docs ≈ tens of minutes).
@@ -41,9 +45,12 @@ def main():
     parser.add_argument("--schema", default=None,
                         help="DatasetSchema YAML (default: config/schema_stem.yaml "
                              "next to this repo)")
-    parser.add_argument("--sample-size", type=int, default=20000,
+    parser.add_argument("--sample-size", type=int, default=100000,
                         help="docs to embed+cluster, sampled with the pipeline's "
-                             "seed-42 scheme (default 20000; speedrun value)")
+                             "seed-42 scheme (default 100000: ~100 docs per "
+                             "K_init=1000 cluster, cluster-mean SE ~0.05-0.10 "
+                             "on the 1-5 scale; 20K would leave ~20 docs/cluster "
+                             "and SE comparable to the 0.25 threshold steps)")
     parser.add_argument("--K-init", type=int, default=1000,
                         help="K-means clusters (default 1000 = production; "
                              "speedrun used 100)")
