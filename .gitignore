@@ -34,3 +34,6 @@ result/
 
 # Pool-keyed embedding/kmeans caches (content-hash dirs)
 cache/
+
+# opencode session data
+.opencode/

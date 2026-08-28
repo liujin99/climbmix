@@ -40,12 +40,13 @@ PROXY_NUM_ITERATIONS="${PROXY_NUM_ITERATIONS:-1000}"
 TARGET_STEPS="${TARGET_STEPS:-1000}"
 # Token caps for data selection (full pool ≈ 100B tokens / 116M docs — NOT capped means
 # every proxy exp would select the whole pool; that's the default 0, so always set these).
-# Proxy: 200M tokens/exp (~80-230K docs, ~1-2GB). 35 exps × 8 parallel: peak RAM ~18GB
-# (read_texts) and ~35-80GB disk total. Proxy trains 1000 iters × ~0.5-1M tokens ≈ 0.5-1B
-# tokens, so 200M data cycles 2.5-5x — same data:train ratio as the speedrun (10M/52M).
-# 2B/exp instead would peak 8×~23GB RAM (OOM risk) and churn 280-800GB of parquet.
+# Proxy: 400M tokens/exp = single-pass calibration (2026-08-28, TODO.md): training
+# consumes 524M (1000 iters × 524,288); mix = 400M STEM + 171M general ≈ 571M ≥
+# consumption → no silent loader cycling (200M gave epoch≈1.8; run-4 target log
+# showed epoch:4). Paper's 800M is its proxy CONSUMPTION (~394 × 2M batch), not a
+# cap; our 524M = 65% of paper (documented deviation, scoring_metric_design §12.3).
 # Target: 1B tokens ≈ d28 anneal budget (1000 iters × ~1M) ≈ 1 epoch, no repetition.
-PROXY_TARGET_TOKENS="${PROXY_TARGET_TOKENS:-200M}"
+PROXY_TARGET_TOKENS="${PROXY_TARGET_TOKENS:-400M}"
 TARGET_TOKENS="${TARGET_TOKENS:-1B}"
 CONFIGS_PER_ITER="${CONFIGS_PER_ITER:-20,10,5}"
 SEARCH_NUM_ITERATIONS="${SEARCH_NUM_ITERATIONS:-3}"

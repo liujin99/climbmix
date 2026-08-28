@@ -119,7 +119,7 @@ Wall = T(k) × N / C        （零空转，C = ⌊A/k⌋ 按节点装箱）
 
 ### 5.1 当前决策（2026-08-28）
 
-- **首个生产 run：λ_max ≈ 5h → k=4**。speedrun 已全绿（2026-08-28, STEM 0.1722, 归档 `speedrun_20260828_120406`），但首个生产 run 相对 speedrun 仍是规模跃迁：10B+ 池 embedding（吞吐未实测）、1000 步 × 全量 eval（单实验 18.6h@1卡 vs speedrun 62min）、RemoteExecutor 混合舰队首次实战（~22+ 并发）——灾难最大损失 ~74 卡时 @32卡池、半天内可确认没跑偏
+- **首个生产 run：λ_max ≈ 5h → k=4**。speedrun 已全绿（2026-08-28, STEM 0.1722, 归档 `speedrun_20260828_120406`），但首个生产 run 相对 speedrun 仍是规模跃迁：100B 池全量 embedding（单节点 43h，走 E 里程碑弹性多节点，见 TODO.md）、1000 步 × 全量 eval（单实验 18.6h@1卡 vs speedrun 62min）、RemoteExecutor 混合舰队首次实战（~22+ 并发）——灾难最大损失 ~74 卡时 @32卡池、半天内可确认没跑偏
 - **一次全绿后放宽：λ_max ≈ 10h → k=2**（省闲置省税）
 - target 阶段不参与本文档决策（固定 ws=8，1000 步 ≈ 5-6.5h）
 
@@ -135,4 +135,4 @@ Wall = T(k) × N / C        （零空转，C = ⌊A/k⌋ 按节点装箱）
 - S(k) 目前为双锚点模型推算（一致性很好）；可选实测钉死：在 8 卡机上同 config × 50 步 × {2,4} 卡（~1.5h）
 - λ_max 第二档（全绿后）取 10h 还是 18h，届时定
 - 8 卡节点占池比例（决定 k=8 是否实际可行）——首个 run 用 k=4，此项暂不阻塞
-- 10B+ 池 embedding 吞吐未实测（当前主进程单卡跑，可能 5-15h+，若 >10h 需要多卡分片选项）——独立于 k 决策，但同为生产前的时间预算项
+- 100B 池（116M docs）全量 embedding：已有 8 卡进程级并行实现（`embed_texts_streaming`，每卡一 worker，聚合 ~750 docs/s，docs/embedding_performance.md 实测）→ 单节点 ~43h；E 里程碑（TODO.md）按 shard 弹性多节点 → 43/J h。独立于 k 决策，但属生产关键路径
