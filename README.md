@@ -139,14 +139,31 @@ Each script auto-checks dependencies, NPU availability, disk space, and exits wi
 
 Both runners are resumable: **re-run the same command after an interruption.**
 
+- **Result-dir lifecycle** (`ls result/` is self-describing):
+  - `result/${EXP_NAME}_current/` — ACTIVE run (in progress, crashed, or green)
+  - `result/${EXP_NAME}_<ts>/` — COMPLETED: terminal `.done` markers all
+    present; renamed automatically at the end of a green run
+    (`mark_completed` in `runs/lib/stage_gate.sh`)
+  - `result/${EXP_NAME}_stale_<scope>_<ts>/` — abandoned mid-run; scope =
+    what changed: `search` (whole dir, search fingerprint), `target` (target
+    products only), `legacy` (old single-fingerprint format), `orphan`
+    (no fingerprints)
+  - every archive carries `archive_meta.json`: reason, timestamps, old→new
+    fingerprints, git HEAD, `was_complete`, moved items
+  - re-running a COMPLETED experiment is idempotent: the newest
+    `${EXP_NAME}_<ts>` whose search fingerprint matches is restored as
+    `_current` (all `.done` markers skip, zero NPU work; a target mismatch
+    then re-runs only Steps 4-8)
+  - old server layouts (`result/$EXP_NAME`, `*_stale_<ts>`,
+    `*_target_stale_<ts>`) migrate to the new names automatically on the
+    next run (idempotent, one-time)
 - **Stage-scoped fingerprint auto-reset**: on start, each script compares TWO
-  fingerprints against `result/$EXP_NAME/.fingerprint_search` and
+  fingerprints against `result/${EXP_NAME}_current/.fingerprint_search` and
   `.fingerprint_target` (each = stage-relevant repo sources + semantic params).
-  A SEARCH mismatch (search semantics changed) archives the whole dir as
-  `result/${EXP_NAME}_stale_<ts>`; a TARGET mismatch archives only target
-  products (Steps 4-8 rerun; search results are kept). Legacy single-
-  `.fingerprint` dirs are adopted unverified with
-  `MIGRATE_LEGACY_FINGERPRINT=1` (one-time migration), else archived.
+  A SEARCH mismatch (search semantics changed) archives the whole dir; a
+  TARGET mismatch archives only target products (Steps 4-8 rerun; search
+  results are kept). Legacy single-`.fingerprint` dirs are adopted unverified
+  with `MIGRATE_LEGACY_FINGERPRINT=1` (one-time migration), else archived.
   `num_npu` is deliberately NOT fingerprinted (parallel shape only — the NPU
   pool may shrink/grow mid-campaign). `runs/*.sh` edits alone (comments/echo)
   do NOT reset; param-array knobs do. Not covered: nanochat-npu edits, data
@@ -169,7 +186,7 @@ Both runners are resumable: **re-run the same command after an interruption.**
   the output dir (`result/myexp`), proxy tags (`climbmix_myexp_*`) and target
   tags (`d28_climb_myexp`) so parallel/sequential experiments never overwrite
   each other. Valid chars: `[A-Za-z0-9_-]`.
-- **Force fresh run**: change `EXP_NAME` or `rm -rf result/$EXP_NAME`.
+- **Force fresh run**: change `EXP_NAME` or `rm -rf result/${EXP_NAME}_current`.
 - **HF download endpoint**: `runs/*.sh` default `HF_ENDPOINT` to
   `https://hf-mirror.com` (override: `HF_ENDPOINT=https://huggingface.co bash runs/...`).
   The corporate proxy selectively refuses Python-issued CONNECT tunnels to

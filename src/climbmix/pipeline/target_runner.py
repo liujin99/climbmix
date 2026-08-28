@@ -361,6 +361,17 @@ class TargetRunner:
             "--model-tag", model_tag,
             "--model-type", "mid",
             "--device-type", self.device_type,
+            # 2026-08-28 Step-7 OOM (与 shells Step 7 同口径): 8x910B4 (32G)
+            # 上 d28 core eval 默认 core-eval-batch-size=16 的整块 forward 顶满
+            # torch 池, 任务末 barrier 的 HCCL allreduce 通信缓冲 (401MiB)
+            # 分配失败 (EL0004, allocator 记账之外)。
+            #   device-batch-size=16 — BPB-only 参数 (base_eval 只在 bpb 分支
+            #   读, --eval=core 下空操作), 对齐 quadmix; 32 是 8x910B3 (64G)
+            #   时代默认。
+            #   core-eval-batch-size=8 — core eval 的真实显存旋钮,
+            #   B3→B4 显存减半同步减半。
+            "--device-batch-size", "16",
+            "--core-eval-batch-size", "8",
         ]
         return cmd
 

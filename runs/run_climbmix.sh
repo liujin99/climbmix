@@ -3,14 +3,17 @@
 #  ClimbMix: STEM 数据混合优化 — 单脚本全流程 (d20 → d28)
 #
 #  用法:   bash runs/run_climbmix.sh
-#  实验:   EXP_NAME=myexp bash runs/run_climbmix.sh   (输出 result/myexp)
+#  实验:   EXP_NAME=myexp bash runs/run_climbmix.sh   (输出 result/myexp_current)
 #
 #  断点续跑 (直接重跑同一命令即可):
 #    - 阶段指纹匹配 → 自动续跑: 聚类/搜索状态/已完成实验/target 训练/eval 全部复用
-#    - search 指纹变(搜索语义代码或参数变更) → 旧目录归档 result/${EXP_NAME}_stale_<ts> 后全新开始
-#    - target 指纹变(仅 target 语义变更) → 只归档 target 产物, 搜索结果保留, Steps 4-8 重跑
+#    - search 指纹变(搜索语义代码或参数变更) → 归档 result/${EXP_NAME}_stale_search_<ts> 后全新开始
+#    - target 指纹变(仅 target 语义变更) → 只归档 target 产物 (result/${EXP_NAME}_stale_target_<ts>),
+#      搜索结果保留, Steps 4-8 重跑
 #  恢复粒度: 步骤级(.done) / 迭代级(search_state.json) / 实验级(exp_*/meta.json)
 #            / embedding 分片级(进度账本) / 训练内部不支持(整次重跑)
+#  生命周期: 活跃 = result/${EXP_NAME}_current; 正常跑完自动改名 result/${EXP_NAME}_<ts>
+#    (重跑同命令 → 自动恢复已完成 run, 全程跳过); 每个归档目录带 archive_meta.json。
 #  旧版单一 .fingerprint 目录: MIGRATE_LEGACY_FINGERPRINT=1 采纳(不校验)。
 #  num_npu 不进指纹(并行形状可变, 见 runs/lib/stage_gate.sh)。
 #  注意: nanochat-npu 侧代码变更、同名数据文件内容变化不在指纹检测范围内
@@ -82,7 +85,19 @@ TARGET_WARMDOWN="${TARGET_WARMDOWN:-0.9}"
 MID_DEVICE_BATCH_SIZE="${MID_DEVICE_BATCH_SIZE:-1}"
 # flat = 零裁剪文档打包 (DeepSeek V3 式), 与 proxy 搜索阶段及 quadmix 实验同口径
 MID_TRAIN_LOADER="${MID_TRAIN_LOADER:-flat}"
-EVAL_DEVICE_BATCH_SIZE="${EVAL_DEVICE_BATCH_SIZE:-32}"
+# BPB-only 旋钮: base_eval 只在 bpb 分支读 --device-batch-size
+# (base_eval.py:514/:522), 本流程 --eval=core 下是空操作; 32 是 8x910B3
+# (64G HBM) 时代默认, 16 对齐 quadmix 同硬件 d28 实证值, 防将来开 bpb 踩坑。
+EVAL_DEVICE_BATCH_SIZE="${EVAL_DEVICE_BATCH_SIZE:-16}"
+# core eval 的真实显存旋钮: --core-eval-batch-size (base_eval.py:417, 默认16)
+# 把 chunk 内样本 pad 到最长序列一次 forward (峰值主体是 logits B×T×V)。
+# 2026-08-28 speedrun Step-7 OOM 实证: 默认 16 的整块 forward 顶满 torch 池
+# (~24.5G), 任务末尾 dist.barrier() 处 HCCL 申请 401MiB allreduce 通信缓冲
+# 失败 (EL0004, allocator 记账之外, core_eval.py:412; 每任务后的
+# empty_cache 在 barrier 之后才跑)。生产 EVAL_MAX_PER_TASK=-1 时每卡条数
+# 更多, 但单 forward 峰值同样由 core_bs 决定。8x910B3(64G)→8x910B4(32G)
+# 显存减半 → batch 同步减半 16→8。
+EVAL_CORE_BATCH_SIZE="${EVAL_CORE_BATCH_SIZE:-8}"
 CORE_METRIC_EVERY="${CORE_METRIC_EVERY:--1}"
 NANOCHAT_DTYPE="${NANOCHAT_DTYPE:-bfloat16}"
 STEM_RATIO="${STEM_RATIO:-0.7}"
@@ -93,7 +108,10 @@ EVAL_BENCHMARKS="${EVAL_BENCHMARKS:-stem}"
 EVAL_MAX_PER_TASK="${EVAL_MAX_PER_TASK:--1}"
 NUM_NPU="${NUM_NPU:-8}"
 NPU_PER_EXP="${NPU_PER_EXP:-1}"
-OUTPUT_DIR="${OUTPUT_DIR:-$CLIMBMIX_DIR/result/$EXP_NAME}"
+OUTPUT_DIR="${OUTPUT_DIR:-$CLIMBMIX_DIR/result/${EXP_NAME}_current}"
+# 终态标记: 全部存在 => run 完整跑完, 末尾 mark_completed 把活跃目录
+# 改名为已完成形态 result/${EXP_NAME}_<ts> (stage_gate.sh 生命周期)
+COMPLETION_MARKERS=(".done_eval_climb" ".done_eval_random")
 
 # ── HF download endpoint ──
 # The corporate proxy (proxy.modelarts.com) selectively rejects Python's bare
@@ -167,6 +185,7 @@ FP_TARGET_PARAMS=(
     "mid_device_batch_size=$MID_DEVICE_BATCH_SIZE"
     "mid_train_loader=$MID_TRAIN_LOADER"
     "eval_device_batch_size=$EVAL_DEVICE_BATCH_SIZE"
+    "eval_core_batch_size=$EVAL_CORE_BATCH_SIZE"
     "core_metric_every=$CORE_METRIC_EVERY"
     "stem_ratio=$STEM_RATIO"
     "eval_benchmarks=$EVAL_BENCHMARKS"
@@ -361,6 +380,7 @@ run_eval() {
         --eval=core --eval-benchmarks="$EVAL_BENCHMARKS" \
         --max-per-task="$EVAL_MAX_PER_TASK" \
         --device-batch-size="$EVAL_DEVICE_BATCH_SIZE" \
+        --core-eval-batch-size="$EVAL_CORE_BATCH_SIZE" \
         --model-tag="$tag" --model-type=mid 2>&1 | tee "$OUTPUT_DIR/eval_${name}.log"
     )
     # base_eval writes a step-only CSV name (mid_model_{step}.csv) into the
@@ -410,3 +430,6 @@ python3 "$CLIMBMIX_DIR/src/climbmix/pipeline/report_generator.py" \
 echo -e "\n════════════════════════════════════════════════════════════"
 echo "  Done! → $OUTPUT_DIR"
 echo "════════════════════════════════════════════════════════════"
+
+# 正常跑完 → 活跃目录转已完成形态 (result/${EXP_NAME}_<ts>); 缺终态标记则保持活跃
+mark_completed
