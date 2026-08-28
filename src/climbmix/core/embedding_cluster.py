@@ -294,6 +294,19 @@ def embed_documents(
             actual_device = "cpu"
 
         if actual_device == "npu":
+            # Multi-NPU fan-out for large in-memory sample sets (the discovery
+            # subsample path embeds EMBEDDING_SAMPLE_SIZE docs through here;
+            # a single device serializes the whole sample on card 0). Below
+            # the threshold the single-device path wins (per-worker model
+            # load ~30-40s dominates; breakeven ~4.3K docs at ~94 docs/s/card).
+            n_npus = _npu_device_count()
+            if n_npus > 1 and len(texts) >= _MULTI_NPU_MIN_DOCS:
+                try:
+                    return _embed_documents_multi_npu(
+                        texts, model_name, batch_size, cache_path)
+                except Exception as e:
+                    print(f"[Embed] Multi-NPU embedding failed ({e}); "
+                          f"falling back to single device")
             try:
                 print(f"[Embed] Loading model: {model_name} (device=npu)")
                 t0 = time.time()
@@ -370,6 +383,204 @@ def embed_documents(
         del model
         _flush_device_cache(actual_device, "[Embed]")
 
+    return embeddings
+
+
+def _npu_device_count() -> int:
+    """Visible Ascend NPUs (0 if torch_npu unavailable or no device)."""
+    try:
+        import torch
+        return int(torch.npu.device_count())
+    except Exception:
+        return 0
+
+
+# Fan out in-memory embedding across NPUs only above this size: per-worker
+# model load (~30-40s) dominates small jobs; breakeven ~4.3K docs at
+# ~94 docs/s/card (measured, docs/embedding_performance.md).
+_MULTI_NPU_MIN_DOCS = 4096
+
+# Progress-line interval for the fan-out monitor thread.
+_EMBED_MONITOR_INTERVAL = 15.0
+
+
+def _fanout_bounds(n_texts: int, n_workers: int) -> List[int]:
+    """Contiguous chunk boundaries: n_workers chunks covering [0, n_texts)."""
+    bounds = [int(round(n_texts * (w / n_workers))) for w in range(n_workers + 1)]
+    bounds[0], bounds[-1] = 0, n_texts
+    for i in range(1, len(bounds)):
+        if bounds[i] < bounds[i - 1]:
+            bounds[i] = bounds[i - 1]
+    return bounds
+
+
+def _embed_texts_worker(worker_id, texts, start_row, model_name, batch_size,
+                        emb_dim, memmap_path, total_docs, shared_done):
+    """Worker process: embed a contiguous texts chunk on NPU worker_id.
+
+    Mirrors _embed_streaming_worker's process isolation (per-worker
+    ASCEND_RT_VISIBLE_DEVICES) but takes an in-memory texts list instead of
+    shard indices; results go into the shared memmap at [start_row, ...).
+    """
+    os.environ["ASCEND_RT_VISIBLE_DEVICES"] = str(worker_id)
+    os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+    os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+    os.environ["WANDB_SILENT"] = "true"
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+    import warnings
+    warnings.filterwarnings("ignore", category=UserWarning)
+    import time
+
+    if not texts:
+        print(f"[NPU {worker_id}] empty chunk, exiting", flush=True)
+        return
+
+    print(f"[NPU {worker_id}] Loading model...", flush=True)
+    model = _load_model_stream(model_name, "npu")
+    model.eval()
+    _repair_stella_buffers(model)
+    model.max_seq_length = 512
+    model.half()
+    print(f"[NPU {worker_id}] Model loaded (fp16, msl=512), {len(texts):,} docs",
+          flush=True)
+
+    all_emb = np.memmap(memmap_path, dtype=np.float32, mode='r+',
+                        shape=(total_docs, emb_dim))
+
+    t0 = time.time()
+    done = 0
+    nan_count = 0
+    slice_len = 1024
+    for off in range(0, len(texts), slice_len):
+        part = texts[off:off + slice_len]
+        emb = np.asarray(model.encode(
+            part, batch_size=batch_size, show_progress_bar=False,
+            normalize_embeddings=True), dtype=np.float32)
+        nan_mask = np.isnan(emb).any(axis=1)
+        if nan_mask.any():
+            nan_count += int(nan_mask.sum())
+            for k in np.where(nan_mask)[0]:
+                single = model.encode([part[k]], batch_size=1,
+                                      show_progress_bar=False,
+                                      normalize_embeddings=True)
+                emb[k] = np.asarray(single[0], dtype=np.float32)
+        if np.isnan(emb).any(axis=1).sum() > 0:
+            raise RuntimeError(
+                f"[NPU {worker_id}] docs still NaN after bs=1 retry — "
+                f"cannot recover, aborting to prevent data loss")
+        all_emb[start_row + off:start_row + off + len(part)] = emb
+        done += len(part)
+        shared_done[worker_id] = done
+    all_emb.flush()
+    del all_emb
+    nan_msg = f", {nan_count} NaN recovered" if nan_count else ""
+    print(f"[NPU {worker_id}] Done: {done:,} docs in {time.time() - t0:.0f}s"
+          f"{nan_msg}", flush=True)
+
+
+def _embed_documents_multi_npu(texts, model_name, batch_size, cache_path,
+                               worker_fn=None):
+    """Embed an in-memory texts list across all visible NPUs (process fan-out).
+
+    The discovery subsample path (EMBEDDING_SAMPLE_SIZE > 0) embeds a sample
+    list through embed_documents; with a single device that serializes the
+    whole sample on card 0. This mirrors embed_texts_streaming's proven
+    pattern: the parent loads the model once to learn emb_dim, releases it
+    and flushes the device cache, then one spawn-worker per NPU embeds a
+    contiguous chunk into a shared memmap; the aggregate lands in the normal
+    embedding cache.
+
+    worker_fn is a test seam for injecting a fake worker process target.
+    """
+    import tempfile
+    import threading
+    import multiprocessing as mp
+
+    n_npus = _npu_device_count()
+    n = len(texts)
+    print(f"[Embed] {n_npus} NPUs detected — embedding {n:,} docs with "
+          f"process-based parallelism")
+
+    t0 = time.time()
+    model = _load_model_stream(model_name, "npu")
+    model.eval()
+    _repair_stella_buffers(model)
+    model.half()
+    model.max_seq_length = 512
+    dummy = model.encode(["test"], show_progress_bar=False,
+                         normalize_embeddings=True)
+    emb_dim = int(np.asarray(dummy).shape[1])
+    del model, dummy
+    _flush_device_cache("npu", "[Embed]")
+
+    safe_texts = [t if t and len(t.strip()) > 0 else "empty" for t in texts]
+
+    ctx = mp.get_context("spawn")
+    shared_done = ctx.Array('q', n_npus)
+
+    def _monitor():
+        t1 = time.time()
+        while True:
+            time.sleep(_EMBED_MONITOR_INTERVAL)
+            done = sum(shared_done[i] for i in range(n_npus))
+            elapsed = time.time() - t1
+            speed = done / elapsed if elapsed > 0 else 0
+            eta = (n - done) / speed if speed > 0 else 0
+            alive = sum(1 for p in procs if p.is_alive())
+            print(f"[Embed] {done:,}/{n:,} docs ({done / n * 100:.1f}%), "
+                  f"{speed:.0f} docs/s, elapsed {elapsed:.0f}s, "
+                  f"ETA {eta:.0f}s, {alive}/{n_npus} workers", flush=True)
+            if alive == 0:
+                break
+
+    cache_dir = os.path.dirname(cache_path) if cache_path else tempfile.gettempdir()
+    os.makedirs(cache_dir, exist_ok=True)
+    memmap_path = os.path.join(cache_dir, "embedding_texts_memmap.tmp")
+    memmap_init = np.memmap(memmap_path, dtype=np.float32, mode='w+',
+                            shape=(n, emb_dim))
+    del memmap_init
+
+    bounds = _fanout_bounds(n, n_npus)
+    target_fn = worker_fn if worker_fn is not None else _embed_texts_worker
+    procs = []
+    for wid in range(n_npus):
+        p = ctx.Process(
+            target=target_fn,
+            args=(wid, safe_texts[bounds[wid]:bounds[wid + 1]], bounds[wid],
+                  model_name, max(batch_size, 512), emb_dim, memmap_path, n,
+                  shared_done),
+        )
+        p.start()
+        procs.append(p)
+
+    monitor = threading.Thread(target=_monitor, daemon=True)
+    monitor.start()
+    for p in procs:
+        p.join()
+    monitor.join()
+
+    try:
+        failed = [(i, p.exitcode) for i, p in enumerate(procs) if p.exitcode != 0]
+        if failed:
+            raise RuntimeError(f"{len(failed)} embedding workers failed: {failed}")
+        all_emb = np.memmap(memmap_path, dtype=np.float32, mode='r',
+                            shape=(n, emb_dim))
+        embeddings = np.array(all_emb)
+        del all_emb
+    finally:
+        try:
+            os.remove(memmap_path)
+        except OSError:
+            pass
+
+    elapsed = time.time() - t0
+    print(f"[Embed] Encoded {n:,} docs in {elapsed:.1f}s "
+          f"({n / elapsed:.0f} docs/s), dim={emb_dim}")
+
+    if cache_path:
+        atomic_savez(cache_path, embeddings=embeddings)
+        print(f"[Embed] Cached embeddings to: {cache_path}")
     return embeddings
 
 
