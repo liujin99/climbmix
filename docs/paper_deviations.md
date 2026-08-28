@@ -62,6 +62,9 @@ of four, and require at least five samples per leaf … halting training after
 结构一致(L1=L2=1.0、early_stopping_rounds=20、20% 验证集切分供早停与 R²),
 差异在容量参数(max_depth 3 vs 4、min_samples_leaf 3 vs 5)与
 n_estimators=500/lr=0.02/auto_adjust。
+注:`_compute_colsample`(predictor.py)的 colsample_bytree 公式在当前域
+(K_final≤15)恒被钳到 1.0,即休眠无操作——所有特征(簇配比)始终全量参与,
+非遗漏。
 
 ### D5/D6 聚类与合并
 论文:stella_en_400M_v5 嵌入 + FAISS 球面 K-means(K_init=1000)→ fasttext

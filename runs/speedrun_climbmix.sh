@@ -48,7 +48,10 @@ PROXY_DEPTH=20
 TARGET_DEPTH=28
 PROXY_NUM_ITERATIONS=50
 TARGET_STEPS=50
-CONFIGS_PER_ITER="2,3,2"
+# 6,6,6 (=18) 而非 2,3,2: N≥10 才触发验证集切分 + lgb.early_stopping
+# (iterative_bootstrapper._fit_predictor_with_val), 让唯一一次重跑
+# 覆盖生产全部路径; 追求最快冒烟可 CONFIGS_PER_ITER=2,3,2 覆盖。
+CONFIGS_PER_ITER="${CONFIGS_PER_ITER:-6,6,6}"
 SEARCH_NUM_ITERATIONS="${SEARCH_NUM_ITERATIONS:-3}"
 K_ENHANCED="${K_ENHANCED:-3}"
 K_CLUSTER_MAX="${K_CLUSTER_MAX:-15}"
