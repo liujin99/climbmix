@@ -35,6 +35,18 @@ and stage fingerprints unchanged.
       (`REMOTE_FLAVOR`).
 - [ ] Max concurrent jobs in the pool / region (drives `REMOTE_MAX_JOBS`;
       the k-selection doc's fleet sizing uses the same number).
+- [ ] **Submit behavior under quota pressure** (drives the dynamic-submission
+      policy, `remote_executor._submit_with_retry`): when the pool is full,
+      does submit FAIL with a quota/capacity error code, or does the job go
+      PENDING and queue server-side? Which HTTP/SDK error codes/texts mean
+      "retryable" (map them to `TransientSubmitError` in
+      `ModelArtsJobAPI.submit`) vs hard (bad image/auth/spec → RuntimeError)?
+- [ ] Is there a quota/usage QUERY API (free cards right now)? If yes, M3+
+      can pre-check capacity before each submission round instead of
+      learning it from rejections alone.
+- [ ] Preemption: can a running job be reclaimed by the pool (→ would justify
+      job-level checkpoint chaining later), or do jobs always run to
+      terminal state?
 - [ ] Submit ONE hello-world Ascend job from the console (image below,
       `npu-smi info` as the command) to prove quota + network end to end.
 

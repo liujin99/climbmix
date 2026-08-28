@@ -38,6 +38,14 @@ class JobStatus(str, Enum):
                         JobStatus.CANCELLED)
 
 
+class TransientSubmitError(Exception):
+    """submit() rejected for a RETRYABLE reason — capacity/quota exhausted,
+    API throttling, transient service errors. The caller should back off and
+    retry: shared NPU pools fluctuate (10-200 cards), so a rejected job now
+    often fits minutes later. Hard failures (bad image/auth/argv) keep
+    raising RuntimeError — retrying those is pointless."""
+
+
 @runtime_checkable
 class JobAPI(Protocol):
     def submit(self, name: str, command: List[str],
@@ -65,10 +73,28 @@ class MockJobAPI:
             os.environ.get("TMPDIR", "/tmp"), "mock_jobs")
         os.makedirs(self._log_dir, exist_ok=True)
         self.submit_count = 0
+        self.submit_attempts = 0
+        # Test injection knobs (capacity simulation):
+        #   fail_submits_remaining: next N submit ATTEMPTS raise
+        #     TransientSubmitError ("pool full") — exercises backoff/retry.
+        #   fail_submits_hard: next N submit attempts raise RuntimeError —
+        #     a hard fleet error (bad image/auth).
+        self.fail_submits_remaining = 0
+        self.fail_submits_hard = 0
 
     def submit(self, name: str, command: List[str],
                env: Optional[Dict[str, str]] = None,
                workdir: Optional[str] = None) -> str:
+        with self._lock:
+            self.submit_attempts += 1
+            if self.fail_submits_remaining > 0:
+                self.fail_submits_remaining -= 1
+                raise TransientSubmitError(
+                    f"mock capacity exhausted ({self.fail_submits_remaining} "
+                    f"rejections queued after this one)")
+            if self.fail_submits_hard > 0:
+                self.fail_submits_hard -= 1
+                raise RuntimeError("mock hard submit error (bad image)")
         job_id = f"mock-{uuid.uuid4().hex[:12]}"
         log_path = os.path.join(self._log_dir, f"{job_id}.log")
         popen_env = os.environ.copy()
@@ -145,6 +171,10 @@ class ModelArtsJobAPI:
     submit() composes the job's boot shell around the worker argv:
       download assets bundle (cached in /home/ma-user/work) ->
       python remote_worker.py --spec-uri ... --storage moxing
+    Error mapping (M1): API responses meaning quota/capacity/throttling
+    raise TransientSubmitError (executor backs off and retries — the pool
+    fluctuates); everything else raises RuntimeError (hard, burns the
+    config like any experiment failure).
     The interface below is final; only the SDK calls are missing.
     """
 

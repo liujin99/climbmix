@@ -8,6 +8,14 @@ Architecture (2026-08-28 production plan):
     result/} per experiment; {obs_prefix}/assets/ = worker code bundle.
   - ModelArts Job API = compute plane: one job per experiment
     (npu_per_job cards each, no cross-node collectives).
+  - Dynamic submission: the shared pool fluctuates (10-200 cards), so a
+    batch does NOT assume one fixed-size submission burst — capacity
+    rejections (TransientSubmitError) back off and retry (a config is
+    never burned by transient quota), in-flight jobs self-regulate to the
+    real quota, and one iteration's jobs land in multiple submission
+    rounds as capacity frees. Local mixture prep is semaphore-bounded
+    (max_prep_parallel) so a high max_concurrent_jobs only buys more
+    in-flight JOBS, not more concurrent preps.
   - Materialization: after a job succeeds, its result.json + logs + eval CSV
     download into the LOCAL exp_XXXX/ dir and the SHARED finalize path
     (ProxyRunner._finalize_exp) writes meta.json — the exact same shape a
@@ -42,7 +50,7 @@ import numpy as np
 from climbmix.core.types import CLIMBConfig, MixtureConfig, ProxyResult
 from climbmix.pipeline.proxy_runner import ProxyRunner
 from climbmix.remote.exp_spec import ExpSpec, SPEC_VERSION
-from climbmix.remote.job_api import JobStatus, MockJobAPI, ModelArtsJobAPI
+from climbmix.remote.job_api import JobStatus, MockJobAPI, ModelArtsJobAPI, TransientSubmitError
 from climbmix.remote.obs import MockObsStorage, ModelArtsObsStorage
 
 
@@ -89,6 +97,19 @@ class RemoteConfig:
 
     # ── scheduling ──
     max_concurrent_jobs: int = 8
+    # Dynamic submission (shared pool fluctuates 10-200 cards): a submit
+    # rejected for capacity/quota is RETRIED with exponential backoff until
+    # submit_retry_timeout_s — the config is never burned by transient
+    # rejections, and in-flight jobs self-regulate to the real quota (an
+    # iteration's configs submit in multiple rounds as capacity frees).
+    submit_retry_timeout_s: float = 24 * 3600.0
+    submit_retry_initial_s: float = 30.0
+    submit_retry_max_s: float = 600.0
+    # Local prep+upload concurrency for the REMOTE pipeline (semaphore).
+    # Kept small so a high max_concurrent_jobs cannot make 1.5GB/exp
+    # prep+upload runs stampede the master node; submit threads pull from
+    # the prepped specs. (Local-slice prep is bounded by its own NPU slots.)
+    max_prep_parallel: int = 4
     # Hybrid fleet: also run experiments on the LOCAL NPUs via the parent
     # ProxyRunner parallel path (requires npu_per_exp in [1, npu_devices)).
     # Configs[:n_local] run locally, the rest remotely.
@@ -149,6 +170,17 @@ class RemoteConfig:
                     "local simulation backend")
         if self.npu_per_job < 1:
             raise ValueError("RemoteConfig.npu_per_job must be >= 1")
+        if self.max_concurrent_jobs < 1:
+            raise ValueError("RemoteConfig.max_concurrent_jobs must be >= 1")
+        if self.submit_retry_timeout_s <= 0:
+            raise ValueError("RemoteConfig.submit_retry_timeout_s must be > 0")
+        if self.submit_retry_initial_s <= 0:
+            raise ValueError("RemoteConfig.submit_retry_initial_s must be > 0")
+        if self.submit_retry_max_s < self.submit_retry_initial_s:
+            raise ValueError("RemoteConfig.submit_retry_max_s must be >= "
+                             "submit_retry_initial_s")
+        if self.max_prep_parallel < 1:
+            raise ValueError("RemoteConfig.max_prep_parallel must be >= 1")
 
 
 class RemoteExecutor(ProxyRunner):
@@ -173,6 +205,10 @@ class RemoteExecutor(ProxyRunner):
         super().__init__(config)
         self.remote = remote_config
         self._obs_lock = threading.Lock()
+        self._prep_sem = threading.BoundedSemaphore(remote_config.max_prep_parallel)
+        # First hard submit error (bad image/auth): recorded so sibling
+        # configs in the same batch burn fast instead of wasting prep.
+        self._submit_hard_error: Optional[str] = None
 
         if job_api is not None:
             self.job_api = job_api
@@ -323,6 +359,47 @@ class RemoteExecutor(ProxyRunner):
                 f"upload: {ckpt_dir}")
         self._upload_dir(ckpt_dir, f"{result_uri.rstrip('/')}/mid_checkpoint")
 
+    # ── dynamic submission ──
+
+    def _submit_with_retry(self, name: str, command: List[str],
+                           env: Dict[str, str], experiment_id: int) -> str:
+        """submit() with exponential backoff on TransientSubmitError.
+
+        The shared NPU pool fluctuates, so rejections are expected: back off
+        and retry until submit_retry_timeout_s. Retrying threads hold a pool
+        slot but no resources — as sibling jobs finish and free quota, a
+        retry lands, which is exactly how one iteration's configs end up
+        submitted in multiple rounds. A hard (non-transient) error is
+        recorded for fast-fail of siblings and raised immediately."""
+        backoff = self.remote.submit_retry_initial_s
+        deadline = time.time() + self.remote.submit_retry_timeout_s
+        attempt = 0
+        last_warn = 0.0
+        while True:
+            attempt += 1
+            try:
+                return self.job_api.submit(name=name, command=command, env=env)
+            except TransientSubmitError as e:
+                if time.time() >= deadline:
+                    raise RuntimeError(
+                        f"submit for experiment {experiment_id} still "
+                        f"rejected after {attempt} attempts over "
+                        f"{self.remote.submit_retry_timeout_s/60:.0f}m "
+                        f"(retry timeout); last error: {e}") from e
+                now = time.time()
+                if attempt == 1 or now - last_warn >= 300.0:
+                    print(f"  [Exp {experiment_id}] submit rejected "
+                          f"(attempt {attempt}: {e}) — capacity full? "
+                          f"backing off {backoff:.0f}s "
+                          f"(retry deadline in {(deadline - now)/60:.0f}m)")
+                    last_warn = now
+                time.sleep(backoff)
+                backoff = min(backoff * 2, self.remote.submit_retry_max_s)
+            except Exception as e:
+                if self._submit_hard_error is None:
+                    self._submit_hard_error = str(e)
+                raise
+
     # ── job lifecycle ──
 
     def _job_name(self, experiment_id: int) -> str:
@@ -408,6 +485,13 @@ class RemoteExecutor(ProxyRunner):
 
         if not eval_only:
             # Fresh (re)run: clear partial state, prep + upload the shards.
+            if self._submit_hard_error is not None:
+                # A sibling already hit a hard submit error (bad image/auth):
+                # every further submission would fail identically — burn this
+                # config now instead of wasting prep+upload on it.
+                raise RuntimeError(
+                    f"submission broken since hard error: "
+                    f"{self._submit_hard_error}")
             if os.path.isdir(exp_dir):
                 shutil.rmtree(exp_dir)
             os.makedirs(exp_dir, exist_ok=True)
@@ -418,10 +502,14 @@ class RemoteExecutor(ProxyRunner):
                   f"({self.stem_ratio*100:.0f}% STEM + "
                   f"{(1-self.stem_ratio)*100:.0f}% general)...")
             mixture_data_dir = os.path.join(exp_dir, "mixture_data")
-            self._prepare_mixture_data(
-                mixture_config, experiment_id, mixture_data_dir,
-                nproc_per_node=self.remote.npu_per_job)
-            self._upload_dir(mixture_data_dir, mix_uri)
+            # Prep+upload under the semaphore: bounded local load while the
+            # submit threads (max_concurrent_jobs of them) stay free to
+            # submit/wait — prepped specs feed submissions continuously.
+            with self._prep_sem:
+                self._prepare_mixture_data(
+                    mixture_config, experiment_id, mixture_data_dir,
+                    nproc_per_node=self.remote.npu_per_job)
+                self._upload_dir(mixture_data_dir, mix_uri)
             # The OBS copy is the source of truth for the job; free local disk.
             shutil.rmtree(mixture_data_dir, ignore_errors=True)
 
@@ -461,10 +549,11 @@ class RemoteExecutor(ProxyRunner):
         spec_uri = f"{exp_obs}/spec.json"
         self.obs.upload_bytes(spec.to_json().encode("utf-8"), spec_uri)
 
-        job_id = self.job_api.submit(
+        job_id = self._submit_with_retry(
             name=self._job_name(experiment_id),
             command=self._worker_argv(spec_uri),
             env=dict(self.remote.job_env),
+            experiment_id=experiment_id,
         )
         print(f"  [Exp {experiment_id}] submitted job {job_id} "
               f"(spec: {spec_uri})")

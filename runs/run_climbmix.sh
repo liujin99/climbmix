@@ -125,6 +125,10 @@ COMPLETION_MARKERS=(".done_eval_climb" ".done_eval_random")
 #     NUM_NPU/NPU_PER_EXP 个配置走本地并行, 其余远端作业, 全程并发
 #   - REMOTE_NPU_PER_JOB 默认 = NPU_PER_EXP (k 全舰队一致, 分数可比性,
 #     docs/parallel_k_selection.md); 想让本地卡出力需 NPU_PER_EXP < NUM_NPU
+#   - 动态提交 (池 10-200 卡波动): 提交被配额/频控拒绝时指数退避重试,
+#     配置不因瞬时拒绝烧毁; 一个迭代的作业随配额释放分多轮落地。
+#     在飞上限 = REMOTE_MAX_JOBS, 池变大时调高即可; 本地混料/上传并发
+#     由 REMOTE_MAX_PREP 限流, 不随作业上限放大。
 # 前置 (M1, docs/remote_setup.md): 镜像/配额/AK-SK 勘察 + 大资产上 OBS
 # (nanochat-npu 代码, d20 ckpt, tokenizer, eval_bundle/stem)。
 # 验证 (M3): scripts/dispatch_remote.py 单发 exp + Δstem_metric < 0.002。
@@ -136,7 +140,9 @@ REMOTE_IMAGE="${REMOTE_IMAGE:-}"                  # SWR 镜像 URI
 REMOTE_FLAVOR="${REMOTE_FLAVOR:-}"                # 910B4 规格名
 REMOTE_POOL_NAME="${REMOTE_POOL_NAME:-}"          # 专属池 (可空)
 REMOTE_NPU_PER_JOB="${REMOTE_NPU_PER_JOB:-$NPU_PER_EXP}"  # 每作业卡数 (单 exp 不跨节点)
-REMOTE_MAX_JOBS="${REMOTE_MAX_JOBS:-14}"          # 最大并发作业数
+REMOTE_MAX_JOBS="${REMOTE_MAX_JOBS:-14}"          # 在飞作业上限 (动态提交的上界)
+REMOTE_SUBMIT_RETRY_H="${REMOTE_SUBMIT_RETRY_H:-24}" # 提交被拒重试时限 (小时)
+REMOTE_MAX_PREP="${REMOTE_MAX_PREP:-4}"           # 本地混料/上传并发
 REMOTE_STORAGE_KIND="${REMOTE_STORAGE_KIND:-moxing}"  # 容器内存储后端
 REMOTE_STORAGE_ROOT="${REMOTE_STORAGE_ROOT:-}"    # mock 后端专用: 假 OBS 根目录
 REMOTE_JOB_TIMEOUT_H="${REMOTE_JOB_TIMEOUT_H:-6}" # 单作业超时 (小时)
@@ -250,6 +256,8 @@ cfg = {
     "pool_name": "$REMOTE_POOL_NAME",
     "npu_per_job": int("${REMOTE_NPU_PER_JOB}"),
     "max_concurrent_jobs": int("${REMOTE_MAX_JOBS}"),
+    "submit_retry_timeout_s": float("${REMOTE_SUBMIT_RETRY_H}") * 3600.0,
+    "max_prep_parallel": int("${REMOTE_MAX_PREP}"),
     "local_parallel": $REMOTE_LP_JSON,
     "storage_kind": "$REMOTE_STORAGE_KIND",
     "storage_root": "$REMOTE_STORAGE_ROOT",
