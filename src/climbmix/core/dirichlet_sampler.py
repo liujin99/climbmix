@@ -12,10 +12,11 @@ Paper (Section 3.1):
 
 For iterative bootstrapping (Section 3.2):
   Iteration 1: sample from Dirichlet centered on natural proportions
-  Iteration 2+: "randomly sample M new configurations from the top N
-  ranked configurations" — we implement this as Dirichlet sampling
-  centered around each top-N config's weights, which naturally
-  produces simplex-constrained samples without post-processing.
+  Iteration 2+: verbatim M-of-N draw from the predictor-ranked top-N
+  (paper §2.2, handled in iterative_bootstrapper.py — no perturbation).
+  sample_from_top_n (Dirichlet exploration around given bases) remains
+  for the FINAL selection refinement around the predictor's argmax
+  (see _search_full_design_space).
 """
 
 import numpy as np

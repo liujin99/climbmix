@@ -13,7 +13,7 @@
 | # | 维度 | 论文 | 我们 | 原因 |
 |---|------|------|------|------|
 | D1 | 搜索预算 | 112 configs(64/32/16,4:2:1,3 轮) | 35 configs(20/10/5,3 轮) | NPU 算力:~4h/config × 8×910B vs 论文 45 GPU-h × 256 H100 |
-| D2 | 引导采样 | "从预测排序 top-N 中随机采 M 个"(M/N 未给值) | top_n = 3 × sample_from_top_m(=32→96),且在 top-N 基础上做 Dirichlet 探索而非均匀抽取 | 论文未指定 N/M 与抽取方式;3×M 是我们的实现选择 |
+| D2 | 引导采样 | "从预测排序 top-N 中随机采 M 个"(M/N 未给值) | 一致:top-N(N=3×sample_from_top_m=96)中无放回**原样**抽 M 个(N=96 的具体化是我们的选择;2026-08-28 回归论文字面语义,此前为 Dir(5·w) 扰动) | 扰动被数值实验证伪,见细节节 D2 |
 | D3 | 最终选择 | 最终 predictor 在设计空间 A 上取 argmax(A 的枚举方式未说明) | 4 个浓度级(1/5/10/50)× 25K Dirichlet 候选 + argmax 附近 5K 精搜 | 同为 predictor argmax,我们把 A 的枚举具体化 |
 | D4 | LightGBM 超参 | max_depth=4,min_samples_leaf≥5,L1+L2,early stopping(20 轮无提升)+ 独立验证集 | max_depth=3,min_samples_leaf=3,L1=L2=1.0,early_stopping=20(带验证集切分),n_estimators=500,lr=0.02,auto_adjust 公式 | N=27~35 小样本下更强的容量限制;结构(L1/L2+早停)与论文一致 |
 | D5 | 聚类数 K | 固定 K:主实验 21 个超簇(1000→剪枝 240→合并);消融 15/30 | 带宽 `K_final = clamp(natural_K(τ), 3, 15)` 池自适应 | 我们的池(580K docs)结构与 800B-token 池不同;带宽避免距离守卫强并语义不同的簇 |
@@ -35,10 +35,19 @@ searches"(4:2:1 分配)。我们的 `CONFIGS_PER_ITER=20,10,5` 共 35。论文 T
 
 ### D2 引导采样
 论文 §2.2 子程序 1:"sort all configurations in the weight space A … randomly
-sample M new configurations from the top N ranked configurations"。M/N 均未给
-数值。我们:`iterative_bootstrapper.py` 中 `top_n = 3 × sample_from_top_m`,
-抽取方式为 `dirichlet_sampler.sample_from_top_n`(以 top-N 配比为基座的
-Dirichlet 扰动,天然保持在单纯形上),而非从 top-N 均匀抽。
+sample M new configurations from the top N ranked configurations"。M/N 均
+未给数值。我们:`top_n = 3 × sample_from_top_m`(=96),从 top-N 无放回
+**原样**抽 M 个(固定每轮种子);N=96 这一具体化是我们的选择。
+
+**历史(2026-08-28 回归)**:此前我们以 top-N 为基座做 Dir(5·w) Dirichlet
+扰动("好配置附近加密采样")。数值实验(4000 样本 L1 距离)证明该扰动
+是 K 盲的:K=3 时扰动比初始池更紧(meanL1 0.47 vs 0.59,符合"附近采样"
+意图);K=15 时扰动后的点离基座 meanL1=1.07,比池内任意两点的平均间距
+(0.97)还宽 — 扰动稀释了排序信号而非增加探索,此时严格劣于原样抽取
+(K=21:1.20 vs 池 0.72)。论文的探索性来自 top-N 带宽(N≫M)+ 候选池
+自身的随机性,无需额外旋钮。据此回归论文字面语义(用户决策)。
+`DirichletSampler.sample_from_top_n` 保留,仅供最终选择的 argmax 附近
+精搜使用(见 D3)。
 
 ### D3 最终选择
 论文 §2.2:"one selects the best configuration predicted by the final
@@ -79,6 +88,15 @@ band"),τ=0.9 作用在归一化向量上。**勘误**:早前审计记录"1.5/3.
 - fasttext 质量剪枝阈值 3.0、仅按质量不按大小(§2.1/§3.1)
 - Dirichlet 初始化按各簇 token 数(§3.1)
 - 迭代 bootstrapping 结构:采样→proxy 训练→predictor 拟合→引导再采样(§2.2)
+- "剪枝"语义(§2.2/Fig.4,2026-08-28 核查):config 选择层面的渐进收窄 —
+  predictor 排序使预测差的区域永不被采样训练 + 预算衰减(论文 64/32/16);
+  非 proxy 训练中途终止。每个采样 config 恰好训练一次(其标签来源);
+  我们同机制(非 top-N 不训练 + 20/10/5 衰减),亦无中途 kill
+- predictor 质量口径(§D.10):论文报告留出集 Spearman 94%(112 configs,
+  350M proxy);我们现记录留出集 R² + Spearman + (pred, actual) 对到
+  search_state.json(`predictor_eval`,累计 N≥10 才有切分 — speedrun N=7
+  无,生产 35 每轮都有)。预期管理:N=35 vs 112 + SNR z-score 标签更噪,
+  留出相关性必然低于 94%,属预算差异而非缺陷
 - 最终选择 = predictor 预测 argmax(§2.2;枚举方式见 D3)
 - Random 基线 = 等簇权 1/K(App. C.1;短缺策略见 D7)
 - WSD 退火语义:stable 阶段可恢复、数据混合研究聚焦 decay 阶段(§C.4;我们

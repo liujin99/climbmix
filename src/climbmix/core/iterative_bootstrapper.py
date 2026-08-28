@@ -4,7 +4,8 @@ CLIMB Step 2.2: Iterative bootstrapping for mixture weight search.
 Paper-aligned changes:
   1. Uses ProxyResult.score for ranking (accuracy=maximize, loss=minimize)
   2. Final search samples from full design space with refinement
-  3. Predictor-guided sampling uses Dirichlet exploration around top-N
+  3. Predictor-guided sampling: verbatim M-of-N draw from the
+     predictor-ranked top-N (paper §2.2 Subroutine 1, no perturbation)
 """
 
 import time
@@ -60,6 +61,10 @@ class IterativeBootstrapper:
         self._accumulated_per_benchmark: List[Tuple[Optional[Dict[str, float]], Optional[Dict[str, float]]]] = []
         self._iteration_results: List[IterationResult] = []
         self._predictor: Optional[Any] = None
+        # Per-iteration held-out predictor quality records (paper D.10 uses
+        # held-out Spearman; we also persist the (pred, actual) pairs so a
+        # Fig.9-style analysis is possible post hoc without re-running).
+        self._predictor_eval: List[Dict[str, Any]] = []
         self.w_floor = config.search.w_floor
         self.state_path = state_path
         self._last_completed_iter = 0
@@ -105,6 +110,7 @@ class IterativeBootstrapper:
                 {"acc": d[0], "nll": d[1]}
                 for d in self._accumulated_per_benchmark
             ],
+            "predictor_eval": self._predictor_eval,
             "pending": self._pending,
         }
         atomic_write_json(self.state_path, state)
@@ -164,6 +170,9 @@ class IterativeBootstrapper:
             self._accumulated_per_benchmark = [
                 (d["acc"], d["nll"]) for d in state["accumulated_per_benchmark"]
             ]
+            # Tolerant: state files written before the predictor_eval
+            # feature lack the key (resume behavior unchanged for them).
+            self._predictor_eval = state.get("predictor_eval") or []
             self._last_completed_iter = state["last_completed_iter"]
             self._pending = state.get("pending")
         except (KeyError, TypeError, ValueError):
@@ -349,6 +358,48 @@ class IterativeBootstrapper:
                 f"and 'npu-smi info' (leaked HBM shows as used memory with no "
                 f"process). Resume re-runs this iteration.")
 
+    @staticmethod
+    def _sample_verbatim_from_top(
+        top_configs: List[MixtureConfig],
+        ranked_indices: List[int],
+        novel_configs: List[MixtureConfig],
+        m: int,
+        iteration: int,
+    ) -> List[MixtureConfig]:
+        """Verbatim M-of-N draw from the predictor-ranked top-N (paper §2.2).
+
+        "Randomly sample M new configurations from the top N ranked
+        configurations" — configs are picked AS-IS, no perturbation.
+        Exploitation comes from the predictor's ranking; exploration from
+        the width of the top-N band (N >> M) plus the pool's own Dirichlet
+        randomness. (The previous Dir(5·w) perturbation was K-blind: at
+        K=15 its mean L1 offset 1.07 exceeded the pool's own pairwise
+        spread 0.97, diluting the ranking signal instead of adding
+        exploration — measured 2026-08-28, see docs/paper_deviations.md D2.)
+
+        Fixed per-iteration seed so repeated invocations of the same
+        iteration draw the same configs (belt-and-suspenders on top of the
+        pending-state persistence, which snapshots configs before training).
+        """
+        rng = np.random.default_rng(1000 + iteration)
+        n_top = len(top_configs)
+        if m <= n_top:
+            picks = rng.choice(n_top, size=m, replace=False)
+            return [top_configs[i] for i in picks]
+        # m > N (unreachable with current defaults: N=96 > M<=20). Take all
+        # of top-N, then continue down the ranking (next-best novel configs)
+        # so the fill stays on the predictor's ranking instead of globally
+        # resampling.
+        new_configs = list(top_configs)
+        chosen = set(ranked_indices[:n_top])
+        for idx in ranked_indices:
+            if len(new_configs) >= m:
+                break
+            if idx not in chosen:
+                new_configs.append(novel_configs[idx])
+                chosen.add(idx)
+        return new_configs
+
     def run_iteration(
         self,
         iteration: int,
@@ -391,8 +442,8 @@ class IterativeBootstrapper:
             top_n = min(self.config.search.sample_from_top_m * 3, len(novel_configs))
             top_configs = [novel_configs[i] for i in ranked_indices[:top_n]]
 
-            new_configs = self._sampler.sample_from_top_n(
-                top_configs, m=n_configs,
+            new_configs = self._sample_verbatim_from_top(
+                top_configs, ranked_indices, novel_configs, n_configs, iteration,
             )
 
         for i, c in enumerate(new_configs):
@@ -483,6 +534,20 @@ class IterativeBootstrapper:
             iter_result.predictor_r2 = float(self._predictor.score(
                 val_configs_split, val_targets_split,
             ))
+            iter_result.predictor_spearman = self._predictor.val_spearman_
+            # Persist held-out (pred, actual) pairs so a paper-Fig.9-style
+            # analysis is possible post hoc (D.10 reports 94% Spearman at
+            # 112 configs / 350M proxy; our N is smaller and labels noisier,
+            # so expect lower — that is a budget artifact, not a bug).
+            val_preds = self._predictor.predict(val_configs_split)
+            self._predictor_eval.append({
+                "iteration": iteration,
+                "n_val": len(val_configs_split),
+                "val_r2": iter_result.predictor_r2,
+                "val_spearman": iter_result.predictor_spearman,
+                "val_preds": [float(p) for p in val_preds],
+                "val_targets": [float(t) for t in val_targets_split],
+            })
 
         self._iteration_results.append(iter_result)
 
@@ -490,7 +555,9 @@ class IterativeBootstrapper:
         print(f"\n[Iter {iteration}] Complete in {elapsed:.1f}s")
         print(f"  Best score: {best_score:.4f}")
         if iter_result.predictor_r2 is not None:
-            print(f"  Predictor R\u00b2: {iter_result.predictor_r2:.4f}")
+            print(f"  Predictor val R\u00b2: {iter_result.predictor_r2:.4f}")
+            if iter_result.predictor_spearman is not None:
+                print(f"  Predictor val Spearman: {iter_result.predictor_spearman:.4f}")
 
         return iter_result
 

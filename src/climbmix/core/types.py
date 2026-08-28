@@ -235,6 +235,7 @@ class IterationResult:
     n_trained: int
     predictor: Optional[Any] = None
     predictor_r2: Optional[float] = None
+    predictor_spearman: Optional[float] = None
     best_config: Optional[MixtureConfig] = None
     best_score: Optional[float] = None
     best_loss: Optional[float] = None

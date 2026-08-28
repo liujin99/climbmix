@@ -20,6 +20,49 @@ class LightGBMPredictor:
         self.config = config or PredictorConfig()
         self._model = None
         self._is_fitted = False
+        # Held-out metrics from the early-stopping split (paper D.10 reports
+        # held-out Spearman; set by fit() when a validation set is given).
+        self.val_r2_: Optional[float] = None
+        self.val_spearman_: Optional[float] = None
+
+    @staticmethod
+    def _rankdata(x: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        """Average ranks (tied values share the mean of their positions),
+        1-based — same convention as scipy.stats.rankdata."""
+        x = np.asarray(x, dtype=np.float64)
+        order = np.argsort(x, kind="stable")
+        ranks = np.empty(len(x), dtype=np.float64)
+        sx = x[order]
+        i = 0
+        n = len(x)
+        while i < n:
+            j = i
+            while j + 1 < n and sx[j + 1] == sx[i]:
+                j += 1
+            ranks[order[i:j + 1]] = (i + j) / 2.0 + 1.0
+            i = j + 1
+        return ranks
+
+    @classmethod
+    def _spearman(cls, a: npt.NDArray[np.float64], b: npt.NDArray[np.float64]) -> float:
+        """Spearman rank correlation (numpy only, no scipy dependency).
+
+        Pearson correlation on average ranks — identical to
+        scipy.stats.spearmanr including ties. NaN when <2 points or when
+        either side is constant (zero rank variance).
+        """
+        a = np.asarray(a, dtype=np.float64)
+        b = np.asarray(b, dtype=np.float64)
+        if len(a) < 2:
+            return float("nan")
+        ra = cls._rankdata(a)
+        rb = cls._rankdata(b)
+        ra -= ra.mean()
+        rb -= rb.mean()
+        denom = np.sqrt(float((ra ** 2).sum()) * float((rb ** 2).sum()))
+        if denom == 0.0:
+            return float("nan")
+        return float((ra * rb).sum() / denom)
 
     def _compute_colsample(self) -> float:
         """
@@ -101,7 +144,16 @@ class LightGBMPredictor:
 
         self._is_fitted = True
         train_r2 = float(self._model.score(X, y))
-        print(f"[Predictor] Trained on {len(X)} configs, R\u00b2={train_r2:.4f}")
+        print(f"[Predictor] Trained on {len(X)} configs, train R\u00b2={train_r2:.4f}")
+        if val_configs is not None and val_losses is not None:
+            # Held-out metrics on the early-stopping split. The train R²
+            # above is optimistic by construction (≤35 points, 500 trees);
+            # these are the honest numbers (paper D.10 metric = Spearman).
+            self.val_r2_ = float(self._model.score(X_val, y_val))
+            val_pred = self._model.predict(X_val)
+            self.val_spearman_ = self._spearman(val_pred, y_val)
+            print(f"[Predictor] val R\u00b2={self.val_r2_:.4f}, "
+                  f"val Spearman={self.val_spearman_:.4f} (n={len(y_val)})")
         return self
 
     def predict(self, configs: List[MixtureConfig]) -> npt.NDArray[np.float64]:
