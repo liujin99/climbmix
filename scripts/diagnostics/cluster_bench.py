@@ -7,7 +7,7 @@ stage at scale:
      over thread counts. SGEMM is compute-bound: hyperthreaded hosts peak
      at physical-core thread counts and REGRESS beyond (measured on a
      8C/16T x86: 8 threads 253 GFLOP/s, 16 threads 177). If the sweet spot
-     differs from the code default (min(cpu,64)), pin it with
+     differs from the code default (min(cpu,24)), pin it with
      CLIMBMIX_CLUSTER_THREADS.
   2. process fan-out scaling — when intra-process threads plateau below
      the physical core count (observed on a 192-vCPU aarch64 host: 64
@@ -121,7 +121,7 @@ def bench_threads(x, c, sweep, repeats=1):
         print(f"{t:>8} {dt:>8.2f} {g:>9.0f}{mark}")
     print(f"sweet spot: {best[0]} threads ({best[1]:.0f} GFLOP/s)")
     if best[0] is not None:
-        print(f"  if it differs from the code default (min(cpu,64)), "
+        print(f"  if it differs from the code default (min(cpu,24)), "
               f"pin with: export CLIMBMIX_CLUSTER_THREADS={best[0]}")
 
 

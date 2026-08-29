@@ -275,10 +275,12 @@ GFLOP/call):
   OpenMP 构建,直接 `python3` 跑(prune_report 场景,不经 run 脚本)时
   `OMP_NUM_THREADS` 未设 → OpenBLAS 默认吃满 192 → 64 个 OpenMP worker
   × 192 个 BLAS 线程互相踩踏。修复后同 64 线程 112→141 GFLOP/s。
-- **甜点 24 ≠ 默认 64**: >24 线程吞吐崩塌(块调度粒度 query_bs=4096
+- **甜点 24 ≠ 旧默认 64**: >24 线程吞吐崩塌(块调度粒度 query_bs=4096
   → 256K 行只有 64 个工作块 + NUMA),追机制不值——直接钉。
-  两个 run 脚本已默认 `CLIMBMIX_CLUSTER_THREADS=24`(可覆盖);
-  直接跑 `scripts/prune_report.py` 前手动 export。
+  库默认已改为 `min(cpu, 24)`(`_cluster_thread_count`),所有入口
+  (run 脚本/直接跑 prune_report/discovery)统一落在甜点;
+  run 脚本仍显式 export 24(双保险);换机器先跑 bench,
+  甜点不同则 `CLIMBMIX_CLUSTER_THREADS=N` 覆盖。
 - **新旧代码对账**(用户实测 480.3s vs 新代码预测 ~192s,2026-08-29):
   500K 采样跑(4316d64, threads=64, BLAS 未钉)总时 480.3s;每个 redo
   20 迭代 ≈93s(日志增量 96.3→189.1→284.7→377.6→467.9)→ 每迭代

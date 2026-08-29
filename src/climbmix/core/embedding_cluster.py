@@ -1188,10 +1188,15 @@ def _cluster_thread_count() -> int:
     (Ascend guidance) and the preprocess stage inherits it, pinning
     FAISS's OpenMP K-means to a single thread — observed at 1% CPU on a
     192-vCPU host while clustering was the only live stage. Re-raise the
-    cap here at call time (after faiss has already parsed the env var);
-    CLIMBMIX_CLUSTER_THREADS overrides for deliberate single-thread runs.
-    Capped at 64: K-means parallelism is fine-grained, oversubscription
-    past that costs more in scheduling than it wins in flops.
+    cap here at call time (after faiss has already parsed the env var).
+
+    Default = min(cpu, 24): measured sweet spot on the fleet 192-vCPU
+    aarch64 host (scripts/diagnostics/cluster_bench.py, 2026-08-29) is
+    24 threads = 281 GFLOP/s, with collapse beyond (64 -> 141, 96 -> 99)
+    — sgemm throughput there tops out at ~12 GFLOP/s/core and extra
+    threads only add NUMA traffic. On smaller hosts min() keeps the full
+    core count. CLIMBMIX_CLUSTER_THREADS overrides for other machines
+    (re-run the bench when porting to new hardware).
     """
     env = os.environ.get("CLIMBMIX_CLUSTER_THREADS", "").strip()
     if env:
@@ -1199,7 +1204,7 @@ def _cluster_thread_count() -> int:
             return max(1, int(env))
         except ValueError:
             pass
-    return min(os.cpu_count() or 1, 64)
+    return min(os.cpu_count() or 1, 24)
 
 
 def _blas_single_thread(faiss_has_omp: bool):
