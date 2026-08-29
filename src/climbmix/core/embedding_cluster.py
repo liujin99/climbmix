@@ -1181,6 +1181,27 @@ def embed_texts_streaming(
     return np.array(all_embeddings)
 
 
+def _cluster_thread_count() -> int:
+    """Thread count for CPU clustering (FAISS K-means / sklearn fallback).
+
+    The run scripts export OMP_NUM_THREADS=1 for the NPU training stage
+    (Ascend guidance) and the preprocess stage inherits it, pinning
+    FAISS's OpenMP K-means to a single thread — observed at 1% CPU on a
+    192-vCPU host while clustering was the only live stage. Re-raise the
+    cap here at call time (after faiss has already parsed the env var);
+    CLIMBMIX_CLUSTER_THREADS overrides for deliberate single-thread runs.
+    Capped at 64: K-means parallelism is fine-grained, oversubscription
+    past that costs more in scheduling than it wins in flops.
+    """
+    env = os.environ.get("CLIMBMIX_CLUSTER_THREADS", "").strip()
+    if env:
+        try:
+            return max(1, int(env))
+        except ValueError:
+            pass
+    return min(os.cpu_count() or 1, 64)
+
+
 def cluster_embeddings_faiss(
     embeddings: npt.NDArray[np.float32],
     K_init: int = 1000,
@@ -1214,7 +1235,15 @@ def cluster_embeddings_faiss(
     dim = embeddings.shape[1]
     n_docs = embeddings.shape[0]
 
-    print(f"[Cluster] FAISS K-means: K={K_init}, dim={dim}, n_docs={n_docs}")
+    n_threads = _cluster_thread_count()
+    try:
+        faiss.omp_set_num_threads(n_threads)
+        n_threads = faiss.omp_get_max_threads()
+    except AttributeError:
+        pass
+
+    print(f"[Cluster] FAISS K-means: K={K_init}, dim={dim}, n_docs={n_docs}, "
+          f"threads={n_threads}")
 
     n_nan = np.isnan(embeddings).any(axis=1).sum()
     n_inf = np.isinf(embeddings).any(axis=1).sum()
@@ -1284,7 +1313,8 @@ def cluster_embeddings_sklearn(
 
     from sklearn.cluster import MiniBatchKMeans
 
-    print(f"[Cluster] sklearn MiniBatchKMeans: K={K_init}")
+    n_threads = _cluster_thread_count()
+    print(f"[Cluster] sklearn MiniBatchKMeans: K={K_init}, threads={n_threads}")
     t0 = time.time()
 
     kmeans = MiniBatchKMeans(
@@ -1293,7 +1323,12 @@ def cluster_embeddings_sklearn(
         batch_size=1024,
         max_iter=100,
     )
-    labels = kmeans.fit_predict(embeddings).astype(np.int64)
+    try:
+        from threadpoolctl import threadpool_limits
+        with threadpool_limits(limits=n_threads):
+            labels = kmeans.fit_predict(embeddings).astype(np.int64)
+    except ImportError:
+        labels = kmeans.fit_predict(embeddings).astype(np.int64)
     centroids = kmeans.cluster_centers_.astype(np.float32)
 
     elapsed = time.time() - t0

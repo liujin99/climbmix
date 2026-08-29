@@ -268,15 +268,92 @@ def diagnose_prune_profile(
             row["tokens_kept_pct"] = round(float(cl_tokens[kept].sum()) / total_tokens * 100, 2)
         sweep.append(row)
 
-    # ── Per-column cluster means ──
+    # ── Per-column stats (full dump). The flat average hides WHERE a
+    # cluster is weak; σ + μ-2σ counts and the per-column sweep let
+    # per-column prune rules be evaluated offline from the profile alone.
+    # Note σ here is the spread BETWEEN cluster means (scorer calibration
+    # shows up here), not within-cluster doc spread. ──
     per_column = {}
     for j, name in enumerate(col_names):
         v = col_means[nonempty, j]
-        per_column[name] = {
-            "mean": round(float(v.mean()), 4),
+        mu = float(v.mean())
+        sd = float(v.std())
+        if sd > 1e-12:
+            weak = (v - mu) / sd < -2.0
+        else:
+            weak = np.zeros(int(v.shape[0]), dtype=bool)
+        entry = {
+            "mean": round(mu, 4),
+            "std": round(sd, 4),
+            "min": round(float(v.min()), 4),
+            "p5": round(float(np.percentile(v, 5)), 4),
             "p25": round(float(np.percentile(v, 25)), 4),
+            "p50": round(float(np.percentile(v, 50)), 4),
             "p75": round(float(np.percentile(v, 75)), 4),
+            "p95": round(float(np.percentile(v, 95)), 4),
+            "max": round(float(v.max()), 4),
+            "clusters_below_mu_minus_2sigma": int(weak.sum()),
+            "docs_below_mu_minus_2sigma_pct": round(
+                float(cl_counts[weak].sum()) / total_docs * 100, 2),
         }
+        if cl_tokens is not None and total_tokens > 0:
+            entry["tokens_below_mu_minus_2sigma_pct"] = round(
+                float(cl_tokens[weak].sum()) / total_tokens * 100, 2)
+        per_column[name] = entry
+
+    # ── Per-column threshold sweep: absolute prune_threshold plus the
+    # p1/p2/p5/p10 quantiles of that column's cluster means (relative
+    # cut points — absolute thresholds are meaningless when a scorer is
+    # calibrated low/high, see the 100B STEM knowledge_value case). ──
+    per_column_sweep = []
+    for j, name in enumerate(col_names):
+        v = col_means[nonempty, j]
+        cands = {round(float(prune_threshold), 4)}
+        cands.update(round(float(np.percentile(v, p)), 4)
+                     for p in (1, 2, 5, 10))
+        for t in sorted(cands):
+            kept = v >= t
+            row = {
+                "column": name,
+                "threshold": t,
+                "clusters_kept": int(kept.sum()),
+                "docs_kept_pct": round(
+                    float(cl_counts[kept].sum()) / total_docs * 100, 2),
+            }
+            if cl_tokens is not None and total_tokens > 0:
+                row["tokens_kept_pct"] = round(
+                    float(cl_tokens[kept].sum()) / total_tokens * 100, 2)
+            per_column_sweep.append(row)
+
+    # ── Full cluster × column matrix (K×C floats + ids/sizes/tokens):
+    # every per-column question answerable offline without re-clustering. ──
+    cluster_ids = [int(i) for i in np.nonzero(nonempty)[0]]
+    cluster_quality_matrix = [
+        [round(float(x), 4) for x in row] for row in col_means[nonempty]]
+    cluster_sizes = [int(c) for c in cl_counts]
+    cluster_tokens = ([round(float(t), 1) for t in cl_tokens]
+                      if cl_tokens is not None else None)
+
+    # ── Column correlation (between cluster means): |r|≈1 means two
+    # columns carry the same cluster-level signal (one per-column rule
+    # covers both); r≈0 or negative means the flat average is washing
+    # them out (per-column rules would bite differently). ──
+    column_correlation = None
+    strongest_pair = None
+    if n_cols > 1:
+        with np.errstate(invalid="ignore"):
+            corr = np.corrcoef(col_means[nonempty], rowvar=False)
+        column_correlation = [
+            [None if not np.isfinite(x) else round(float(x), 3) for x in row]
+            for row in corr
+        ]
+        for a in range(n_cols):
+            for b in range(a + 1, n_cols):
+                r = column_correlation[a][b]
+                if r is None:
+                    continue
+                if strongest_pair is None or abs(r) > abs(strongest_pair[0]):
+                    strongest_pair = (r, col_names[a], col_names[b])
 
     # ── Column disagreement: clusters whose column means spread wider than
     # 25% of the observed quality range (1.0 on the 1-5 STEM scale) ──
@@ -346,6 +423,11 @@ def diagnose_prune_profile(
                       f"average hides WHERE they are weak; per-column rules are a "
                       f"possible refinement")
 
+    if strongest_pair is not None and abs(strongest_pair[0]) >= 0.7:
+        r, a, b = strongest_pair
+        advice.append(f"· columns {a} and {b} are strongly correlated at the cluster "
+                      f"level (r={r:+.2f}) — a per-column rule on one covers the other")
+
     if len(by_domain) >= 2:
         qualities = [r["doc_quality_mean"] for r in by_domain]
         gap = max(qualities) - min(qualities)
@@ -375,10 +457,18 @@ def diagnose_prune_profile(
         tok = f", {row['tokens_kept_pct']:.1f}% tokens" if "tokens_kept_pct" in row else ""
         print(f"    t={row['threshold']:<5.2f} → {row['clusters_kept']:>4} clusters, "
               f"{row['docs_kept_pct']:.1f}% docs{tok}{cur}")
-    print("  per-column cluster means (p25/mean/p75):")
+    print("  per-column cluster means (p25/mean/p75, σ, z<-2 → clusters/docs%):")
     for name in col_names:
         s = per_column[name]
-        print(f"    {name:<20} {s['p25']:.2f} / {s['mean']:.2f} / {s['p75']:.2f}")
+        print(f"    {name:<20} {s['p25']:.2f} / {s['mean']:.2f} / {s['p75']:.2f}"
+              f"   σ={s['std']:.2f}  z<-2: {s['clusters_below_mu_minus_2sigma']} cl / "
+              f"{s['docs_below_mu_minus_2sigma_pct']:.1f}% docs")
+    if column_correlation is not None and strongest_pair is not None:
+        r, a, b = strongest_pair
+        print(f"  column correlation: strongest |r|={abs(r):.2f} ({a} / {b})")
+    if profile_path:
+        print(f"  full per-cluster × per-column dump ({K}×{n_cols} matrix + "
+              f"per-column sweep) → prune_profile.json")
     print(f"  column spread >{spread_thresh:.1f}: {column_spread['clusters_above']} "
           f"clusters ({column_spread['docs_share_pct']:.1f}% docs)")
     if by_domain:
@@ -400,6 +490,12 @@ def diagnose_prune_profile(
             "cluster_avg_quality": dist_summary,
             "threshold_sweep": sweep,
             "per_column": per_column,
+            "per_column_sweep": per_column_sweep,
+            "cluster_ids": cluster_ids,
+            "cluster_quality_matrix": cluster_quality_matrix,
+            "cluster_sizes": cluster_sizes,
+            "cluster_tokens": cluster_tokens,
+            "column_correlation": column_correlation,
             "column_spread": column_spread,
             "by_domain": by_domain,
             "nan_quality_docs": n_nan,
