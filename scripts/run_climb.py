@@ -130,7 +130,7 @@ def main():
     # deliberately NOT fingerprinted, same policy as num_npu) ──
     parser.add_argument("--remote-config", type=str, default="",
                         help="RemoteConfig JSON file: dispatch proxy "
-                             "experiments as ModelArts jobs (OBS data plane). "
+                             "experiments as remote jobs (OBS data plane). "
                              "Empty = local execution only. All knobs are "
                              "transport/quota shape — none change experiment "
                              "semantics, so this flag is excluded from the "

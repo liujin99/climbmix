@@ -38,10 +38,10 @@ cache/
 # opencode session data
 .opencode/
 
-# ModelArts platform config / credentials — the repo is PUBLIC.
+# Platform config / credentials — the repo is PUBLIC.
 # Real values live in ~/.config/climbmix/ (outside the repo); these entries
 # are a second line of defense against accidental copies INTO the tree.
-remote_ma.json
-remote_ma.local.json
+remote_*.json
+remote_*.local.json
 iam_tokens.json
 guard_patterns.json

@@ -1,4 +1,4 @@
-"""RemoteExecutor — runs proxy experiments as ModelArts jobs, results land as
+"""RemoteExecutor — runs proxy experiments as remote jobs, results land as
 local exp_XXXX/ dirs.
 
 Architecture (2026-08-28 production plan):
@@ -6,8 +6,11 @@ Architecture (2026-08-28 production plan):
     labels + the STEM pool, which live here. Shards (~1.5GB/exp) upload to OBS.
   - OBS = data plane: {obs_prefix}/exps/exp_XXXX/{spec.json, mixture_data/,
     result/} per experiment; {obs_prefix}/assets/ = worker code bundle.
-  - ModelArts Job API = compute plane: one job per experiment
-    (npu_per_job cards each, no cross-node collectives).
+  - Job backend = compute plane: one job per experiment
+    (npu_per_job cards each, no cross-node collectives). The backend is
+    resolved via the registry (backends.py): the built-in "mock"
+    simulation or an out-of-tree platform adapter
+    (RemoteConfig.backend_module / "climbmix.backends" entry point).
   - Dynamic submission: the shared pool fluctuates (10-200 cards), so a
     batch does NOT assume one fixed-size submission burst — capacity
     rejections (TransientSubmitError) back off and retry (a config is
@@ -51,9 +54,8 @@ import numpy as np
 from climbmix.core.types import CLIMBConfig, MixtureConfig, ProxyResult
 from climbmix.pipeline.proxy_runner import ProxyRunner
 from climbmix.remote.exp_spec import ExpSpec, SPEC_VERSION
-from climbmix.remote.job_api import JobStatus, MockJobAPI, TransientSubmitError
-from climbmix.remote.modelarts_job_api import LOCAL_CODE_DIR, ModelArtsJobAPI
-from climbmix.remote.obs import MockObsStorage, ModelArtsObsStorage
+from climbmix.remote.backends import resolve_backend
+from climbmix.remote.job_api import JobStatus, TransientSubmitError
 
 
 @dataclass
@@ -68,16 +70,23 @@ class RemoteConfig:
     #   {prefix}/assets/{remote_worker.py, nanochat_cmds.py}
     obs_prefix: str = ""
 
-    # Which JobAPI/ObsStorage to construct when not injected (tests inject
-    # mocks): "modelarts" (real) or "mock" (local simulation).
-    backend: str = "modelarts"
+    # Which backend to construct when not injected (tests inject
+    # job_api/obs): "mock" (built-in local simulation) or the name of an
+    # out-of-tree platform backend, resolved via backends.py — either
+    # backend_module below or a registered "climbmix.backends" entry
+    # point.
+    backend: str = "mock"
 
-    # Path to the ModelArts platform config JSON (gateway endpoint, IDs,
-    # image, auth — the repo is PUBLIC so real values live outside it in
-    # ~/.config/climbmix/remote_ma.json; schema: config/
-    # remote_ma.example.json). Empty = default resolution
-    # ($CLIMBMIX_MA_CONFIG then ~/.config/climbmix/remote_ma.json).
-    ma_config: str = ""
+    # "package.module:attr" factory spec for an out-of-tree backend (attr
+    # defaults to create_backend). Takes precedence over entry-point
+    # lookup. Works with the backend repo cloned + PYTHONPATH — no
+    # installation required.
+    backend_module: str = ""
+
+    # Path to the backend's platform config file (endpoint/IDs/auth —
+    # schema is backend-defined; real values live OUTSIDE this public
+    # repo, e.g. ~/.config/climbmix/). Passed through to the backend.
+    platform_config: str = ""
 
     # ── container-side path conventions (baked into every ExpSpec) ──
     container_nanochat_dir: str = "/home/ma-user/work/nanochat-npu"
@@ -170,8 +179,8 @@ class RemoteConfig:
             raise ValueError(
                 f"RemoteConfig.obs_prefix must be an obs:// URI, got "
                 f"{self.obs_prefix!r}")
-        if self.backend not in ("modelarts", "mock"):
-            raise ValueError(f"RemoteConfig.backend must be modelarts|mock")
+        if not self.backend:
+            raise ValueError("RemoteConfig.backend must be non-empty")
         if self.backend == "mock" or self.storage_kind == "local":
             if not self.storage_root:
                 raise ValueError(
@@ -193,7 +202,8 @@ class RemoteConfig:
 
 
 class RemoteExecutor(ProxyRunner):
-    """ProxyRunner subclass whose execution backend is ModelArts jobs.
+    """ProxyRunner subclass whose execution backend is remote jobs
+    (platform adapter or built-in mock, resolved via backends.py).
 
     Inherited unchanged from ProxyRunner: resume level 1 (meta.json), mixture
     preparation (cluster labels + pool + ClimbMix mixing), the command
@@ -228,30 +238,30 @@ class RemoteExecutor(ProxyRunner):
         self._cap_limit = remote_config.max_concurrent_jobs
         self._cap_inflight = 0
 
-        if job_api is not None:
-            self.job_api = job_api
-        elif remote_config.backend == "mock":
-            self.job_api = MockJobAPI()
-        else:
-            self.job_api = ModelArtsJobAPI(remote_config)
-        if obs is not None:
-            self.obs = obs
-        elif remote_config.backend == "mock":
-            self.obs = MockObsStorage(remote_config.storage_root)
-        else:
-            self.obs = ModelArtsObsStorage(remote_config.ma_config or None)
+        # Backend bundle: resolves the job API + obs storage when they are
+        # not injected. Kept None when both are injected (tests) — the
+        # staged-path worker default then applies.
+        bundle = None
+        if job_api is None or obs is None:
+            bundle = resolve_backend(remote_config)
+            if job_api is None:
+                job_api = bundle.make_job_api(remote_config)
+            if obs is None:
+                obs = bundle.make_obs_storage(remote_config)
+        self.job_api = job_api
+        self.obs = obs
 
         self._stage_assets()
         if not remote_config.worker_path:
-            if remote_config.backend == "mock":
+            wp = bundle.default_worker_path if bundle is not None else ""
+            if wp:
+                # Out-of-tree backend: the platform delivers {obs_prefix}/
+                # assets into its container code dir; the backend's boot
+                # logic resolves the exact path at runtime.
+                remote_config.worker_path = wp
+            else:
                 remote_config.worker_path = os.path.join(
                     self.assets_stage_dir, "remote_worker.py")
-            else:
-                # Platform copies code_dir ({obs_prefix}/assets) into
-                # LOCAL_CODE_DIR; the boot shell resolves the exact path at
-                # runtime (basename nesting varies).
-                remote_config.worker_path = os.path.join(
-                    LOCAL_CODE_DIR, "remote_worker.py")
         self._ensure_assets_uploaded()
 
         print(f"  [RemoteExecutor] backend={remote_config.backend} "

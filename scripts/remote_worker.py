@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Remote experiment worker — runs INSIDE a ModelArts job container.
+"""Remote experiment worker — runs INSIDE a remote job container.
 
 Standalone by design: stdlib only + nanochat_cmds.py (the shared command/env/
 eval-dir module co-located in the assets bundle). The submit host (climbmix
@@ -28,7 +28,7 @@ Storage backends:
   --storage local    filesystem under --storage-root with the obs:// mapping
                      convention (simulation/tests; same convention as the
                      submit-side MockObsStorage)
-  --storage moxing   ModelArts moxing SDK (real; verify in M1)
+  --storage moxing   moxing OBS SDK (real)
 """
 
 import argparse
@@ -98,7 +98,7 @@ class LocalStorage:
 
 
 class MoxingStorage:
-    """ModelArts moxing backend (verify exact API surface in M1)."""
+    """moxing OBS SDK backend."""
 
     def __init__(self):
         import moxing as mox  # noqa: F401  (lazy — only in real containers)

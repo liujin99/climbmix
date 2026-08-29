@@ -133,7 +133,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-$CLIMBMIX_DIR/result/${EXP_NAME}_current}"
 COMPLETION_MARKERS=(".done_eval_climb")
 
 # ── HF download endpoint ──
-# The corporate proxy (proxy.modelarts.com) selectively rejects Python's bare
+# The managed runtime's egress proxy selectively rejects Python's bare
 # CONNECT tunnels to huggingface.co (observed: 90+ consecutive 503s across two
 # independent runs / 80 min, while curl to the same host AND Python to
 # hf-mirror.com both succeeded). hf-mirror.com serves the same bytes (Range

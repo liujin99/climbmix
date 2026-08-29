@@ -1,19 +1,20 @@
 """JobAPI — thin job-submission interface for remote experiment execution.
 
-Two implementations:
+Two kinds of implementations:
   - MockJobAPI (this file): executes the command argv as a LOCAL subprocess
     (used by the laptop simulation /tests; combined with MockObsStorage it
     exercises the full RemoteExecutor -> worker -> storage -> materialization
     stack with zero mocks inside the worker itself).
-  - ModelArtsJobAPI (modelarts_job_api.py): the real adapter over the
-    internal CSB/ROMA gateway (REST + IAM token auth; all platform values
-    live in the gitignored ~/.config/climbmix/remote_ma.json — the repo is
-    public).
+  - Real platform backends live OUT of this repo (access-restricted
+    adapter repositories; see backends.py and docs/remote_setup.md
+    "Writing a backend"): they implement this protocol over their
+    platform's job-submission API and carry the platform identity values
+    in a config file outside the public repo.
 
 Contract: submit() takes the WORKER argv (python remote_worker.py --spec-uri
 obs://... --storage ...) plus env; the adapter is responsible for making that
-argv run in the target environment (the ModelArts adapter wraps it into a
-boot shell that bootstraps the big assets, then execs the argv).
+argv run in the target environment (an adapter may wrap it into a boot
+shell that bootstraps assets, then execs the argv).
 """
 
 import os
@@ -197,15 +198,3 @@ class MockJobAPI:
                    for j in jobs):
                 return
             time.sleep(0.05)
-
-
-# The real adapter lives in modelarts_job_api.py (it grew past skeleton
-# size: gateway REST + IAM token auth + boot-shell composition). Exposed
-# lazily so `from climbmix.remote.job_api import ModelArtsJobAPI` keeps
-# working at every import order (modelarts_job_api imports JobStatus/
-# TransientSubmitError from HERE — an eager re-export would be circular).
-def __getattr__(name):
-    if name == "ModelArtsJobAPI":
-        from climbmix.remote.modelarts_job_api import ModelArtsJobAPI
-        return ModelArtsJobAPI
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

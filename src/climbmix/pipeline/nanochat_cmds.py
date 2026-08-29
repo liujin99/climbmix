@@ -2,7 +2,7 @@
 execution backends:
 
   - the local executor (ProxyRunner, ThreadPool + local torchrun)
-  - the remote worker (scripts/remote_worker.py, inside ModelArts job
+  - the remote worker (scripts/remote_worker.py, inside remote job
     containers, driven by an ExpSpec whose commands were built HERE on the
     submit host)
 

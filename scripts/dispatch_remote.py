@@ -112,14 +112,11 @@ def attach_cluster_state(executor, args):
 
 
 def check_assets(remote_config, args):
-    """Verify the one-time OBS bootstrap (big assets, M1 — see
-    docs/remote_setup.md). The worker code bundle is uploaded automatically by
+    """Verify the one-time OBS bootstrap (big assets, M1 — see the backend
+    repo's README). The worker code bundle is uploaded automatically by
     RemoteExecutor; these are NOT."""
-    from climbmix.remote.obs import MockObsStorage, ModelArtsObsStorage
-    if remote_config.backend == "mock":
-        obs = MockObsStorage(remote_config.storage_root)
-    else:
-        obs = ModelArtsObsStorage()
+    from climbmix.remote.backends import resolve_backend
+    obs = resolve_backend(remote_config).make_obs_storage(remote_config)
 
     prefix = (args.obs_prefix or remote_config.obs_prefix).rstrip("/")
     expected = {

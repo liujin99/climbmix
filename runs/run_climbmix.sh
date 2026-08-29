@@ -114,8 +114,8 @@ OUTPUT_DIR="${OUTPUT_DIR:-$CLIMBMIX_DIR/result/${EXP_NAME}_current}"
 # 改名为已完成形态 result/${EXP_NAME}_<ts> (stage_gate.sh 生命周期)
 COMPLETION_MARKERS=(".done_eval_climb" ".done_eval_random")
 
-# ── Remote execution fleet (ModelArts jobs + OBS data plane) ──
-# 生产混合舰队: 本地 8 卡 + 远端 ModelArts 作业并行跑 proxy 实验。
+# ── Remote execution fleet (remote jobs + OBS data plane) ──
+# 生产混合舰队: 本地 8 卡 + 远端作业并行跑 proxy 实验。
 # 全部为"执行形态"参数 (传输/配额/路径), 不改变实验语义 — 与 NUM_NPU
 # 同一策略, 刻意不进 stage 指纹 (stage_gate.sh:51 先例: 池形状可变)。
 # REMOTE_ENABLED=1 时 Step 1-3 的 search 用 RemoteExecutor:
@@ -125,22 +125,24 @@ COMPLETION_MARKERS=(".done_eval_climb" ".done_eval_random")
 #     NUM_NPU/NPU_PER_EXP 个配置走本地并行, 其余远端作业, 全程并发
 #   - REMOTE_NPU_PER_JOB 默认 = NPU_PER_EXP (k 全舰队一致, 分数可比性,
 #     docs/parallel_k_selection.md); 想让本地卡出力需 NPU_PER_EXP < NUM_NPU
-#   - 动态提交 (池 10-200 卡波动): 提交被配额/频控拒绝时指数退避重试,
+#   - 动态提交 (池容量波动): 提交被配额/频控拒绝时指数退避重试,
 #     配置不因瞬时拒绝烧毁; 一个迭代的作业随配额释放分多轮落地。
 #     在飞上限 = REMOTE_MAX_JOBS, 池变大时调高即可; 本地混料/上传并发
 #     由 REMOTE_MAX_PREP 限流, 不随作业上限放大。
-# 前置 (M1, docs/remote_setup.md): 平台配置文件 (网关/凭证/镜像, 见
-# REMOTE_MA_CONFIG) + moxing 可用 + 大资产上 OBS (nanochat-npu 代码,
-# d20 ckpt, tokenizer, eval_bundle/stem)。
-# 验证 (M3): scripts/ma_hello_world.py 打通网关 → dispatch_remote.py 单发
-# exp + Δstem_metric < 0.002 → 并发波。
+# 平台后端在独立的 (私有) 适配仓实现, 经 REMOTE_BACKEND_MODULE 注册 —
+# 见 docs/remote_setup.md "Writing a backend"。
+# 前置 (M1, 后端仓 README): 平台配置文件 (网关/凭证/镜像) + moxing 可用
+#   + 大资产上 OBS (nanochat-npu 代码, d20 ckpt, tokenizer, eval_bundle/stem)。
+# 验证 (M3): 后端仓的 hello-world 校准脚本打通网关 → dispatch_remote.py
+#   单发 exp + Δstem_metric < 0.002 → 并发波。
 REMOTE_ENABLED="${REMOTE_ENABLED:-0}"
 REMOTE_LOCAL_PARALLEL="${REMOTE_LOCAL_PARALLEL:-1}"
 REMOTE_OBS_PREFIX="${REMOTE_OBS_PREFIX:-}"
-REMOTE_BACKEND="${REMOTE_BACKEND:-modelarts}"     # modelarts | mock (本地仿真)
-REMOTE_MA_CONFIG="${REMOTE_MA_CONFIG:-}"          # 平台配置 JSON (默认 ~/.config/climbmix/remote_ma.json)
-REMOTE_IMAGE="${REMOTE_IMAGE:-}"                  # SWR 镜像 URI (可留空=用配置文件 image_url)
-REMOTE_FLAVOR="${REMOTE_FLAVOR:-}"                # 910B4 规格名 (可留空=用配置文件 default_flavor)
+REMOTE_BACKEND="${REMOTE_BACKEND:-mock}"           # mock (本地仿真) | 平台后端名
+REMOTE_BACKEND_MODULE="${REMOTE_BACKEND_MODULE:-}" # 后端工厂 "pkg:attr" (见后端仓 README); pip 安装的后端可留空走 entry point
+REMOTE_PLATFORM_CONFIG="${REMOTE_PLATFORM_CONFIG:-}" # 平台配置 JSON 路径 (默认由后端解析, 如 ~/.config/climbmix/...)
+REMOTE_IMAGE="${REMOTE_IMAGE:-}"                   # 镜像 URI (可留空=用平台配置 image_url)
+REMOTE_FLAVOR="${REMOTE_FLAVOR:-}"                 # 规格名 (可留空=用平台配置 default_flavor)
 REMOTE_POOL_NAME="${REMOTE_POOL_NAME:-}"          # 专属池 (可空=用配置文件 pool_id)
 REMOTE_NPU_PER_JOB="${REMOTE_NPU_PER_JOB:-$NPU_PER_EXP}"  # 每作业卡数 (单 exp 不跨节点)
 REMOTE_MAX_JOBS="${REMOTE_MAX_JOBS:-14}"          # 在飞作业上限 (动态提交的上界)
@@ -151,13 +153,14 @@ REMOTE_STORAGE_ROOT="${REMOTE_STORAGE_ROOT:-}"    # mock 后端专用: 假 OBS �
 REMOTE_JOB_TIMEOUT_H="${REMOTE_JOB_TIMEOUT_H:-6}" # 单作业超时 (小时)
 
 # ── HF download endpoint ──
-# The corporate proxy (proxy.modelarts.com) selectively rejects Python's bare
-# CONNECT tunnels to huggingface.co (observed: 90+ consecutive 503s across two
-# independent runs / 80 min, while curl to the same host AND Python to
+# The managed runtime's egress proxy selectively rejects Python's bare
+# CONNECT tunnels to huggingface.co (observed: 90+ consecutive 503s across
+# two independent runs / 80 min, while curl to the same host AND Python to
 # hf-mirror.com both succeeded). hf-mirror.com serves the same bytes (Range
 # resume verified, 206). Covers ClimbMix shards + eval_stem.zip (nanochat
 # reads HF_ENDPOINT at import time in dataset.py AND base_eval.py).
 # Override to use the origin: HF_ENDPOINT=https://huggingface.co bash runs/...
+# (proxy details: the backend repo's README)
 export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 
 # ── NPU Environment (deliberately minimal — matches proven train_base_model.sh) ──
@@ -256,17 +259,19 @@ if [ "$REMOTE_ENABLED" = "1" ]; then
     REMOTE_CONFIG_PATH="$OUTPUT_DIR/remote_config.json"
     REMOTE_CONFIG_ARG="--remote-config $REMOTE_CONFIG_PATH"
     # Export for the config-gen heredoc below (namespaced, harmless).
-    export REMOTE_OBS_PREFIX REMOTE_BACKEND REMOTE_MA_CONFIG REMOTE_IMAGE \
-           REMOTE_FLAVOR REMOTE_POOL_NAME REMOTE_NPU_PER_JOB REMOTE_MAX_JOBS \
+    export REMOTE_OBS_PREFIX REMOTE_BACKEND REMOTE_BACKEND_MODULE \
+           REMOTE_PLATFORM_CONFIG REMOTE_IMAGE REMOTE_FLAVOR \
+           REMOTE_POOL_NAME REMOTE_NPU_PER_JOB REMOTE_MAX_JOBS \
            REMOTE_SUBMIT_RETRY_H REMOTE_MAX_PREP REMOTE_LOCAL_PARALLEL \
            REMOTE_STORAGE_KIND REMOTE_STORAGE_ROOT REMOTE_JOB_TIMEOUT_H
-    python3 - "$REMOTE_CONFIG_PATH" "$REMOTE_MA_CONFIG" "$REMOTE_IMAGE" "$REMOTE_FLAVOR" <<'PYEOF'
+    python3 - "$REMOTE_CONFIG_PATH" "$REMOTE_PLATFORM_CONFIG" "$REMOTE_IMAGE" "$REMOTE_FLAVOR" <<'PYEOF'
 import json, sys, os
-cfg_path, ma_config, image, flavor = sys.argv[1:5]
+cfg_path, platform_config, image, flavor = sys.argv[1:5]
 cfg = {
     "obs_prefix": os.environ["REMOTE_OBS_PREFIX"],
     "backend": os.environ["REMOTE_BACKEND"],
-    "ma_config": ma_config,
+    "backend_module": os.environ["REMOTE_BACKEND_MODULE"],
+    "platform_config": platform_config,
     "image": image,
     "flavor": flavor,
     "pool_name": os.environ["REMOTE_POOL_NAME"],
@@ -281,16 +286,17 @@ cfg = {
     "job_env": {"HF_ENDPOINT": os.environ["HF_ENDPOINT"]},
 }
 if os.environ["REMOTE_BACKEND"] != "mock" and os.environ["REMOTE_STORAGE_KIND"] != "local":
-    # Real backend fail-fast: load the platform config + resolve
-    # image/flavor HERE, not mid-search (gateway/auth/image mistakes die
+    # Real backend fail-fast: resolve the backend bundle + run its
+    # validate() HERE, not mid-search (gateway/auth/image mistakes die
     # at launch with a clear message; values are never printed).
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
-    from climbmix.remote.modelarts_job_api import (load_ma_config,
-                                                   resolve_image_flavor_pool)
+    from climbmix.remote.backends import resolve_backend
     from climbmix.remote.remote_executor import RemoteConfig
-    ma = load_ma_config(ma_config or None)
-    resolve_image_flavor_pool(RemoteConfig.from_dict(cfg), ma)
-    print("  platform config OK (gateway/auth/image resolved; secrets not printed)")
+    rc = RemoteConfig.from_dict(cfg)
+    bundle = resolve_backend(rc)
+    if bundle.validate:
+        bundle.validate(rc)
+    print("  backend resolved + platform config OK (secrets not printed)")
 with open(cfg_path, "w") as f:
     json.dump(cfg, f, indent=2)
 PYEOF

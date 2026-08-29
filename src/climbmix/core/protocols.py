@@ -68,7 +68,7 @@ class ExpExecutor(Protocol):
     """Execution backend for proxy experiments (the contract the iterative
     bootstrapper relies on — it duck-types run_batch and probes for the
     optional experiment_id_base kwarg). Implementations: ProxyRunner (local
-    subprocesses) and RemoteExecutor (ModelArts jobs, results materialize as
+    subprocesses) and RemoteExecutor (remote jobs, results materialize as
     local exp_XXXX dirs)."""
 
     def run_batch(
