@@ -1,18 +1,19 @@
 """JobAPI — thin job-submission interface for remote experiment execution.
 
 Two implementations:
-  - MockJobAPI: executes the command argv as a LOCAL subprocess (used by the
-    laptop simulation /tests; combined with MockObsStorage it exercises the
-    full RemoteExecutor -> worker -> storage -> materialization stack with
-    zero mocks inside the worker itself).
-  - ModelArtsJobAPI: real ModelArts training-job adapter (M1 deliverable —
-    the SDK/auth specifics get filled in after the environment survey; the
-    interface is final).
+  - MockJobAPI (this file): executes the command argv as a LOCAL subprocess
+    (used by the laptop simulation /tests; combined with MockObsStorage it
+    exercises the full RemoteExecutor -> worker -> storage -> materialization
+    stack with zero mocks inside the worker itself).
+  - ModelArtsJobAPI (modelarts_job_api.py): the real adapter over the
+    internal CSB/ROMA gateway (REST + IAM token auth; all platform values
+    live in the gitignored ~/.config/climbmix/remote_ma.json — the repo is
+    public).
 
 Contract: submit() takes the WORKER argv (python remote_worker.py --spec-uri
 obs://... --storage ...) plus env; the adapter is responsible for making that
-argv run in the target environment (e.g. wrapping it into the job's boot
-shell with asset download steps).
+argv run in the target environment (the ModelArts adapter wraps it into a
+boot shell that bootstraps the big assets, then execs the argv).
 """
 
 import os
@@ -198,53 +199,13 @@ class MockJobAPI:
             time.sleep(0.05)
 
 
-class ModelArtsJobAPI:
-    """Real ModelArts training-job adapter — SKELETON (M1 deliverable).
-
-    The submit host needs (environment survey, docs/remote_setup.md):
-      - SDK choice: ma-sdk (modelarts) vs raw REST vs moxing job helpers
-      - auth: AK/SK + project_id + region (env MA_AK / MA_SK /
-        MA_PROJECT_ID / MA_REGION, or ~/.ma_creds)
-      - pool/flavor: dedicated pool name + Ascend 910B4 flavor
-      - image: SWR URI of the baked image (torch_npu + CANN 8.5.1 + pyarrow)
-
-    submit() composes the job's boot shell around the worker argv:
-      download assets bundle (cached in /home/ma-user/work) ->
-      python remote_worker.py --spec-uri ... --storage moxing
-    Error mapping (M1): API responses meaning quota/capacity/throttling
-    raise TransientSubmitError (executor backs off and retries — the pool
-    fluctuates); everything else raises RuntimeError (hard, burns the
-    config like any experiment failure).
-    free_job_slots() (M1): if the region/pool exposes a quota-usage query
-    API, return free_cards // npu_per_job so the executor's capacity
-    monitor can grow/shrink the in-flight limit while a batch runs.
-    Returning None (default) is valid: the executor then falls back to
-    submit-rejected backoff only.
-    The interface below is final; only the SDK calls are missing.
-    """
-
-    def __init__(self):
-        missing = [k for k in ("MA_AK", "MA_SK", "MA_PROJECT_ID", "MA_REGION")
-                   if not os.environ.get(k)]
-        if missing:
-            raise NotImplementedError(
-                f"ModelArtsJobAPI: real adapter pending M1 environment survey "
-                f"(docs/remote_setup.md). Missing env config: {missing}. "
-                f"For local simulation use MockJobAPI.")
-
-    def free_job_slots(self) -> Optional[int]:
-        return None  # M1: quota-usage query API, cards // npu_per_job
-
-    def submit(self, name: str, command: List[str],
-               env: Optional[Dict[str, str]] = None,
-               workdir: Optional[str] = None) -> str:
-        raise NotImplementedError("ModelArtsJobAPI.submit: fill in after M1")
-
-    def status(self, job_id: str) -> JobStatus:
-        raise NotImplementedError("ModelArtsJobAPI.status: fill in after M1")
-
-    def logs(self, job_id: str, tail: int = 50) -> str:
-        raise NotImplementedError("ModelArtsJobAPI.logs: fill in after M1")
-
-    def cancel(self, job_id: str) -> None:
-        raise NotImplementedError("ModelArtsJobAPI.cancel: fill in after M1")
+# The real adapter lives in modelarts_job_api.py (it grew past skeleton
+# size: gateway REST + IAM token auth + boot-shell composition). Exposed
+# lazily so `from climbmix.remote.job_api import ModelArtsJobAPI` keeps
+# working at every import order (modelarts_job_api imports JobStatus/
+# TransientSubmitError from HERE — an eager re-export would be circular).
+def __getattr__(name):
+    if name == "ModelArtsJobAPI":
+        from climbmix.remote.modelarts_job_api import ModelArtsJobAPI
+        return ModelArtsJobAPI
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

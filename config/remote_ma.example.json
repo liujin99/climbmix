@@ -1,0 +1,35 @@
+{
+  "_comment": "PLACEHOLDER TEMPLATE ONLY — copy to ~/.config/climbmix/remote_ma.json (or set CLIMBMIX_MA_CONFIG / RemoteConfig.ma_config) and fill in real values. The repo is PUBLIC: never commit the filled file. Schema: src/climbmix/remote/modelarts_job_api.py (load_ma_config).",
+
+  "endpoint": "https://<internal-gateway>/csb/projects/<vendor>/resourcetypes/modelarts/regions/<region>/projects/<project-id>",
+  "region": "<region>",
+  "project_id": "<project-id-hex>",
+  "workspace_id": "<workspace-id-hex>",
+
+  "pool_id": "<dedicated-pool-id-or-empty>",
+  "image_url": "<swr-image-uri>",
+  "image_repo_id": "<swr-image-repo-id>",
+  "default_flavor": "<flavor-id, e.g. the k-card 910B flavor>",
+
+  "auth": {
+    "x_auth_token": "",
+    "project_id": "<project-id-hex, cache key + IAM scope>",
+    "region": "<region>",
+    "account": "<jwt-account>",
+    "secret": "<jwt-secret>",
+    "project": "<jwt-project>",
+    "enterprise": "<enterprise-id>",
+    "domain_name": "",
+    "username": "",
+    "password": ""
+  },
+
+  "obs": {
+    "ak": "",
+    "sk": "",
+    "server": ""
+  },
+
+  "verify_tls": false,
+  "timeout_s": 60
+}

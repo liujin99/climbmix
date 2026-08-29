@@ -129,16 +129,19 @@ COMPLETION_MARKERS=(".done_eval_climb" ".done_eval_random")
 #     配置不因瞬时拒绝烧毁; 一个迭代的作业随配额释放分多轮落地。
 #     在飞上限 = REMOTE_MAX_JOBS, 池变大时调高即可; 本地混料/上传并发
 #     由 REMOTE_MAX_PREP 限流, 不随作业上限放大。
-# 前置 (M1, docs/remote_setup.md): 镜像/配额/AK-SK 勘察 + 大资产上 OBS
-# (nanochat-npu 代码, d20 ckpt, tokenizer, eval_bundle/stem)。
-# 验证 (M3): scripts/dispatch_remote.py 单发 exp + Δstem_metric < 0.002。
+# 前置 (M1, docs/remote_setup.md): 平台配置文件 (网关/凭证/镜像, 见
+# REMOTE_MA_CONFIG) + moxing 可用 + 大资产上 OBS (nanochat-npu 代码,
+# d20 ckpt, tokenizer, eval_bundle/stem)。
+# 验证 (M3): scripts/ma_hello_world.py 打通网关 → dispatch_remote.py 单发
+# exp + Δstem_metric < 0.002 → 并发波。
 REMOTE_ENABLED="${REMOTE_ENABLED:-0}"
 REMOTE_LOCAL_PARALLEL="${REMOTE_LOCAL_PARALLEL:-1}"
 REMOTE_OBS_PREFIX="${REMOTE_OBS_PREFIX:-}"
 REMOTE_BACKEND="${REMOTE_BACKEND:-modelarts}"     # modelarts | mock (本地仿真)
-REMOTE_IMAGE="${REMOTE_IMAGE:-}"                  # SWR 镜像 URI
-REMOTE_FLAVOR="${REMOTE_FLAVOR:-}"                # 910B4 规格名
-REMOTE_POOL_NAME="${REMOTE_POOL_NAME:-}"          # 专属池 (可空)
+REMOTE_MA_CONFIG="${REMOTE_MA_CONFIG:-}"          # 平台配置 JSON (默认 ~/.config/climbmix/remote_ma.json)
+REMOTE_IMAGE="${REMOTE_IMAGE:-}"                  # SWR 镜像 URI (可留空=用配置文件 image_url)
+REMOTE_FLAVOR="${REMOTE_FLAVOR:-}"                # 910B4 规格名 (可留空=用配置文件 default_flavor)
+REMOTE_POOL_NAME="${REMOTE_POOL_NAME:-}"          # 专属池 (可空=用配置文件 pool_id)
 REMOTE_NPU_PER_JOB="${REMOTE_NPU_PER_JOB:-$NPU_PER_EXP}"  # 每作业卡数 (单 exp 不跨节点)
 REMOTE_MAX_JOBS="${REMOTE_MAX_JOBS:-14}"          # 在飞作业上限 (动态提交的上界)
 REMOTE_SUBMIT_RETRY_H="${REMOTE_SUBMIT_RETRY_H:-24}" # 提交被拒重试时限 (小时)
@@ -245,26 +248,43 @@ if [ "$REMOTE_ENABLED" = "1" ]; then
     mkdir -p "$OUTPUT_DIR"
     REMOTE_CONFIG_PATH="$OUTPUT_DIR/remote_config.json"
     REMOTE_CONFIG_ARG="--remote-config $REMOTE_CONFIG_PATH"
-    if [ "$REMOTE_LOCAL_PARALLEL" = "1" ]; then REMOTE_LP_JSON=true; else REMOTE_LP_JSON=false; fi
-    python3 - "$REMOTE_CONFIG_PATH" <<PYEOF
-import json, sys
+    # Export for the config-gen heredoc below (namespaced, harmless).
+    export REMOTE_OBS_PREFIX REMOTE_BACKEND REMOTE_MA_CONFIG REMOTE_IMAGE \
+           REMOTE_FLAVOR REMOTE_POOL_NAME REMOTE_NPU_PER_JOB REMOTE_MAX_JOBS \
+           REMOTE_SUBMIT_RETRY_H REMOTE_MAX_PREP REMOTE_LOCAL_PARALLEL \
+           REMOTE_STORAGE_KIND REMOTE_STORAGE_ROOT REMOTE_JOB_TIMEOUT_H
+    python3 - "$REMOTE_CONFIG_PATH" "$REMOTE_MA_CONFIG" "$REMOTE_IMAGE" "$REMOTE_FLAVOR" <<'PYEOF'
+import json, sys, os
+cfg_path, ma_config, image, flavor = sys.argv[1:5]
 cfg = {
-    "obs_prefix": "$REMOTE_OBS_PREFIX",
-    "backend": "$REMOTE_BACKEND",
-    "image": "$REMOTE_IMAGE",
-    "flavor": "$REMOTE_FLAVOR",
-    "pool_name": "$REMOTE_POOL_NAME",
-    "npu_per_job": int("${REMOTE_NPU_PER_JOB}"),
-    "max_concurrent_jobs": int("${REMOTE_MAX_JOBS}"),
-    "submit_retry_timeout_s": float("${REMOTE_SUBMIT_RETRY_H}") * 3600.0,
-    "max_prep_parallel": int("${REMOTE_MAX_PREP}"),
-    "local_parallel": $REMOTE_LP_JSON,
-    "storage_kind": "$REMOTE_STORAGE_KIND",
-    "storage_root": "$REMOTE_STORAGE_ROOT",
-    "job_timeout_s": float("${REMOTE_JOB_TIMEOUT_H}") * 3600.0,
-    "job_env": {"HF_ENDPOINT": "${HF_ENDPOINT}"},
+    "obs_prefix": os.environ["REMOTE_OBS_PREFIX"],
+    "backend": os.environ["REMOTE_BACKEND"],
+    "ma_config": ma_config,
+    "image": image,
+    "flavor": flavor,
+    "pool_name": os.environ["REMOTE_POOL_NAME"],
+    "npu_per_job": int(os.environ["REMOTE_NPU_PER_JOB"]),
+    "max_concurrent_jobs": int(os.environ["REMOTE_MAX_JOBS"]),
+    "submit_retry_timeout_s": float(os.environ["REMOTE_SUBMIT_RETRY_H"]) * 3600.0,
+    "max_prep_parallel": int(os.environ["REMOTE_MAX_PREP"]),
+    "local_parallel": os.environ["REMOTE_LOCAL_PARALLEL"] == "1",
+    "storage_kind": os.environ["REMOTE_STORAGE_KIND"],
+    "storage_root": os.environ["REMOTE_STORAGE_ROOT"],
+    "job_timeout_s": float(os.environ["REMOTE_JOB_TIMEOUT_H"]) * 3600.0,
+    "job_env": {"HF_ENDPOINT": os.environ["HF_ENDPOINT"]},
 }
-with open(sys.argv[1], "w") as f:
+if os.environ["REMOTE_BACKEND"] != "mock" and os.environ["REMOTE_STORAGE_KIND"] != "local":
+    # Real backend fail-fast: load the platform config + resolve
+    # image/flavor HERE, not mid-search (gateway/auth/image mistakes die
+    # at launch with a clear message; values are never printed).
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+    from climbmix.remote.modelarts_job_api import (load_ma_config,
+                                                   resolve_image_flavor_pool)
+    from climbmix.remote.remote_executor import RemoteConfig
+    ma = load_ma_config(ma_config or None)
+    resolve_image_flavor_pool(RemoteConfig.from_dict(cfg), ma)
+    print("  platform config OK (gateway/auth/image resolved; secrets not printed)")
+with open(cfg_path, "w") as f:
     json.dump(cfg, f, indent=2)
 PYEOF
     echo "  Remote fleet: ${REMOTE_MAX_JOBS} jobs x ${REMOTE_NPU_PER_JOB} NPU (backend=${REMOTE_BACKEND}, prefix=${REMOTE_OBS_PREFIX})"
@@ -277,10 +297,6 @@ PYEOF
             echo "  Hybrid fleet: local $((NUM_NPU / NPU_PER_EXP)) x ${NPU_PER_EXP} NPU + ${REMOTE_MAX_JOBS} remote jobs x ${REMOTE_NPU_PER_JOB} NPU"
         fi
     fi
-    [ "$REMOTE_BACKEND" = "mock" ] || [ "$REMOTE_STORAGE_KIND" = "local" ] || {
-        # real backend: image+flavor are mandatory (fail here, not mid-search)
-        [ -n "$REMOTE_IMAGE" ] && [ -n "$REMOTE_FLAVOR" ] || { echo "✗ REMOTE_ENABLED=1 (real backend) requires REMOTE_IMAGE and REMOTE_FLAVOR"; exit 1; }
-    }
 fi
 
 echo -e "\n════════════════════════════════════════════════════════════"

@@ -5,8 +5,9 @@ Two implementations:
     on the LOCAL filesystem. Paired with the worker's `--storage local`
     backend (same mapping convention) this gives a fully-functional fake OBS
     for laptop simulation and tests — the worker code path is 100% real.
-  - ModelArtsObsStorage: real adapter (moxing or esdk-obs — decided by the
-    M1 survey; interface is final).
+  - ModelArtsObsStorage: moxing adapter (mox.file.*) for both the submit
+    host and the job containers. Optional ak/sk come from the platform
+    config (config/remote_ma.example.json schema; see modelarts_job_api).
 """
 
 import os
@@ -99,41 +100,99 @@ class MockObsStorage:
 
 
 class ModelArtsObsStorage:
-    """Real OBS adapter — SKELETON (M1 deliverable).
+    """Real OBS adapter over the moxing SDK (mox.file.*).
 
-    Backend choice (docs/remote_setup.md survey): moxing (usually preinstalled
-    on ModelArts noteboooks/containers: `import moxing as mox`) or esdk-obs
-    (pip). Auth via AK/SK env (OBS_AK / OBS_SK / OBS_SERVER) or the
-    container's injected credentials. Interface is final; only the SDK calls
-    are missing.
+    Works on both the submit host (spec/shard upload, result download) and
+    inside job containers (the worker's `--storage moxing` uses the same
+    SDK directly). The ma_config "obs" section is OPTIONAL: ModelArts-
+    managed hosts have credentials injected, and the internal buckets are
+    reachable without explicit ak/sk; set them only when the plain import
+    fails auth (moxing reads the classic ACCESS_KEY_ID/SECRET_ACCESS_KEY
+    env vars — set here at construction, before the first call).
+
+    ma_config: dict, or a path (default: RemoteConfig.ma_config /
+    $CLIMBMIX_MA_CONFIG / ~/.config/climbmix/remote_ma.json — same
+    resolution as ModelArtsJobAPI).
     """
 
-    def __init__(self):
-        missing = [k for k in ("OBS_AK", "OBS_SK", "OBS_SERVER")
-                   if not os.environ.get(k)]
-        if missing:
-            raise NotImplementedError(
-                f"ModelArtsObsStorage: real adapter pending M1 environment "
-                f"survey (docs/remote_setup.md). Missing env config: "
-                f"{missing}. For local simulation use MockObsStorage.")
+    def __init__(self, ma_config=None):
+        if ma_config is None:
+            from climbmix.remote.modelarts_job_api import load_ma_config
+            ma_config = load_ma_config()
+        elif isinstance(ma_config, str):
+            from climbmix.remote.modelarts_job_api import load_ma_config
+            ma_config = load_ma_config(ma_config)
+        obs_cfg = dict(ma_config.get("obs") or {})
+        if obs_cfg.get("ak"):
+            # Classic moxing credential convention (no-ops when the host
+            # already has ModelArts-injected auth).
+            os.environ.setdefault("ACCESS_KEY_ID", str(obs_cfg["ak"]))
+            os.environ.setdefault("SECRET_ACCESS_KEY", str(obs_cfg["sk"]))
+        try:
+            import moxing as mox
+        except ImportError as e:
+            raise RuntimeError(
+                "ModelArtsObsStorage requires the moxing SDK on this host "
+                "(ModelArts images ship it; elsewhere check the M1 survey "
+                "step in docs/remote_setup.md §1). For laptop simulation "
+                "use MockObsStorage.") from e
+        self.mox = mox
+
+    # moxing URI convention: obs://bucket/key (bare /bucket/key is the
+    # GATEWAY's form for job fields — never passed here).
 
     def upload_file(self, local_path: str, obs_uri: str) -> None:
-        raise NotImplementedError("ModelArtsObsStorage: fill in after M1")
+        parent = obs_uri.rsplit("/", 1)[0]
+        self.mox.file.make_dirs(parent)
+        self.mox.file.copy(local_path, obs_uri)
 
     def download_file(self, obs_uri: str, local_path: str) -> None:
-        raise NotImplementedError("ModelArtsObsStorage: fill in after M1")
+        os.makedirs(os.path.dirname(local_path) or ".", exist_ok=True)
+        self.mox.file.copy(obs_uri, local_path)
 
     def upload_bytes(self, data: bytes, obs_uri: str) -> None:
-        raise NotImplementedError("ModelArtsObsStorage: fill in after M1")
+        import tempfile
+        fd, tmp = tempfile.mkstemp(suffix=".upload")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            self.upload_file(tmp, obs_uri)
+        finally:
+            os.remove(tmp)
 
     def download_bytes(self, obs_uri: str) -> bytes:
-        raise NotImplementedError("ModelArtsObsStorage: fill in after M1")
+        import tempfile
+        fd, tmp = tempfile.mkstemp(suffix=".download")
+        os.close(fd)
+        try:
+            self.download_file(obs_uri, tmp)
+            with open(tmp, "rb") as f:
+                return f.read()
+        finally:
+            os.remove(tmp)
 
     def list_objects(self, obs_uri: str) -> List[str]:
-        raise NotImplementedError("ModelArtsObsStorage: fill in after M1")
+        uri = obs_uri.rstrip("/")
+        if not self.mox.file.exists(uri):
+            return []
+        out = []
+        for entry in self.mox.file.list_directory(uri):
+            name = os.path.basename(str(entry).rstrip("/"))
+            if not name:
+                continue
+            try:
+                if self.mox.file.is_directory(f"{uri}/{name}"):
+                    continue
+            except Exception:
+                pass  # listing a file's neighbors is best-effort
+            out.append(f"{uri}/{name}")
+        return sorted(out)
 
     def stat(self, obs_uri: str) -> bool:
-        raise NotImplementedError("ModelArtsObsStorage: fill in after M1")
+        return bool(self.mox.file.exists(obs_uri))
 
     def delete(self, obs_uri: str) -> None:
-        raise NotImplementedError("ModelArtsObsStorage: fill in after M1")
+        try:
+            self.mox.file.remove(obs_uri)
+        except Exception:
+            self.mox.file.remove(obs_uri, recursive=True)
