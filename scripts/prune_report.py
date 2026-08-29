@@ -20,13 +20,13 @@ instant and a later run with the same sample size reuses them.
 Typical (server, full 100B pool, first run):
   python3 scripts/prune_report.py --data-dir /home/ma-user/work/100B_stem_parquet_filtered
   # Analyzes a seed-42 subset of 100 shards (~12M docs; metadata scan and
-  # text reads touch only those shards): ~2-4 min metadata + ~18 min
-  # single-NPU embedding of the 100K doc-level sample + minutes of K-means.
-  # --sample-shards 0 switches to the full 1000-shard pool (~20-40 min scan,
-  # same 100K sample); --sample-size 200000 doubles precision for ~35 min
-  # embedding. Smaller samples are fast but leave fewer docs per K_init=1000
-  # cluster (20K → ~20/cluster, cluster-mean SE ~0.11-0.22 — same order as
-  # the 0.25 threshold steps).
+  # text reads touch only those shards): ~2-4 min metadata + ~11 min
+  # 8-NPU embedding of the 500K doc-level sample (~750 docs/s aggregate) +
+  # ~5-10 min K-means (CPU).  --sample-shards 0 switches to the full
+  # 1000-shard pool (~20-40 min scan, same 500K sample). Smaller samples
+  # are faster but leave fewer docs per K_init=1000 cluster (100K → ~100/
+  # cluster, cluster-mean SE ~0.05-0.10 — same order as the 0.25 threshold
+  # steps; 20K → ~20/cluster).
 Re-run: seconds (all caches hit).
 
 No NPU? --embedding-device cpu works (20K docs ≈ tens of minutes).
@@ -87,12 +87,13 @@ def main():
                              "shards; 0 = all shards). Each selected shard "
                              "contributes ~sample_size/N docs to the doc-level "
                              "sample, so doc-level randomness is preserved")
-    parser.add_argument("--sample-size", type=int, default=100000,
+    parser.add_argument("--sample-size", type=int, default=500000,
                         help="docs to embed+cluster, sampled with the pipeline's "
-                             "seed-42 scheme (default 100000: ~100 docs per "
-                             "K_init=1000 cluster, cluster-mean SE ~0.05-0.10 "
-                             "on the 1-5 scale; 20K would leave ~20 docs/cluster "
-                             "and SE comparable to the 0.25 threshold steps)")
+                             "seed-42 scheme (default 500000: ~500 docs per "
+                             "K_init=1000 cluster, cluster-mean SE ~0.02-0.05 "
+                             "on the 1-5 scale and K-means centroids estimated "
+                             "from ~500 points each; ~11 min on 8 NPUs at "
+                             "~750 docs/s aggregate)")
     parser.add_argument("--K-init", type=int, default=1000,
                         help="K-means clusters (default 1000 = production; "
                              "speedrun used 100)")
