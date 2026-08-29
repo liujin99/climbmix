@@ -350,7 +350,7 @@ else
         --proxy-target-tokens "$PROXY_TARGET_TOKENS" \
         --target-tokens "$TARGET_TOKENS" \
         --schema "$CLIMBMIX_DIR/config/schema_stem.yaml" \
-        --skip-target
+        --skip-target 2>&1 | tee "$OUTPUT_DIR/search.log"
 fi
 
 [ ! -f "$OUTPUT_DIR/sampled_dataset.parquet" ] && { echo "✗ No sampled_dataset.parquet — Step 1-3 FAILED"; exit 1; }

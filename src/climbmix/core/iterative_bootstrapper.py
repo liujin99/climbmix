@@ -172,10 +172,28 @@ class IterativeBootstrapper:
             return 0
 
         try:
-            self._accumulated_scores = state["accumulated_scores"]
+            # None ≡ non-finite (atomic_write_json writes nan/inf as null):
+            # restore to float nan so downstream np.isfinite filtering and
+            # _best_index (treats non-finite as +inf) see the original value.
+            self._accumulated_scores = [
+                float("nan") if s is None else float(s)
+                for s in state["accumulated_scores"]
+            ]
             self._accumulated_configs = saved_configs
+
+            def _restore_pb(v):
+                # Whole-value None = unmeasured ({} = failed, dict = per-task
+                # results) — that None predates the JSON change, keep it.
+                # A null INSIDE a per-task dict was a non-finite float before
+                # the write sanitized it — back to nan (isfinite filters it).
+                if isinstance(v, dict):
+                    return {k: (float("nan") if x is None else x)
+                            for k, x in v.items()}
+                return v
+
             self._accumulated_per_benchmark = [
-                (d["acc"], d["nll"]) for d in state["accumulated_per_benchmark"]
+                (_restore_pb(d.get("acc")), _restore_pb(d.get("nll")))
+                for d in state["accumulated_per_benchmark"]
             ]
             # Tolerant: state files written before the predictor_eval /
             # online_eval / pruning_history features lack the keys (resume
@@ -631,22 +649,34 @@ class IterativeBootstrapper:
         )
 
         if val_configs_split is not None:
-            iter_result.predictor_r2 = float(self._predictor.score(
-                val_configs_split, val_targets_split,
-            ))
-            iter_result.predictor_spearman = self._predictor.val_spearman_
+            r2 = float(self._predictor.score(val_configs_split, val_targets_split))
+            rho = self._predictor.val_spearman_
+            # Small-N degenerate case: guided candidates can all land in one
+            # leaf → constant predictions → Spearman undefined (nan), and a
+            # constant val target → R² nan. Store None (JSON null) instead:
+            # literal NaN keeps Python's json.load happy but breaks jq and
+            # every strict RFC-8259 parser ("not valid json").
+            iter_result.predictor_r2 = r2 if np.isfinite(r2) else None
+            iter_result.predictor_spearman = (
+                float(rho) if rho is not None and np.isfinite(rho) else None
+            )
             # Persist held-out (pred, actual) pairs so a paper-Fig.9-style
             # analysis is possible post hoc (D.10 reports 94% Spearman at
             # 112 configs / 350M proxy; our N is smaller and labels noisier,
             # so expect lower — that is a budget artifact, not a bug).
             val_preds = self._predictor.predict(val_configs_split)
+            finite_pairs = [
+                (float(p), float(t))
+                for p, t in zip(val_preds, val_targets_split)
+                if np.isfinite(p) and np.isfinite(t)
+            ]
             self._predictor_eval.append({
                 "iteration": iteration,
                 "n_val": len(val_configs_split),
                 "val_r2": iter_result.predictor_r2,
                 "val_spearman": iter_result.predictor_spearman,
-                "val_preds": [float(p) for p in val_preds],
-                "val_targets": [float(t) for t in val_targets_split],
+                "val_preds": [p for p, _ in finite_pairs],
+                "val_targets": [t for _, t in finite_pairs],
             })
 
         self._iteration_results.append(iter_result)

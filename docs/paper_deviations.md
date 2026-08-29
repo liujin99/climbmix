@@ -65,6 +65,11 @@ n_estimators=500/lr=0.02/auto_adjust。
 注:`_compute_colsample`(predictor.py)的 colsample_bytree 公式在当前域
 (K_final≤15)恒被钳到 1.0,即休眠无操作——所有特征(簇配比)始终全量参与,
 非遗漏。
+注:小 N 下 held-out Spearman 必然 nan(非缺陷):K 簇只有 K+ 维特征,
+guided 采样的候选又全部落在 top-N 带内、特征向量高度相似,浅树
+(depth≤3)把它们路由到同一片叶子 → 预测恒定 →秩方差为零 → ρ 无定义。
+论文 D.10 的 94% 出现在 N=112(候选分散)。搜索状态里该值存 null
+(RFC-8259 不允许字面量 NaN),报告显示 N/A。
 
 ### D5/D6 聚类与合并
 论文:stella_en_400M_v5 嵌入 + FAISS 球面 K-means(K_init=1000)→ fasttext

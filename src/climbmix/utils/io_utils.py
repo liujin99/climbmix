@@ -9,7 +9,25 @@ next restart.
 """
 
 import json
+import math
 import os
+
+
+def _finite_json(obj):
+    """Recursively replace non-finite floats with None.
+
+    json.dump's default writes literal NaN/Infinity/-Infinity, which Python's
+    json.load reads back but jq and every strict RFC-8259 parser reject
+    ("not valid json"). null round-trips as None; callers that need the
+    non-finite semantics map None back to float('nan') on load.
+    """
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _finite_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_finite_json(v) for v in obj]
+    return obj
 
 
 def _clear_tmp(tmp_path: str) -> None:
@@ -43,7 +61,7 @@ def atomic_write_json(path: str, obj, default=None, indent=None) -> None:
     _clear_tmp(tmp)
     try:
         with open(tmp, "w") as f:
-            json.dump(obj, f, default=default, indent=indent)
+            json.dump(_finite_json(obj), f, default=default, indent=indent)
         os.replace(tmp, path)
     except BaseException:
         _clear_tmp(tmp)
