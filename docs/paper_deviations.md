@@ -54,6 +54,12 @@ sample M new configurations from the top N ranked configurations"。M/N 均
 predictor as the final data mixture weight"——纯 predictor argmax,但设计空间 A
 如何枚举未说明。我们 `_search_full_design_space`:4 个浓度级 × 25K 候选中取
 argmin(预测损失),再在其附近精搜 5K。语义一致,枚举方式是我们的具体化。
+注(2026-08-29,smoke_search 合成真值实验):低预算下纯 argmin 存在 optimizer's
+curse——树不外推,宽池角落的预测是 guided 带内叶值,argmin 专挑乐观的错,
+合成场景中选中的配置差于搜索自己已实测的最好配置(u 0.723 vs 1.009,N=112)。
+**决策:仍按论文原始做法**。候选修法"argmin 结果补训一次再与实测最好者比较"
+被否——多卡并行场景下批尾多一个实验要独占整组卡,约 +10h 串行尾延迟;该缺口
+随 predictor 精度上升而收窄(论文 N=112、ρ=94% 时预测最优≈真实最优)。
 
 ### D4 LightGBM
 论文 §3.1:"we set L1 and L2 regularization, early stopping, a maximum depth
