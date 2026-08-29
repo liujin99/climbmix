@@ -222,6 +222,37 @@ def generate_markdown_report(
                      f"({os.path.basename(scatter_path)})")
         lines.append("")
 
+    # Feature importance of the FINAL predictor (the one that drove the
+    # full-design-space selection): which clusters' weights the LightGBM
+    # actually split on. Split counts; Share = percent of all splits.
+    # Rendered only when in-memory iteration results carry a fitted model
+    # (fresh post-search report, or a resume which refits the predictor);
+    # skipped silently otherwise (e.g. report from a state file alone).
+    final_model = None
+    for r in reversed(iter_results):
+        m = getattr(getattr(r, "predictor", None), "_model", None)
+        if m is not None and hasattr(m, "feature_importances_"):
+            final_model = m
+            break
+    if final_model is not None:
+        imp = np.asarray(final_model.feature_importances_, dtype=np.float64)
+        if len(imp) == K and float(imp.sum()) > 0:
+            share = 100.0 * imp / float(imp.sum())
+            order = np.argsort(-imp)
+            lines.append("## Predictor Feature Importance")
+            lines.append("")
+            lines.append(
+                "Split counts of the final LightGBM predictor (the model that\n"
+                "drove the full-design-space selection): which cluster weights\n"
+                "the predictor actually used to rank mixtures.")
+            lines.append("")
+            lines.append("| Rank | Cluster | Splits | Share |")
+            lines.append("|---|---|---|---|")
+            for rank, k in enumerate(order, 1):
+                lines.append(f"| {rank} | {labels[k]} | {int(imp[k])} "
+                             f"| {share[k]:.1f}% |")
+            lines.append("")
+
     lines.append("## Search Pruning (top-N narrowing)")
     lines.append("")
     lines.append(
