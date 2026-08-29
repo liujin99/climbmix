@@ -167,6 +167,13 @@ export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 # / EL0004) in every proxy exp and Step 6 on 2026-08-26. Do not re-add
 # allocator overrides unless a specific need is proven on this hardware.
 export OMP_NUM_THREADS=1 WANDB_MODE=offline NANOCHAT_BASE_DIR="$NANOCHAT_BASE_DIR"
+# Cluster-stage CPU threads (faiss kmeans/assign): measured sweet spot on the
+# 192-vCPU aarch64 host (scripts/diagnostics/cluster_bench.py, 2026-08-29):
+# 24 threads = 281 GFLOP/s vs 141 at the old default min(cpu,64)=64 — sgemm
+# throughput collapses past ~24 threads on this box. Override by exporting
+# before launch. OMP_NUM_THREADS=1 above stays: it guards the NPU training
+# stage; cluster_embeddings_faiss re-raises the cap at call time.
+export CLIMBMIX_CLUSTER_THREADS="${CLIMBMIX_CLUSTER_THREADS:-24}"
 mkdir -p "$NANOCHAT_BASE_DIR"
 export ASCEND_HCCL_PATH=/usr/local/Ascend/ascend-toolkit/latest/hccl
 export LD_LIBRARY_PATH=${ASCEND_HCCL_PATH}/lib64:${LD_LIBRARY_PATH:-}

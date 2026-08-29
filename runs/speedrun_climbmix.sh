@@ -153,6 +153,9 @@ export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 # npu-smi clean after exit (live processes, not ghost memory). Do not re-add
 # allocator overrides unless a specific need is proven on this hardware.
 export OMP_NUM_THREADS=1 WANDB_MODE=offline NANOCHAT_BASE_DIR="$NANOCHAT_BASE_DIR"
+# same cluster-thread pin as run_climbmix.sh (measured on the 192-vCPU host;
+# harmless at speedrun scale, keeps the two scripts consistent)
+export CLIMBMIX_CLUSTER_THREADS="${CLIMBMIX_CLUSTER_THREADS:-24}"
 mkdir -p "$NANOCHAT_BASE_DIR"
 export ASCEND_HCCL_PATH=/usr/local/Ascend/ascend-toolkit/latest/hccl
 export LD_LIBRARY_PATH=${ASCEND_HCCL_PATH}/lib64:${LD_LIBRARY_PATH:-}
