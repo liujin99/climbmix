@@ -852,10 +852,7 @@ def preprocess_pipeline(
     Returns:
         Tuple of (cluster_info_list, final_cluster_labels).
     """
-    from climbmix.core.embedding_cluster import (
-        embed_documents, embed_texts_streaming, cluster_embeddings,
-        embed_documents_parallel,
-    )
+    from climbmix.core.embedding_cluster import embed_documents, embed_texts_streaming, cluster_embeddings
 
     print("\n" + "=" * 70)
     print("  CLIMB Preprocessing Pipeline")
@@ -864,12 +861,11 @@ def preprocess_pipeline(
     t0 = time.time()
 
     if texts is not None:
-        # Multi-NPU hosts embed the sample process-parallel (one worker per
-        # card); CPU/single-NPU falls back to embed_documents internally.
-        embeddings = embed_documents_parallel(
+        # Multi-NPU fan-out happens inside embed_documents (>= _MULTI_NPU_MIN_DOCS
+        # docs, falls back to single device on failure) — see embedding_cluster.
+        embeddings = embed_documents(
             texts, model_name=embedding_model,
             cache_path=embedding_cache, device=device,
-            truncate_len=embedding_truncate_len,
         )
     elif metadata_manager is not None:
         print("[Preprocess] Streaming mode: embedding shard-by-shard (no full text load)")
