@@ -1207,30 +1207,66 @@ def _cluster_thread_count() -> int:
     return min(os.cpu_count() or 1, 24)
 
 
-def _blas_single_thread(faiss_has_omp: bool):
-    """Context manager pinning BLAS pools to ONE thread during faiss compute.
+def _blas_single_thread(faiss_has_omp: bool, n_threads: int = 0):
+    """Context manager pinning BLAS pools to ONE thread during faiss compute,
+    while PRESERVING faiss's own OpenMP thread count.
 
-    faiss's OpenMP pool supplies the outer parallelism (one worker per query
-    block, each driving its own sgemm). If the env leaves OpenBLAS at its
-    default (all cores), every sgemm under every OpenMP worker spawns a full
-    BLAS pool — nested oversubscription that collapses throughput (measured
-    2.5x loss on a 8C/16T host; matches the 64-threads-requested-but-~23-
-    cores-busy plateau on the 192-vCPU aarch64 server where prune_report is
-    launched directly, without the run script's OMP_NUM_THREADS=1).
-    threadpoolctl reaches BOTH bundled OpenBLAS copies (faiss's + numpy's).
-    No-op when threadpoolctl is unavailable or faiss lacks OpenMP (a no-OMP
-    faiss runs sgemm on the main thread — BLAS parallelism is the only
-    parallelism there, so it must stay free).
+    Why the pin: numpy's pthread-built OpenBLAS defaults to all cores; left
+    free it oversubscribes under faiss's OpenMP workers. threadpoolctl
+    (user_api='blas') reaches both bundled OpenBLAS copies.
+
+    Why the re-assert: faiss wheels bundle an OpenMP-BUILT OpenBLAS
+    (libopenblaso) sharing one libgomp with faiss itself. threadpoolctl's
+    openblas_set_num_threads(1) then forwards to omp_set_num_threads(1) on
+    that SHARED runtime — silently clobbering the faiss pool we just sized
+    (reproduced locally: set 24 -> 1 inside the pin; in production it logged
+    threads=24 then ran single-threaded: 1% CPU, 118 s per K-means iteration
+    on the 192-vCPU host). We re-assert AFTER entering the pin and again
+    after leaving (threadpoolctl's restore path can clobber a second time);
+    a sentinel warns if the re-assert doesn't stick.
+
+    No-op when faiss lacks OpenMP (a no-OMP faiss runs sgemm on the main
+    thread — BLAS parallelism is the only parallelism there, so it must
+    stay free), when n_threads is unset, or when threadpoolctl is
+    unavailable.
     """
-    if not faiss_has_omp:
-        from contextlib import nullcontext
-        return nullcontext()
+    from contextlib import contextmanager
+
     try:
         from threadpoolctl import threadpool_limits
     except ImportError:
-        from contextlib import nullcontext
-        return nullcontext()
-    return threadpool_limits(limits=1, user_api="blas")
+        threadpool_limits = None
+
+    if not faiss_has_omp or n_threads <= 0 or threadpool_limits is None:
+        @contextmanager
+        def _unpinned():
+            yield
+        return _unpinned()
+
+    @contextmanager
+    def _pinned():
+        import faiss
+
+        def _reassert(where):
+            try:
+                faiss.omp_set_num_threads(n_threads)
+                got = faiss.omp_get_max_threads()
+            except AttributeError:
+                return
+            if got != n_threads:
+                print(f"[Cluster] WARNING: faiss OpenMP pool reads {got} threads "
+                      f"after {where} the BLAS pin (expected {n_threads}) — "
+                      f"clustering is correct but slow; check the "
+                      f"faiss/threadpoolctl interaction on this host")
+
+        try:
+            with threadpool_limits(limits=1, user_api="blas"):
+                _reassert("entering")
+                yield
+        finally:
+            _reassert("leaving")
+
+    return _pinned()
 
 
 def cluster_embeddings_faiss(
@@ -1277,7 +1313,8 @@ def cluster_embeddings_faiss(
 
     try:
         from threadpoolctl import threadpool_limits  # noqa: F401
-        blas_note = "blas=1(pinned)" if faiss_has_omp else "blas=free"
+        blas_note = ("blas=1(pinned+reassert)" if faiss_has_omp
+                     else "blas=free")
     except ImportError:
         blas_note = "blas=env(unpinned)"
 
@@ -1315,7 +1352,7 @@ def cluster_embeddings_faiss(
         zero_mask = None
 
     t0 = time.time()
-    with _blas_single_thread(faiss_has_omp):
+    with _blas_single_thread(faiss_has_omp, n_threads):
         try:
             kmeans = faiss.Kmeans(
                 dim,

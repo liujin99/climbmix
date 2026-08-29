@@ -271,22 +271,36 @@ GFLOP/call):
 | 192 | 114 | |
 
 结论与动作:
-- **嵌套线程池是首要瓶颈**(已修, a3a075a): faiss 捆绑的 OpenBLAS 是
-  OpenMP 构建,直接 `python3` 跑(prune_report 场景,不经 run 脚本)时
-  `OMP_NUM_THREADS` 未设 → OpenBLAS 默认吃满 192 → 64 个 OpenMP worker
-  × 192 个 BLAS 线程互相踩踏。修复后同 64 线程 112→141 GFLOP/s。
+- **机制更正 + 钉扎 clobber 二次修复(同日晚)**: 前一版把首要瓶颈记为
+  "嵌套线程池踩踏"——**错**。这版 wheel(faiss 1.14.3 x86 / 1.15.0
+  aarch64)捆绑的是 **OpenMP 构建的 OpenBLAS(libopenblaso),与 faiss
+  共享同一份 libgomp**;OpenMP 默认 nested=off → 4316d64 直跑时的
+  真实形态是"64 个 worker 各自串行跑 1 线程 sgemm"(≈bench 64 线程
+  的 141 GFLOP/s,与 480.3s 反推的 112 量级吻合),没有踩踏。而
+  a3a075a 引入的 threadpoolctl 钉扎反而把 faiss 自己的 OMP 池一起
+  踩成 1——`openblas_set_num_threads(1)` 在 OpenMP 构建上转发到
+  共享 libgomp 的 `omp_set_num_threads(1)`。生产实测: 日志照打
+  `threads=24, blas=1(pinned)`,实际 1% CPU、118s/迭代(≈4.4
+  GFLOP/s),500K 训练预计 ~3.3h,比 4316d64 还慢。修复:
+  `_blas_single_thread` 在进钉扎后与退出时各**重申**一次
+  `faiss.omp_set_num_threads`(日志改 `blas=1(pinned+reassert)`),
+  重申不生效打 WARNING 哨兵;bench 新增 `_pin_probe`(按生产顺序
+  omp_set→threadpool_limits 的探针,本机 x86 实测报 CLOBBERED)。
+  本地回归: 修复路径 95 GFLOP/s vs clobber 模拟 25 GFLOP/s
+  (8 线程 3.8×)。
 - **甜点 24 ≠ 旧默认 64**: >24 线程吞吐崩塌(块调度粒度 query_bs=4096
   → 256K 行只有 64 个工作块 + NUMA),追机制不值——直接钉。
   库默认已改为 `min(cpu, 24)`(`_cluster_thread_count`),所有入口
   (run 脚本/直接跑 prune_report/discovery)统一落在甜点;
   run 脚本仍显式 export 24(双保险);换机器先跑 bench,
   甜点不同则 `CLIMBMIX_CLUSTER_THREADS=N` 覆盖。
-- **新旧代码对账**(用户实测 480.3s vs 新代码预测 ~192s,2026-08-29):
-  500K 采样跑(4316d64, threads=64, BLAS 未钉)总时 480.3s;每个 redo
-  20 迭代 ≈93s(日志增量 96.3→189.1→284.7→377.6→467.9)→ 每迭代
-  4.66s × 524 GFLOP = **112 GFLOP/s 有效吞吐**,与 bench 的 64 线程
-  未钉情形吻合。新代码(24 线程+钉 BLAS, 281 GFLOP/s)同工作量
-  ≈ 480.3×(112/281) ≈ **192s ≈ 3.2 min**。两个数字都对,差的是版本。
+- **新旧代码对账**(勘误: 原预测"新代码 ~192s"从未兑现,见首条):
+  4316d64 的 480.3s 测量与 112 GFLOP/s 反推成立(机制如上更正);
+  a3a075a..7483ee5 的"pinned"路径因 clobber 实际退化为 1 线程
+  (~3.3h,从未端到端跑完过);clobber 修复后 24 线程才真正落地,
+  预期 500K 训练+指派 ≈ 192-240s,由服务器重跑验证。
+  曾记的"本地嵌套惩罚 1.4-2.5×"测的是 numpy 的 pthread 版 OpenBLAS
+  路径,不适用于 faiss 捆绑的 sgemm,已作废。
 - **对全量跑的量级**(新代码): kmeans 训练固定采样 256K 点(与池大小
   无关)≈ 100×1.87s+预处理+末次指派 ≈ **3.5 min**;当前池全量指派
   11.61M docs = 23.8 TFLOP → **≈85 s**;真 100B 池(≈125M docs,

@@ -101,6 +101,43 @@ def _default_sweep(cpu):
     return sorted(cands)
 
 
+def _pin_probe():
+    """Replicate the PRODUCTION pin path and report whether it clobbers
+    faiss's OpenMP pool: omp_set_num_threads(t) FIRST, then
+    threadpool_limits(1, 'blas') — the exact order cluster_embeddings_faiss
+    uses. Wheels bundling an OpenMP-built OpenBLAS (libopenblaso) sharing
+    libgomp with faiss get clobbered here: openblas_set_num_threads(1)
+    forwards to omp_set_num_threads(1) on the shared runtime. The env-pin
+    this script applies BEFORE import does NOT hit this (order reversed),
+    so without this probe the sweep measures a configuration production
+    never runs. Production re-asserts around the pin (embedding_cluster
+    _blas_single_thread); a CLOBBERED reading here means that re-assert is
+    load-bearing on this host."""
+    if not hasattr(faiss, "omp_set_num_threads"):
+        print("\npin probe: faiss has no OpenMP — SKIP")
+        return
+    try:
+        from threadpoolctl import threadpool_limits
+    except ImportError:
+        print("\npin probe: threadpoolctl missing — production pin is a "
+              "no-op; SKIP")
+        return
+    t = min(os.cpu_count() or 1, 24)
+    faiss.omp_set_num_threads(t)
+    before = faiss.omp_get_max_threads()
+    with threadpool_limits(limits=1, user_api="blas"):
+        inside = faiss.omp_get_max_threads()
+    after = faiss.omp_get_max_threads()
+    if inside == before and after == before:
+        print(f"\npin probe: set {t} -> inside pin {inside}, after exit "
+              f"{after} [OK]")
+    else:
+        print(f"\npin probe: set {t} -> inside pin {inside}, after exit "
+              f"{after} [CLOBBERED — the pin itself collapses faiss's pool; "
+              f"production _blas_single_thread re-asserts around it]")
+    faiss.omp_set_num_threads(1)
+
+
 def bench_threads(x, c, sweep, repeats=1):
     n, k, d = x.shape[0], c.shape[0], x.shape[1]
     gflop = n * k * d * 2 / 1e9
@@ -191,6 +228,7 @@ def main():
 
     GFLOP_PER_ROW = args.k * args.d * 2 / 1e9
     _cpu_banner()
+    _pin_probe()
     # uniform gemm path across sizes (small n would otherwise take the seq
     # path and measure the wrong kernel)
     faiss.cvar.distance_compute_blas_threshold = 1
