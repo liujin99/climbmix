@@ -111,20 +111,76 @@ per node (cache across jobs if the pool reuses nodes).
    (dispatch_remote) into separate throwaway output dirs; compare
    `mixture_data/shard_*.parquet` sha256 (must be byte-identical) and
    `stem_metric` (Δ < 0.002 — TODO.md M3 criterion).
-3. Green → set `REMOTE_ENABLED=1 ... bash runs/run_climbmix.sh`.
+3. Concurrency wave: dispatch 2-4 experiments at once (separate shells /
+   sequential submissions while earlier jobs still run — each its own
+   `--exp-id` + `--weights` + throwaway `--output-dir`) and watch the
+   dynamic scheduler against the REAL pool: job completion frees a slot
+   and the next config starts with zero backoff; capacity rejections
+   back off and retry; the in-flight peak matches the intended slots.
+   This wave also verifies the two-anchor throughput prediction
+   T(4) ≈ 5.3h incidentally (dedicated S(k) measurement skipped by
+   decision 2026-08-28 — the two-anchor model's S(4)≈3.5 assumption gets
+   its first real datapoint here, no extra experiment needed).
+4. Green → set `REMOTE_ENABLED=1 ... bash runs/run_climbmix.sh`.
 
-## Production launch (M5) — knob summary
+## Production launch (M5) — recommended knobs & calculation
+
+### First production run (recommended 2026-08-28)
+
+| Knob | Value | Rationale |
+|---|---|---|
+| `NPU_PER_EXP` | **4** | λ_max ≈ 5h for the first run (disaster cap ~74 card·h @32-card pool, half-day verification window — docs/parallel_k_selection.md §5.1). `REMOTE_NPU_PER_JOB` defaults to `NPU_PER_EXP`; do NOT set it separately — k stays fleet-wide fixed for score comparability. |
+| `REMOTE_MAX_JOBS` | **⌊A_eff/4⌋, typically 6-8** | A_eff = expected pool median~P25 (24-32 cards), NOT the peak. Mid-run growth is absorbed by the capacity monitor (jobs start as idle cards appear); shrink only queues pickups, never kills in-flight jobs. |
+| `REMOTE_LOCAL_PARALLEL` | 1 (default) | Master node's 8 cards join the fleet: 2 more k=4 slots (configs run via the local parallel path while remote jobs are in flight). |
+| `REMOTE_MAX_PREP` | 4 (default) | Prep/upload semaphore on the master node — raise only if I/O is confirmed idle; it never needs to match the job count. |
+| `REMOTE_SUBMIT_RETRY_H` | 24 (default) | Backoff net for probe/submit races; also the whole capacity story when the region has NO quota-query API (fixed limit + rejected-submit retry). |
+| `REMOTE_JOB_TIMEOUT_H` | 6 (default) | T(4) ≈ 5.3h + margin. |
+
+Wall-clock estimate for [20,10,5] (35 configs): C = 2 local + 6-8 remote ≈ 8
+slots → waves ⌈20/8⌉+⌈10/8⌉+⌈5/8⌉ = 3+2+1 = 6 → **Wall ≈ 5.3h × 6 ≈ 32h**
+(search ~1.5 days). Target arms stay local (ws=8, ~6h each + eval).
+
+### Recalculating for the next run (the 30-second method)
+
+Full decision model: `docs/parallel_k_selection.md`. Short version:
+
+1. **Slots** `C(k) = 8/k (local) + ⌊A_eff/k⌋ (remote, node-packed)` —
+   A_eff = pool median~P25, k ∈ {1,2,4,8}.
+2. **Wall** `Wall(k) = T(k) × Σᵢ ⌈nᵢ/C(k)⌉` with T(k) from the cost table
+   (T(1)=18.6h, T(2)=10.0h, T(4)=5.3h, T(8)=2.8h; full-set eval included).
+3. **Constraints on k**: λ_max = T(k) ≤ 5h while the pipeline is
+   unverified (→ k ≥ 4); relax to ~10h (→ k ≥ 2) once one run is green —
+   k=2 saves scaling tax (7.5% vs 13%) plus node-packing leftovers.
+   **k never changes mid-run** (score comparability).
+4. Optionally re-shape {nᵢ} to multiples of C so every wave packs 100%
+   (zero barrier idle — the dominant cost, 30-80% ≫ the scaling tax).
+
+Second run (after first green): λ_max ≈ 10h → **k=2**, recompute C and
+`REMOTE_MAX_JOBS` with the same formulas; A_eff should be re-eyeballed
+from the first run's observed pool (console monitoring, or the
+submission cadence visible in the `[Exp N] submitted job ...` lines).
+
+### Launch command
 
 ```bash
 REMOTE_ENABLED=1 \
 REMOTE_OBS_PREFIX=obs://<bucket>/climbmix_prod \
 REMOTE_IMAGE=<swr-uri-or-built-in> \
 REMOTE_FLAVOR=<ascend-flavor> \
-REMOTE_NPU_PER_JOB=1 \          # k per docs/parallel_k_selection.md
-REMOTE_MAX_JOBS=<pool capacity> \
-REMOTE_LOCAL_PARALLEL=1 \       # hybrid: local 8 cards join the fleet
+NPU_PER_EXP=4 \
+REMOTE_MAX_JOBS=6 \
 bash runs/run_climbmix.sh
+# REMOTE_NPU_PER_JOB defaults to NPU_PER_EXP (=4, fleet-wide k)
+# REMOTE_LOCAL_PARALLEL defaults to 1 (local 8 cards = 2 slots)
+# REMOTE_MAX_PREP=4, REMOTE_SUBMIT_RETRY_H=24, REMOTE_JOB_TIMEOUT_H=6 (defaults)
 ```
+
+Decision record (2026-08-28): the launch planner (k-selection §5 three-step
+method) is deliberately NOT automated — it runs once per production launch
+with human eyeballs on the live pool shape; the table + formulas above are
+the entire procedure. S(k) is likewise not separately benchmarked: the
+two-anchor model (S(4)≈3.5) gets its first real datapoint from M3's
+concurrency wave, retroactively validating T(4).
 
 All `REMOTE_*` knobs are execution-shape only (num_npu precedent) and are
 deliberately excluded from the stage fingerprints. NOTE: the remote CODE
