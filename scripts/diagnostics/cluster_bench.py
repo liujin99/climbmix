@@ -69,12 +69,51 @@ def _make_problem(n, k, d, seed):
 def _cpu_banner():
     print(f"cpu_count={os.cpu_count()} arch={platform.machine()}")
     try:
+        print(f"affinity={len(os.sched_getaffinity(0))} vCPUs")
+    except (AttributeError, OSError):
+        pass
+    try:
         with open("/proc/cpuinfo") as f:
             names = {ln.split(":", 1)[1].strip()
                      for ln in f if ln.startswith("model name")}
         if names:
             print(f"model: {sorted(names)[0]}")
     except OSError:
+        pass
+    # Host ceilings that no thread count can fix: cgroup CPU quota
+    # (v1/v2), other load, and hypervisor steal. A 192-vCPU host whose
+    # sweep saturates at ~13 busy cores with quota 192 and steal > 0 is
+    # oversubscribed — the sweet spot then measures the leftover window,
+    # not the hardware (measured 2026-08-29: same box, 281 GFLOP/s in a
+    # quiet window vs 130-151 sustained in production).
+    try:
+        with open("/proc/loadavg") as f:
+            print(f"loadavg: {f.read().strip()}")
+    except OSError:
+        pass
+    for name, fn in (("cpu.max(v2)", "cpu.max"),
+                     ("cpuset.cpus(v2)", "cpuset.cpus.effective"),
+                     ("cpu.cfs_quota(v1)", "cpu/cpu.cfs_quota_us"),
+                     ("cpu.cfs_period(v1)", "cpu/cpu.cfs_period_us")):
+        try:
+            with open(f"/sys/fs/cgroup/{fn}") as f:
+                print(f"{name}: {f.read().strip()}")
+        except OSError:
+            pass
+    try:
+        def _steal():
+            with open("/proc/stat") as f:
+                v = list(map(int, f.readline().split()[1:9]))
+            return v[7], sum(v)
+        s0, t0 = _steal()
+        time.sleep(1.0)
+        s1, t1 = _steal()
+        if t1 > t0:
+            print(f"steal: {(s1 - s0) / (t1 - t0) * 100:.1f}% of vCPU "
+                  f"time over a 1s idle sample (host-wide unless "
+                  f"lxcfs-masked; sustained steal during the sweep = the "
+                  f"ceiling is the host, not the code)")
+    except (OSError, IndexError, ValueError):
         pass
     print(f"faiss {faiss.__version__}; BLAS pinned via env "
           f"(OPENBLAS={os.environ.get('OPENBLAS_NUM_THREADS')}, "
