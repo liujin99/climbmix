@@ -1202,6 +1202,32 @@ def _cluster_thread_count() -> int:
     return min(os.cpu_count() or 1, 64)
 
 
+def _blas_single_thread(faiss_has_omp: bool):
+    """Context manager pinning BLAS pools to ONE thread during faiss compute.
+
+    faiss's OpenMP pool supplies the outer parallelism (one worker per query
+    block, each driving its own sgemm). If the env leaves OpenBLAS at its
+    default (all cores), every sgemm under every OpenMP worker spawns a full
+    BLAS pool — nested oversubscription that collapses throughput (measured
+    2.5x loss on a 8C/16T host; matches the 64-threads-requested-but-~23-
+    cores-busy plateau on the 192-vCPU aarch64 server where prune_report is
+    launched directly, without the run script's OMP_NUM_THREADS=1).
+    threadpoolctl reaches BOTH bundled OpenBLAS copies (faiss's + numpy's).
+    No-op when threadpoolctl is unavailable or faiss lacks OpenMP (a no-OMP
+    faiss runs sgemm on the main thread — BLAS parallelism is the only
+    parallelism there, so it must stay free).
+    """
+    if not faiss_has_omp:
+        from contextlib import nullcontext
+        return nullcontext()
+    try:
+        from threadpoolctl import threadpool_limits
+    except ImportError:
+        from contextlib import nullcontext
+        return nullcontext()
+    return threadpool_limits(limits=1, user_api="blas")
+
+
 def cluster_embeddings_faiss(
     embeddings: npt.NDArray[np.float32],
     K_init: int = 1000,
@@ -1236,14 +1262,22 @@ def cluster_embeddings_faiss(
     n_docs = embeddings.shape[0]
 
     n_threads = _cluster_thread_count()
+    faiss_has_omp = hasattr(faiss, "omp_set_num_threads")
+    if faiss_has_omp:
+        try:
+            faiss.omp_set_num_threads(n_threads)
+            n_threads = faiss.omp_get_max_threads()
+        except AttributeError:
+            faiss_has_omp = False
+
     try:
-        faiss.omp_set_num_threads(n_threads)
-        n_threads = faiss.omp_get_max_threads()
-    except AttributeError:
-        pass
+        from threadpoolctl import threadpool_limits  # noqa: F401
+        blas_note = "blas=1(pinned)" if faiss_has_omp else "blas=free"
+    except ImportError:
+        blas_note = "blas=env(unpinned)"
 
     print(f"[Cluster] FAISS K-means: K={K_init}, dim={dim}, n_docs={n_docs}, "
-          f"threads={n_threads}")
+          f"threads={n_threads}, {blas_note}")
 
     # At-scale path: a disk memmap (fresh full-pool embed run) cannot go
     # through the in-memory prescan/assign — np.isnan() and nan_to_num on
@@ -1276,37 +1310,38 @@ def cluster_embeddings_faiss(
         zero_mask = None
 
     t0 = time.time()
-    try:
-        kmeans = faiss.Kmeans(
-            dim,
-            K_init,
-            niter=n_iter,
-            nredo=n_redo,
-            verbose=True,
-            seed=seed,
-            spherical=True,
-        )
-        # faiss subsamples training points internally (max 256/centroid),
-        # so train never materializes the full matrix even for a memmap.
-        kmeans.train(embeddings)
+    with _blas_single_thread(faiss_has_omp):
+        try:
+            kmeans = faiss.Kmeans(
+                dim,
+                K_init,
+                niter=n_iter,
+                nredo=n_redo,
+                verbose=True,
+                seed=seed,
+                spherical=True,
+            )
+            # faiss subsamples training points internally (max 256/centroid),
+            # so train never materializes the full matrix even for a memmap.
+            kmeans.train(embeddings)
 
-        centroids = kmeans.centroids
-        index = faiss.IndexFlatIP(dim)
-        index.add(centroids)
+            centroids = kmeans.centroids
+            index = faiss.IndexFlatIP(dim)
+            index.add(centroids)
 
-        if isinstance(embeddings, np.memmap):
-            from climbmix.core.cluster_assign import assign_in_chunks
-            labels = assign_in_chunks(index, embeddings, chunk_rows)
-        else:
-            _, labels = index.search(embeddings, 1)
-            labels = labels.reshape(-1).astype(np.int64)
-            zero_mask = np.all(embeddings == 0, axis=1)
-    finally:
-        if sanitized_sidecar is not None:
-            try:
-                os.remove(sanitized_sidecar)
-            except OSError:
-                pass
+            if isinstance(embeddings, np.memmap):
+                from climbmix.core.cluster_assign import assign_in_chunks
+                labels = assign_in_chunks(index, embeddings, chunk_rows)
+            else:
+                _, labels = index.search(embeddings, 1)
+                labels = labels.reshape(-1).astype(np.int64)
+                zero_mask = np.all(embeddings == 0, axis=1)
+        finally:
+            if sanitized_sidecar is not None:
+                try:
+                    os.remove(sanitized_sidecar)
+                except OSError:
+                    pass
 
     n_zero = zero_mask.sum()
     if n_zero > 0:
