@@ -224,3 +224,32 @@ CANN/PyTorch NPU 的缓存分配器（caching allocator）行为：
 
 - 警告："The `tokenize` method is deprecated, please use `preprocess` instead"
 - 尚未切换到 `preprocess`，功能正常但有潜在风险
+
+---
+
+## 7. At-scale 聚类阶段的内存墙与分块指派（2026-08-29）
+
+嵌入完成后的聚类阶段(K-means 训练 + 全量指派)在 116M docs × 1024 dim
+fp32(≈475 GB)下不能整矩阵进内存。逐项分析(`cluster_assign.py` /
+`cluster_embeddings_faiss` memmap 路径):
+
+| 操作 | 整内存路径峰值 | 分块路径峰值 |
+|---|---|---|
+| `np.isnan(emb)`/`emb == 0` 全矩阵布尔 | ~119 GB ×2 次 | 一个块 |
+| `np.nan_to_num` 整拷贝 | ~475 GB | 0(干净池)/一个块(边车) |
+| `kmeans.train` | faiss 内部采样 ≤256×K_init 点(~1 GB) | 同左(不变) |
+| `index.search` 标签输出 | 输入已在 RAM + ~1.4 GB | 一个块 + 0.93 GB 标签 |
+| **合计(新跑,memmap 输入)** | **>500 GB(OOM 风险)** | **≈ 块大小 + ~1 GB** |
+
+关键事实:
+- **指派逐行独立**(每行与 1000 质心算内积取 argmax),分块只改 I/O 批次,
+  标签与整内存路径**逐元素相等**(测试断言 exact equality,非近似)。
+- 块大小 = min(MemAvailable, cgroup limit)/8,钳 [64 MB, 8 GB];
+  `CLIMB_ASSIGN_CHUNK_GB` 可覆盖。>8 GB 无收益(总 I/O 与计算量不变,
+  faiss 百万行批即打满线程);cgroup 项防容器误读(/proc/meminfo 报宿主机)。
+- 路由:**memmap 输入(新跑)→ 分块;ndarray(npz 缓存命中/子样本)→ 原路径
+  一字不改**。当前服务器 1.5 TB RAM 下两路径结果一致。
+- 磁盘共存期提醒:新跑时 memmap(475 GB)与 npz 缓存(475 GB)短暂共存
+  ≈950 GB;盘不够时改 OBS 存储(见 TODO E)。
+- RLIMIT_AS 实测(1.6 GB memmap、2.5 GB 地址空间上限):分块路径通过,
+  整载路径 MemoryError——墙真实存在且解有效。

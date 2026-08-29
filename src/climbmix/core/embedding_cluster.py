@@ -1245,33 +1245,69 @@ def cluster_embeddings_faiss(
     print(f"[Cluster] FAISS K-means: K={K_init}, dim={dim}, n_docs={n_docs}, "
           f"threads={n_threads}")
 
-    n_nan = np.isnan(embeddings).any(axis=1).sum()
-    n_inf = np.isinf(embeddings).any(axis=1).sum()
-    if n_nan > 0 or n_inf > 0:
-        print(f"[Cluster] WARNING: {n_nan} NaN + {n_inf} Inf rows found, replacing with zeros")
-        embeddings = np.nan_to_num(embeddings, nan=0.0, posinf=0.0, neginf=0.0)
+    # At-scale path: a disk memmap (fresh full-pool embed run) cannot go
+    # through the in-memory prescan/assign — np.isnan() and nan_to_num on
+    # the full matrix materialize 119/475 GB intermediates. Chunked
+    # equivalents are elementwise-identical (row-independent argmax);
+    # sizing is cgroup-aware (see cluster_assign). In-RAM ndarrays
+    # (speedrun / npz cache hit) keep the original single-shot code path.
+    sanitized_sidecar = None
+    if isinstance(embeddings, np.memmap):
+        from climbmix.core.cluster_assign import (
+            assign_in_chunks, choose_chunk_rows, sanitize_memmap_to,
+            scan_row_anomalies, sidecar_path_for,
+        )
+        chunk_rows = choose_chunk_rows(dim)
+        print(f"[Cluster] memmap input ({n_docs:,} x {dim}) — chunked "
+              f"prescan/assign, chunk={chunk_rows:,} rows")
+        n_nan, n_inf, zero_mask = scan_row_anomalies(embeddings, chunk_rows)
+        if n_nan > 0 or n_inf > 0:
+            print(f"[Cluster] WARNING: {n_nan} NaN + {n_inf} Inf rows found, "
+                  f"replacing with zeros (chunked side-car copy)")
+            sanitized_sidecar = sidecar_path_for(embeddings)
+            embeddings = sanitize_memmap_to(
+                embeddings, sanitized_sidecar, chunk_rows)
+    else:
+        n_nan = np.isnan(embeddings).any(axis=1).sum()
+        n_inf = np.isinf(embeddings).any(axis=1).sum()
+        if n_nan > 0 or n_inf > 0:
+            print(f"[Cluster] WARNING: {n_nan} NaN + {n_inf} Inf rows found, replacing with zeros")
+            embeddings = np.nan_to_num(embeddings, nan=0.0, posinf=0.0, neginf=0.0)
+        zero_mask = None
 
     t0 = time.time()
+    try:
+        kmeans = faiss.Kmeans(
+            dim,
+            K_init,
+            niter=n_iter,
+            nredo=n_redo,
+            verbose=True,
+            seed=seed,
+            spherical=True,
+        )
+        # faiss subsamples training points internally (max 256/centroid),
+        # so train never materializes the full matrix even for a memmap.
+        kmeans.train(embeddings)
 
-    kmeans = faiss.Kmeans(
-        dim,
-        K_init,
-        niter=n_iter,
-        nredo=n_redo,
-        verbose=True,
-        seed=seed,
-        spherical=True,
-    )
-    kmeans.train(embeddings)
+        centroids = kmeans.centroids
+        index = faiss.IndexFlatIP(dim)
+        index.add(centroids)
 
-    centroids = kmeans.centroids
-    index = faiss.IndexFlatIP(dim)
-    index.add(centroids)
+        if isinstance(embeddings, np.memmap):
+            from climbmix.core.cluster_assign import assign_in_chunks
+            labels = assign_in_chunks(index, embeddings, chunk_rows)
+        else:
+            _, labels = index.search(embeddings, 1)
+            labels = labels.reshape(-1).astype(np.int64)
+            zero_mask = np.all(embeddings == 0, axis=1)
+    finally:
+        if sanitized_sidecar is not None:
+            try:
+                os.remove(sanitized_sidecar)
+            except OSError:
+                pass
 
-    _, labels = index.search(embeddings, 1)
-    labels = labels.reshape(-1).astype(np.int64)
-
-    zero_mask = np.all(embeddings == 0, axis=1)
     n_zero = zero_mask.sum()
     if n_zero > 0:
         print(f"[Cluster] {n_zero} docs have zero/NaN embeddings — excluding from clusters")

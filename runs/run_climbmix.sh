@@ -344,7 +344,7 @@ else
         --resume-search \
         --schema "$CLIMBMIX_DIR/config/schema_stem.yaml" \
         $REMOTE_CONFIG_ARG \
-        --skip-target
+        --skip-target 2>&1 | tee "$OUTPUT_DIR/search.log"
 fi
 
 [ ! -f "$OUTPUT_DIR/sampled_dataset.parquet" ] && { echo "✗ No sampled_dataset.parquet"; exit 1; }
