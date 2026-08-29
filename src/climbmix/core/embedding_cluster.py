@@ -1059,6 +1059,275 @@ def embed_texts_streaming(
     return np.array(all_embeddings)
 
 
+def _contiguous_ranges(n_items: int, n_parts: int) -> List[Tuple[int, int]]:
+    """Contiguous (start, end) index ranges tiling [0, n_items)."""
+    if n_parts <= 0:
+        n_parts = 1
+    bounds = [round(i * n_items / n_parts) for i in range(n_parts + 1)]
+    return [(bounds[i], bounds[i + 1]) for i in range(n_parts)
+            if bounds[i + 1] > bounds[i]]
+
+
+def _parallel_npu_count(device: str) -> int:
+    """Number of usable NPUs for process-parallel embedding; 0 when not eligible."""
+    if device != "npu":
+        return 0
+    try:
+        import torch
+        import torch_npu  # noqa: F401
+        if torch.npu.is_available():
+            return int(torch.npu.device_count())
+    except ImportError:
+        pass
+    return 0
+
+
+def _monitor_texts(shared_done, total_docs, n_workers, procs):
+    t0 = time.time()
+    while True:
+        time.sleep(15)
+        done = sum(shared_done[i] for i in range(n_workers))
+        elapsed = time.time() - t0
+        speed = done / elapsed if elapsed > 0 else 0
+        eta = (total_docs - done) / speed if speed > 0 else 0
+        alive = sum(1 for p in procs if p.is_alive())
+        print(f"[Embed-Par] {done:,}/{total_docs:,} docs ({done/total_docs*100:.1f}%), "
+              f"{speed:.0f} docs/s, elapsed {elapsed:.0f}s, ETA {eta:.0f}s, "
+              f"{alive}/{n_workers} workers", flush=True)
+        if alive == 0:
+            break
+
+
+def _embed_texts_worker(worker_id, texts, start_idx, model_name, batch_size,
+                        emb_dim, memmap_path, total_docs, shared_done,
+                        truncate_len):
+    """Worker process: embed a contiguous slice of texts on NPU worker_id.
+
+    Mirrors _embed_streaming_worker (model load/half/msl, tokenize-prefetch
+    encode loop, NaN bs=1 retry, memmap write at the absolute offset) minus
+    shard IO and ledger — the parent already holds the texts in memory.
+    CPU fallback keeps the worker importable on non-Ascend hosts (tests).
+    """
+    os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+    os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+    os.environ["WANDB_SILENT"] = "true"
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+    import warnings
+    warnings.filterwarnings("ignore", category=UserWarning)
+
+    import torch
+    device = "npu"
+    try:
+        import torch_npu  # noqa: F401
+        if not torch.npu.is_available():
+            device = "cpu"
+    except ImportError:
+        device = "cpu"
+    if device == "npu":
+        os.environ["ASCEND_RT_VISIBLE_DEVICES"] = str(worker_id)
+
+    import time as _time
+    from concurrent.futures import ThreadPoolExecutor
+
+    print(f"[Embed-Par {worker_id}] Loading model (device={device})...", flush=True)
+    model = _load_model_stream(model_name, device)
+    model.eval()
+    _repair_stella_buffers(model)
+    model.max_seq_length = truncate_len
+    if device == "npu":
+        model.half()
+    print(f"[Embed-Par {worker_id}] Model loaded (msl={truncate_len}, "
+          f"{len(texts):,} docs, bs={batch_size})", flush=True)
+
+    import numpy as np
+    all_emb = np.memmap(memmap_path, dtype=np.float32, mode='r+',
+                        shape=(total_docs, emb_dim))
+
+    def _to_device(features):
+        for key in features:
+            if isinstance(features[key], torch.Tensor):
+                features[key] = features[key].to(device)
+            elif isinstance(features[key], dict):
+                _to_device(features[key])
+        return features
+
+    n = len(texts)
+    if n == 0:
+        del model
+        _flush_device_cache(device, f"[Embed-Par {worker_id}]")
+        return
+
+    tok_pool = ThreadPoolExecutor(max_workers=1)
+    next_tok_future = tok_pool.submit(model.tokenize, texts[:batch_size])
+
+    nan_count = 0
+    t0 = _time.time()
+
+    for j in range(0, n, batch_size):
+        batch_len = min(batch_size, n - j)
+
+        features = next_tok_future.result()
+        next_j = j + batch_size
+        if next_j < n:
+            next_tok_future = tok_pool.submit(
+                model.tokenize, texts[next_j:next_j + batch_size])
+
+        features = _to_device(features)
+        with torch.no_grad():
+            output = model(features)
+        emb = output["sentence_embedding"].float()
+        emb = torch.nn.functional.normalize(emb, p=2, dim=1)
+        emb = emb.cpu().numpy()
+
+        nan_mask = np.isnan(emb).any(axis=1)
+        if nan_mask.any():
+            n_nan = int(nan_mask.sum())
+            nan_count += n_nan
+            nan_locs = np.where(nan_mask)[0]
+            for k in nan_locs:
+                retry_features = model.tokenize([texts[j + k]])
+                retry_features = _to_device(retry_features)
+                with torch.no_grad():
+                    retry_out = model(retry_features)
+                retry_emb = retry_out["sentence_embedding"].float()
+                retry_emb = torch.nn.functional.normalize(retry_emb, p=2, dim=1)
+                emb[k] = retry_emb.cpu().numpy()[0]
+                del retry_features, retry_out
+            still_nan = np.isnan(emb).any(axis=1).sum()
+            if still_nan > 0:
+                raise RuntimeError(
+                    f"[Embed-Par {worker_id}] {still_nan} docs still NaN after "
+                    f"bs=1 retry — cannot recover, aborting to prevent data loss")
+
+        del features, output
+        all_emb[start_idx + j:start_idx + j + batch_len] = emb
+        shared_done[worker_id] = j + batch_len
+
+    tok_pool.shutdown()
+    all_emb.flush()
+    elapsed = _time.time() - t0
+    nan_msg = f", {nan_count} NaN recovered" if nan_count > 0 else ""
+    print(f"[Embed-Par {worker_id}] Done: {n:,} docs in {elapsed:.0f}s "
+          f"({n/elapsed:.0f} docs/s{nan_msg})", flush=True)
+    del model
+    _flush_device_cache(device, f"[Embed-Par {worker_id}]")
+
+
+def embed_documents_parallel(
+    texts: List[str],
+    model_name: str = "NovaSearch/stella_en_400M_v5",
+    batch_size: int = 256,
+    cache_path: Optional[str] = None,
+    device: str = "cpu",
+    truncate_len: int = 512,
+) -> npt.NDArray[np.float32]:
+    """
+    Multi-NPU process-parallel variant of embed_documents.
+
+    Splits the texts into one contiguous chunk per NPU, spawns a worker
+    process per card (ASCEND_RT_VISIBLE_DEVICES pinning, fp16, tokenize
+    prefetch — same recipe as embed_texts_streaming's workers), and splices
+    results into a shared memmap before caching to cache_path (same npz
+    format + staleness guard, so single-card and parallel runs share caches).
+
+    Falls back to embed_documents on CPU or single-NPU hosts.
+
+    Notes:
+      - No mid-run resume (sample embeds take minutes; a crash re-embeds).
+      - fp16 batch composition differs from the single-card run, so
+        embeddings may differ in the last ulps — analysis-grade identical,
+        not bit-identical.
+    """
+    cached = _load_cached_embeddings(cache_path, len(texts), "[Embed-Par]")
+    if cached is not None:
+        return cached
+
+    n_npus = _parallel_npu_count(device)
+    if n_npus <= 1 or not texts:
+        return embed_documents(
+            texts, model_name=model_name, batch_size=batch_size,
+            cache_path=cache_path, device=device,
+        )
+
+    import torch
+    import numpy as np
+    import multiprocessing as mp
+    import threading
+
+    print(f"[Embed-Par] {n_npus} NPUs detected — process-parallel embedding "
+          f"of {len(texts):,} docs")
+
+    # Dim probe: load once in the parent, release (with allocator pool)
+    # BEFORE workers spawn so each card's HBM starts clean.
+    probe_device = "npu"
+    try:
+        import torch_npu  # noqa: F401
+        if not torch.npu.is_available():
+            probe_device = "cpu"
+    except ImportError:
+        probe_device = "cpu"
+    model = _load_model_stream(model_name, probe_device)
+    dummy_emb = model.encode(["test"], show_progress_bar=False,
+                             normalize_embeddings=True)
+    emb_dim = dummy_emb.shape[1]
+    del model, dummy_emb
+    _flush_device_cache(probe_device, "[Embed-Par]")
+
+    total = len(texts)
+    batch_size = max(batch_size, 512)
+    cache_dir = os.path.dirname(cache_path) if cache_path else "/tmp"
+    os.makedirs(cache_dir, exist_ok=True)
+    memmap_path = os.path.join(cache_dir, "embedding_docs_memmap.tmp")
+    memmap_init = np.memmap(memmap_path, dtype=np.float32, mode='w+',
+                            shape=(total, emb_dim))
+    del memmap_init
+
+    ctx = mp.get_context("spawn")
+    shared_done = ctx.Array('q', n_npus)
+    ranges = _contiguous_ranges(total, n_npus)
+
+    t1 = time.time()
+    procs = []
+    for wid, (lo, hi) in enumerate(ranges):
+        p = ctx.Process(
+            target=_embed_texts_worker,
+            args=(wid, texts[lo:hi], lo, model_name, batch_size, emb_dim,
+                  memmap_path, total, shared_done, truncate_len),
+        )
+        p.start()
+        procs.append(p)
+
+    monitor = threading.Thread(target=_monitor_texts,
+                               args=(shared_done, total, n_npus, procs),
+                               daemon=True)
+    monitor.start()
+
+    for p in procs:
+        p.join()
+    monitor.join()
+
+    failed = [(i, p.exitcode) for i, p in enumerate(procs) if p.exitcode != 0]
+    if failed:
+        raise RuntimeError(f"{len(failed)} embed workers failed: {failed}")
+
+    all_embeddings = np.memmap(memmap_path, dtype=np.float32, mode='r',
+                               shape=(total, emb_dim))
+    elapsed = time.time() - t1
+    print(f"[Embed-Par] Encoded {total:,} docs in {elapsed:.1f}s "
+          f"({total / elapsed:.0f} docs/s aggregate), dim={emb_dim}")
+
+    if cache_path:
+        atomic_savez(cache_path, embeddings=all_embeddings)
+        print(f"[Embed-Par] Cached embeddings to: {cache_path}")
+    try:
+        os.remove(memmap_path)
+    except OSError:
+        pass
+
+    return np.array(all_embeddings)
+
+
 def cluster_embeddings_faiss(
     embeddings: npt.NDArray[np.float32],
     K_init: int = 1000,
