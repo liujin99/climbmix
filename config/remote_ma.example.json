@@ -17,6 +17,7 @@
     "region": "<region>",
     "account": "<jwt-account>",
     "secret": "<jwt-secret>",
+    "jwt_url": "<internal-iam-jwt-endpoint, deployment-specific — REQUIRED when using account+secret JWT auth>",
     "project": "<jwt-project>",
     "enterprise": "<enterprise-id>",
     "domain_name": "",

@@ -28,8 +28,9 @@ cp config/remote_ma.example.json ~/.config/climbmix/remote_ma.json
 Resolution order: `RemoteConfig.ma_config` (`REMOTE_MA_CONFIG` shell knob)
 → `$CLIMBMIX_MA_CONFIG` → `~/.config/climbmix/remote_ma.json`.
 
-- Auth: `auth.account + auth.secret` (JWT, preferred) or
-  `auth.domain_name + auth.username + auth.password`, or a static
+- Auth: `auth.account + auth.secret + auth.jwt_url` (JWT, preferred — the
+  JWT endpoint is deployment-specific and lives ONLY in the config file),
+  or `auth.domain_name + auth.username + auth.password`, or a static
   `auth.x_auth_token`. Tokens are cached in `~/.cache/climbmix/
   iam_tokens.json` and auto-roll ~5 min before their 24h expiry — a 32h
   production run crosses token expiry without interruption.
