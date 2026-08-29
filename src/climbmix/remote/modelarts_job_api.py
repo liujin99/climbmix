@@ -376,9 +376,9 @@ import os
 import sys
 import moxing as mox
 
-ASSETS = %(assets)s
-NANOCHAT_DIR = %(nanochat)s
-BASE = %(base)s
+ASSETS = @@ASSETS@@
+NANOCHAT_DIR = @@NANOCHAT@@
+BASE = @@BASE@@
 
 def _mark(d):
     return os.path.join(d, ".climbmix_asset_ok")
@@ -417,7 +417,7 @@ fetch_repo()
 try:
     entries = mox.file.list_directory(ASSETS)
 except Exception as e:
-    sys.exit("[boot] FATAL: cannot list %s (%s)" % (ASSETS, e))
+    sys.exit("[boot] FATAL: cannot list " + ASSETS + " (" + str(e) + ")")
 for entry in entries:
     name = os.path.basename(str(entry).rstrip("/"))
     if name.startswith("d") and name[1:].isdigit():
@@ -434,11 +434,12 @@ PYEOF"""
         worker script path is resolved at RUNTIME (the platform may nest
         the code_dir copy under its basename)."""
         assets = f"{self.rc.obs_prefix.rstrip('/')}/assets_big"
-        boot_py = self._BOOT_ASSETS_PY % {
-            "assets": json.dumps(assets),
-            "nanochat": json.dumps(self.rc.container_nanochat_dir),
-            "base": json.dumps(self.rc.container_base_dir),
-        }
+        boot_py = (self._BOOT_ASSETS_PY
+                   .replace("@@ASSETS@@", json.dumps(assets))
+                   .replace("@@NANOCHAT@@", json.dumps(
+                       self.rc.container_nanochat_dir))
+                   .replace("@@BASE@@", json.dumps(
+                       self.rc.container_base_dir)))
         parts = ["set -e", boot_py]
         if len(command) >= 2:
             # [python, worker_path, *args] -> runtime-resolved script path

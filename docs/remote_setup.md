@@ -1,10 +1,10 @@
 # Remote fleet setup (ModelArts + OBS) — M1 environment survey checklist
 
-> Status: PENDING (all code is in — M2 done; this file collects the facts you
-> must gather on the server / ModelArts console before the first real job).
-> Owner workflow: fill each ✅ below; when all are green, implement the two
-> `NotImplementedError` adapters (`ModelArtsJobAPI`, `ModelArtsObsStorage`)
-> and run the M3 validation (`scripts/dispatch_remote.py`).
+> Status: adapters are IN (2026-08-29): `ModelArtsJobAPI` (gateway REST +
+> IAM token auth + boot shell), `ModelArtsObsStorage` (moxing),
+> `IamTokenProvider`. What remains on the SERVER is the ✅ checklist below
+> (config file + hello-world + assets), then the M3 validation gate
+> (`scripts/ma_hello_world.py` → `scripts/dispatch_remote.py`).
 
 Production topology (decided 2026-08-28): local 8x910B4 host = scheduler +
 mixer; remote cards (shared pool, fluctuating 10-200, typical ~32 — see
@@ -13,60 +13,74 @@ plane. One job per proxy experiment (`npu_per_job` cards, no cross-node
 collectives). Results materialize as local `exp_XXXX/` dirs; search resume
 and stage fingerprints unchanged.
 
-## 1. SDK & auth (on the submit host = 8x910B4 server)
+## 0. Platform config file (once, on the server — the repo is PUBLIC)
 
-- [ ] Which packages exist in the ma-user environment?
-      `pip list | grep -Ei 'moxing|modelarts|esdk|obs'`
-      Expected: `moxing` (usually preinstalled on ModelArts images). If none:
-      decide `pip install esdk-obs-python` vs plain REST + `obsutil` binary.
-- [ ] Credentials: AK/SK + project_id + region (console → "My Credentials").
-      Env convention used by the stubs: `MA_AK / MA_SK / MA_PROJECT_ID /
-      MA_REGION` (jobs) and `OBS_AK / OBS_SK / OBS_SERVER` (storage).
-- [ ] Bucket: create/confirm one bucket, note its endpoint (`OBS_SERVER`,
-      e.g. `obs.cn-xxx-4.myhuaweicloud.com`), and pick a layout root, e.g.
-      `obs://<bucket>/climbmix_prod` (= `REMOTE_OBS_PREFIX`).
+All internal values — gateway endpoint, project/workspace IDs, pool id,
+SWR image + repo id, IAM credentials — live OUTSIDE the repo:
 
-## 2. Compute quota & flavor
+```bash
+mkdir -p ~/.config/climbmix
+cp config/remote_ma.example.json ~/.config/climbmix/remote_ma.json
+# fill in the real values (never commit them; .gitignore +
+# scripts/check_repo_secrets.py are the double guard)
+```
 
-- [ ] Dedicated pool (recommended — stable 910B4 nodes) vs public pool.
-      Note pool name (`REMOTE_POOL_NAME`, empty = public).
-- [ ] Ascend flavor for a 1-card job (and the 8-card variant if you later
-      want remote target arms): note its exact spec string
-      (`REMOTE_FLAVOR`).
-- [ ] Max concurrent jobs in the pool / region (drives `REMOTE_MAX_JOBS`;
-      the k-selection doc's fleet sizing uses the same number).
-- [ ] **Submit behavior under quota pressure** (drives the dynamic-submission
-      policy, `remote_executor._submit_with_retry`): when the pool is full,
-      does submit FAIL with a quota/capacity error code, or does the job go
-      PENDING and queue server-side? Which HTTP/SDK error codes/texts mean
-      "retryable" (map them to `TransientSubmitError` in
-      `ModelArtsJobAPI.submit`) vs hard (bad image/auth/spec → RuntimeError)?
-- [ ] Is there a quota/usage QUERY API (free cards right now)? If yes,
-      implement `ModelArtsJobAPI.free_job_slots()` (return
-      `free_cards // npu_per_job`, None while unsupported): the executor's
-      capacity monitor already re-probes every poll interval and grows/
-      shrinks the in-flight limit mid-batch — the 98-exp/16-card scenario
-      then drains as idle cards appear. Without it the executor falls back
-      to fixed-cap + submit-rejected backoff (correct, just slower to
-      react).
-- [ ] Preemption: can a running job be reclaimed by the pool (→ would justify
-      job-level checkpoint chaining later), or do jobs always run to
-      terminal state?
-- [ ] Submit ONE hello-world Ascend job from the console (image below,
-      `npu-smi info` as the command) to prove quota + network end to end.
+Resolution order: `RemoteConfig.ma_config` (`REMOTE_MA_CONFIG` shell knob)
+→ `$CLIMBMIX_MA_CONFIG` → `~/.config/climbmix/remote_ma.json`.
 
-## 3. Image
+- Auth: `auth.account + auth.secret` (JWT, preferred) or
+  `auth.domain_name + auth.username + auth.password`, or a static
+  `auth.x_auth_token`. Tokens are cached in `~/.cache/climbmix/
+  iam_tokens.json` and auto-roll ~5 min before their 24h expiry — a 32h
+  production run crosses token expiry without interruption.
+- Per-launch overrides (shell knobs) beat the config file:
+  `REMOTE_IMAGE` > `image_url`, `REMOTE_FLAVOR` > `default_flavor`,
+  `REMOTE_POOL_NAME` > `pool_id`. Leaving them empty = config-file values.
+- Run `python3 scripts/check_repo_secrets.py` before pushing anything that
+  touched `remote/`, `scripts/`, or `docs/`.
 
-- [ ] Preferred: ModelArts built-in Ascend engine image matching CANN
-      8.5.1 / torch_npu of the local host (check `npu-smi info` +
-      `pip show torch-npu` versions on the server first).
-- [ ] Else: bake a SWR image (base Ascend image + `pip install
-      torch-npu==<same version> pyarrow numpy pandas lightgbm` + nothing
-      else — the worker is stdlib-only) and note the SWR URI
-      (`REMOTE_IMAGE`).
-- [ ] Container workdir convention is `/home/ma-user/work` (matches the
-      RemoteConfig defaults `container_*`); confirm the image's user can
-      write there.
+## 1. Submit-host environment (on the 8x910B4 server)
+
+- [ ] `python3 -c "import moxing"` works (submit-side storage: spec/shard
+      upload, result download — `ModelArtsObsStorage`). If it fails with an
+      auth error, fill the optional `obs.ak/sk` section of the config; if
+      the module is missing, `pip install moxing` (ModelArts images ship
+      it).
+- [ ] `python3 -c "import requests"` (gateway client).
+- [ ] Token fetch works: `python3 -c "from climbmix.remote.iam_token import
+      IamTokenProvider; IamTokenProvider().get_token(<auth dict from your
+      config>)"` returns without error and writes the cache file.
+
+## 2. Compute pool & flavor
+
+- Known: dedicated pool via `pool_id` (config file), flavor granularity
+  {1, 2, 4, 6, 8} cards — flavor strings are dynamic per pool state.
+- [ ] Note the exact 4-card flavor string for the first production run
+      (k=4; a 4xlarge-style name is expected — confirm on the console).
+- [ ] **Hello-world job** (calibrates auth/pool/image AND the status/error
+      tables in one shot):
+      `python3 scripts/ma_hello_world.py --remote-config <remote_config.json>`
+      It submits `npu-smi info` + a moxing read of the OBS prefix and polls.
+      Compare its logged status transitions against the console job page:
+      fix `_INT_STATUS`/`_STR_STATUS` in
+      `src/climbmix/remote/modelarts_job_api.py` if they disagree.
+- [ ] **Submit behavior under quota pressure** (drives
+      `remote_executor._submit_with_retry`): when the pool is full, does
+      submit FAIL with a quota/capacity error (→ already mapped heuristically
+      to `TransientSubmitError`; extend `_TRANSIENT_MESSAGE_PATTERNS` with
+      the REAL error code/text once observed) or does the job go PENDING and
+      queue server-side? The M3 concurrency wave answers this incidentally.
+- [ ] Preemption: can a running job be reclaimed by the pool (→ would
+      justify job-level checkpoint chaining later), or do jobs always run
+      to terminal state?
+
+## 3. Image — RESOLVED
+
+The production image is the same SWR image the climbmix server runs
+(torch_npu + CANN 8.5.1 + pyarrow + moxing all present). `image_url` +
+`image_repo_id` (REQUIRED by the gateway even for custom SWR images) go in
+the config file. Container workdir convention `/home/ma-user/work` matches
+the RemoteConfig `container_*` defaults.
 
 ## 4. One-time asset upload (big assets, manual — NOT auto-uploaded)
 
@@ -83,28 +97,35 @@ Verify with: `python3 scripts/dispatch_remote.py --remote-config <cfg.json>
 --check-assets` (also checks the auto-uploaded worker bundle under
 `assets/`).
 
-The job boot shell (implemented in `ModelArtsJobAPI.submit`, M1) untars the
-repo to `/home/ma-user/work/nanochat-npu` and rsyncs the data assets to
-`/home/ma-user/work/nanochat_base/{base_checkpoints/d20,tokenizer,...}` once
-per node (cache across jobs if the pool reuses nodes).
+The job boot shell (composed by `ModelArtsJobAPI.submit`) untars the repo
+to `/home/ma-user/work/nanochat-npu` and copies the data assets to
+`/home/ma-user/work/nanochat_base/{base_checkpoints/d*,tokenizer,
+eval_bundle,eval_stem}` — every `d<depth>` dir under assets_big is
+auto-discovered, so any proxy_depth works without extra knobs. Marker
+files (`.climbmix_asset_ok`) skip the re-download when the pool reuses a
+node.
 
 ## 5. Network
 
 - [ ] Container egress to `hf-mirror.com` (eval fallback downloads).
       `REMOTE_JOB_ENV HF_ENDPOINT=https://hf-mirror.com` is already wired.
-- [ ] OBS endpoint reachable from job containers (same-region VPC default).
+- [ ] OBS reachable from job containers (same-region VPC default; the
+      hello-world job's moxing read proves it).
 
-## 6. Fill the two adapters (~1-2 h after facts are known)
+## 6. Adapter status (was "fill the two adapters")
 
-- `src/climbmix/remote/job_api.py` → `ModelArtsJobAPI` (submit/status/logs/
-  cancel over the chosen SDK; compose the boot shell around the worker argv).
-- `src/climbmix/remote/obs.py` → `ModelArtsObsStorage` (moxing or esdk).
-  Both interfaces are final; the Mock implementations in the same files are
-  the behavioral reference (the 90-check simulation in
-  `/tmp/opencode/test_remote_executor.py` is the contract).
+DONE (2026-08-29) — `modelarts_job_api.py` (submit/status/cancel/logs/
+free_job_slots + `submit_raw` for calibration jobs), `iam_token.py`,
+`ModelArtsObsStorage` (moxing). The Mock implementations in `job_api.py` /
+`obs.py` remain the behavioral reference (the 129-check simulation in
+`/tmp/opencode/test_remote_executor.py` + 77-check adapter suite in
+`/tmp/opencode/test_modelarts_adapter.py` are the contract). Runtime
+calibration points (hello-world + M3 wave): the v2 status table, the
+transient-error patterns, DELETE-on-cancel.
 
 ## 7. M3 consistency validation (gate to production)
 
+0. Hello-world job green (§2) + `--check-assets` green.
 1. Short smoke: dispatch one 5-step experiment remotely
    (`scripts/dispatch_remote.py ... --proxy-num-iterations 5`).
 2. Full check: run exp_0000's weights BOTH locally (ProxyRunner) and remotely
@@ -120,7 +141,8 @@ per node (cache across jobs if the pool reuses nodes).
    This wave also verifies the two-anchor throughput prediction
    T(4) ≈ 5.3h incidentally (dedicated S(k) measurement skipped by
    decision 2026-08-28 — the two-anchor model's S(4)≈3.5 assumption gets
-   its first real datapoint here, no extra experiment needed).
+   its first real datapoint here, no extra experiment needed), and it
+   calibrates the pool-full error code (§2).
 4. Green → set `REMOTE_ENABLED=1 ... bash runs/run_climbmix.sh`.
 
 ## Production launch (M5) — recommended knobs & calculation
@@ -132,6 +154,7 @@ per node (cache across jobs if the pool reuses nodes).
 | `NPU_PER_EXP` | **4** | λ_max ≈ 5h for the first run (disaster cap ~74 card·h @32-card pool, half-day verification window — docs/parallel_k_selection.md §5.1). `REMOTE_NPU_PER_JOB` defaults to `NPU_PER_EXP`; do NOT set it separately — k stays fleet-wide fixed for score comparability. |
 | `REMOTE_MAX_JOBS` | **⌊A_eff/4⌋, typically 6-8** | A_eff = expected pool median~P25 (24-32 cards), NOT the peak. Mid-run growth is absorbed by the capacity monitor (jobs start as idle cards appear); shrink only queues pickups, never kills in-flight jobs. |
 | `REMOTE_LOCAL_PARALLEL` | 1 (default) | Master node's 8 cards join the fleet: 2 more k=4 slots (configs run via the local parallel path while remote jobs are in flight). |
+| `REMOTE_FLAVOR` | 4-card flavor | From the console (§2); or `default_flavor` in the platform config. |
 | `REMOTE_MAX_PREP` | 4 (default) | Prep/upload semaphore on the master node — raise only if I/O is confirmed idle; it never needs to match the job count. |
 | `REMOTE_SUBMIT_RETRY_H` | 24 (default) | Backoff net for probe/submit races; also the whole capacity story when the region has NO quota-query API (fixed limit + rejected-submit retry). |
 | `REMOTE_JOB_TIMEOUT_H` | 6 (default) | T(4) ≈ 5.3h + margin. |
@@ -145,7 +168,7 @@ slots → waves ⌈20/8⌉+⌈10/8⌉+⌈5/8⌉ = 3+2+1 = 6 → **Wall ≈ 5.3h 
 Full decision model: `docs/parallel_k_selection.md`. Short version:
 
 1. **Slots** `C(k) = 8/k (local) + ⌊A_eff/k⌋ (remote, node-packed)` —
-   A_eff = pool median~P25, k ∈ {1,2,4,8}.
+   A_eff = pool median~P25, k ∈ {1,2,4,6,8} (flavor granularity).
 2. **Wall** `Wall(k) = T(k) × Σᵢ ⌈nᵢ/C(k)⌉` with T(k) from the cost table
    (T(1)=18.6h, T(2)=10.0h, T(4)=5.3h, T(8)=2.8h; full-set eval included).
 3. **Constraints on k**: λ_max = T(k) ≤ 5h while the pipeline is
@@ -163,16 +186,18 @@ submission cadence visible in the `[Exp N] submitted job ...` lines).
 ### Launch command
 
 ```bash
+# once: ~/.config/climbmix/remote_ma.json filled (gateway/auth/image/pool)
 REMOTE_ENABLED=1 \
 REMOTE_OBS_PREFIX=obs://<bucket>/climbmix_prod \
-REMOTE_IMAGE=<swr-uri-or-built-in> \
-REMOTE_FLAVOR=<ascend-flavor> \
+REMOTE_FLAVOR=<4-card-flavor> \
 NPU_PER_EXP=4 \
 REMOTE_MAX_JOBS=6 \
 bash runs/run_climbmix.sh
-# REMOTE_NPU_PER_JOB defaults to NPU_PER_EXP (=4, fleet-wide k)
-# REMOTE_LOCAL_PARALLEL defaults to 1 (local 8 cards = 2 slots)
-# REMOTE_MAX_PREP=4, REMOTE_SUBMIT_RETRY_H=24, REMOTE_JOB_TIMEOUT_H=6 (defaults)
+# image/pool default to the platform config; REMOTE_IMAGE/REMOTE_POOL_NAME
+# override per launch. REMOTE_NPU_PER_JOB defaults to NPU_PER_EXP (=4,
+# fleet-wide k); REMOTE_LOCAL_PARALLEL defaults to 1 (local 8 cards =
+# 2 slots); REMOTE_MAX_PREP=4, REMOTE_SUBMIT_RETRY_H=24,
+# REMOTE_JOB_TIMEOUT_H=6 (defaults).
 ```
 
 Decision record (2026-08-28): the launch planner (k-selection §5 three-step
@@ -186,5 +211,5 @@ All `REMOTE_*` knobs are execution-shape only (num_npu precedent) and are
 deliberately excluded from the stage fingerprints. NOTE: the remote CODE
 itself (`src/climbmix/remote/`, `scripts/remote_worker.py`,
 `nanochat_cmds.py`, `proxy_runner.py`) IS fingerprinted (BOTH stages) — land
-it before starting the production search (done: this changeset; do not edit
+it before starting the production search (this changeset; do not edit
 these files mid-search).

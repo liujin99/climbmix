@@ -21,15 +21,20 @@ obs_prefix/backend knobs). Polls every 10s; Ctrl-C cancels the job.
 """
 
 import argparse
+import os
 import sys
 import time
 
-sys.path.insert(0, __import__("pathlib").Path(
-    __file__).resolve().parents[1] / "src")
-
-from climbmix.remote.job_api import JobStatus  # noqa: E402
-from climbmix.remote.modelarts_job_api import ModelArtsJobAPI  # noqa: E402
-from climbmix.remote.remote_executor import RemoteConfig  # noqa: E402
+try:
+    from climbmix.remote.job_api import JobStatus
+    from climbmix.remote.modelarts_job_api import ModelArtsJobAPI
+    from climbmix.remote.remote_executor import RemoteConfig
+except ImportError:
+    sys.path.insert(0, os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+    from climbmix.remote.job_api import JobStatus
+    from climbmix.remote.modelarts_job_api import ModelArtsJobAPI
+    from climbmix.remote.remote_executor import RemoteConfig
 
 HELLO_CMD = (
     "npu-smi info && "
