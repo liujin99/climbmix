@@ -110,6 +110,10 @@ tokens(弱簇均为短文档)。取 2.0 而非更狠的 2.5(后者 21% docs 且�
 `compute_cluster_column_mins`;无质量标签时 floor 与均值剪枝一同失效
 (返回 {})。speedrun 默认 0(只验管道形状);该 knob 进 search-stage
 fingerprint(语义变更 → Steps 1-3 重跑,embedding pool 缓存不受影响)。
+**已实证(2026-08-31, 20-分片子集重跑,缓存命中 87.3s)**:71/1000 剪枝
+(69 过均线但 floor 不及)、157,917 docs(6.81%)/ 1.51% tokens 移除——
+与 prune_rule_analysis.py 预测逐位吻合;merge 树随 K_init=929 微移
+(natural_K(0.7) 45→39, elbow 6→31),K_final 仍钉 floor=3 无影响。
 
 ## 已核对一致(正向审计)
 
