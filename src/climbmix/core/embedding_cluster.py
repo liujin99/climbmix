@@ -758,15 +758,23 @@ def _clear_partial_embedding_state(cache_dir: str, memmap_path: str) -> None:
         pass
 
 
-def _write_worker_progress(progress_path: Optional[str], completed: list, shard_idx: int) -> None:
-    """Atomically record shard_idx into this worker's ledger (tmp + replace)."""
+def _write_worker_progress(progress_path: Optional[str], completed: list, shard_idx) -> None:
+    """Atomically record shard_idx into this worker's ledger (tmp + replace).
+
+    shard_idx and pre-existing ledger entries are coerced to plain int:
+    np.array_split hands the spawn workers np.int64 shard indices, and
+    json.dump raises TypeError on numpy scalars — which killed all 8
+    workers after their FIRST completed shard on the first multi-NPU
+    streaming run (2026-08-31 smoke, 40% embedded, embeddings on disk
+    but no ledger ever written).
+    """
     if not progress_path:
         return
-    completed.append(shard_idx)
+    completed.append(int(shard_idx))
     tmp = progress_path + ".tmp"
     try:
         with open(tmp, "w") as f:
-            json.dump({"completed": completed}, f)
+            json.dump({"completed": [int(s) for s in completed]}, f)
         os.replace(tmp, progress_path)
     except OSError:
         pass  # ledger is best-effort; the memmap write itself already happened
@@ -1049,7 +1057,10 @@ def embed_texts_streaming(
         for wid, chunk in enumerate(chunks):
             p = ctx.Process(
                 target=_embed_streaming_worker,
-                args=(wid, list(chunk), shard_infos, text_col,
+                # np.array_split yields int64 indices; plain ints only —
+                # they end up in the JSON resume ledger (see
+                # _write_worker_progress).
+                args=(wid, [int(i) for i in chunk], shard_infos, text_col,
                       model_name, batch_size, emb_dim,
                       memmap_path, total_docs, shared_done, truncate_len,
                       os.path.join(cache_dir, f"embedding_progress_w{wid}.json")),
