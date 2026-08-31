@@ -317,8 +317,9 @@ GFLOP/call):
   该容器有效核在 ~12-23 间波动;4316d64 的 480.3s 同样被这堵墙
   封顶(64 线程从未有过 64 核可用)——两代代码实测都在 400-480s
   量级主要是宿主窗口,不是代码。聚类阶段就此定格: 500K 训练
-  ~7 min(与池规模无关,固定 256K 子采样)+ 全量指派 85s(11.61M)
-  ——生产瓶颈仍是嵌入(4.3h),聚类在任何规模都非瓶颈。
+  ~7 min(与池规模无关,固定 256K 子采样)+ 全量指派(见下条)——
+  生产瓶颈是嵌入(实测 ~800 docs/s → 116M 全池 ~40h),聚类在任何
+  规模都非瓶颈。
   判窗口方法: 空闲时重跑 cluster_bench(banner 现打印 cgroup
   配额/affinity/loadavg/steal%;若 24 线程回到 ~280 即窗口波动
   实锤,若 steal% 持续非零即宿主超卖实锤)。
@@ -333,21 +334,25 @@ GFLOP/call):
   随宿主窗口波动,500K 训练 3.2-7 min,聚类在任何规模非瓶颈。**
 - **对全量跑的量级**(按重跑终局 ~130-151 GFLOP/s 折算): kmeans
   训练固定采样 256K 点(与池大小无关)≈ 100×3.5-4s+预处理 ≈ **~7
-  min**(宿主好窗口下 ~3.5 min);当前池全量指派 11.61M docs =
-  23.8 TFLOP → **≈3 min**(好窗口 ~85s);真 100B 池(≈125M docs,
-  按实测 801 tokens/doc 折算)指派 256 TFLOP → **≈30-50 min**。
-  聚类阶段在任何规模下都退出瓶颈名单。
+  min**(宿主好窗口下 ~3.5 min);全池(116M docs)指派 = 238 TFLOP
+  → **≈15-50 min**(130-280 GFLOP/s 窗口带)。聚类阶段在任何
+  规模下都退出瓶颈名单。
 - 进程 fan-out 探针(8×24)162 GFLOP/s:单发测量被 spawn+建数据开销
   淹没,稳态不可判;因指派已分钟级,不值得再测或实现。
-- **池规模勘误与 E 里程碑前提**(用户确认, 2026-08-29): 本文档 §1/§7
-  与 TODO E 的 "116M docs / 43h" 是估算;实测过滤后当前池为
-  **11.61M docs / 9.3B tokens**(801 tokens/doc),单节点 8 卡全量嵌入
-  ≈ 11.61M ÷ 750 docs/s ≈ **4.3 h——当前池不需要多节点**。
-  用户确认**最终会拓展到真 100B token 池**(≈125M docs → 单节点
-  ≈47 h),E 里程碑(弹性多节点, 47/J h)对那个规模成立,是 100B
-  扩池的前置项而非首个生产 run 的前置项。
+- **池规模二次勘误(2026-08-31, 20-分片冒烟实测)**: 08-29 那次
+  "勘误"本身错了——它把 prune_report 100-分片子集的元数据
+  (11,610,081 docs)当成了全池。20 分片全池模式冒烟实测
+  2,319,341 docs → **116K docs/分片 × 1000 分片 ≈ 116M docs /
+  ~93B tokens**(801 tokens/doc,与池名 100B 相符)——§1/§2/§7
+  与 TODO E 的原始 "116M" 一直是对的。连带修正: 单节点 8 卡
+  全量嵌入按实测 ~800 docs/s ≈ **40h**(非 4.3h);全池嵌入磁盘
+  峰值 ~950 GB(475 GB npz + 475 GB tmp);E 里程碑(弹性多节点,
+  40/J h)回到全池嵌入的正路——但**首个生产 run 不被阻塞**:
+  抽样发现模式(500K 精标签 + domain 映射全池)在任意池规模可用,
+  全量嵌入是一次性缓存投资,单节点 40h(周末量级)或多节点 E
+  二选一(见 §9 与 TODO E)。
 
-## 9. 全池 prune_report 跑法与预算（2026-08-31, 11.61M docs）
+## 9. 全池 prune_report 跑法与预算（2026-08-31 二次勘误后, 池 = 116M docs）
 
 ```bash
 python3 scripts/prune_report.py \
@@ -355,32 +360,32 @@ python3 scripts/prune_report.py \
     --sample-shards 0 --sample-size 0
 ```
 
-- **为什么值得跑**: 出全量 prune/merge profile(真·每簇统计,无采样误差)
-  + clusters.csv 全量版;同时**预热生产缓存**——缓存键 = 分片清单 +
-  model + truncate-len(sample=0 无 sample 分量),与 run_climbmix.sh
-  Step 1 默认(EMBEDDING_SAMPLE_SIZE=0)完全一致,**4.3h 只付一次**,
-  discovery 与生产共用。
-- **时间线**: ~20-40 min 全量 metadata 扫描(1000 分片) + 嵌入
-  (memmap,分片级断点续跑) + ~10 min 聚类(训练固定 256K 子采样 +
-  分块全量指派) + 分钟级 profile。嵌入时长: 4.3h = 11.61M ÷ 750
-  docs/s 的线性外推(750 = 500K 采样 11 min 实测),是**好窗口下限**;
-  4-5h 长跑要平均过宿主有效核波动(实测 12-23 核),且流式路径
-  (每 worker 自读 parquet + tokenize)是首次全量运行——规划按
-  **4.5-7h**;开跑后 monitor 每 15s 打 docs/s+ETA,前 10 min 即可
-  读到真实速率,不必等跑完才知道。速率掉档参照: 500 docs/s →
-  6.4h,300 → 10.7h。
-- **磁盘**: 峰值 ~96 GB(48 GB embedding_cache.npz + 48 GB 临时
-  memmap,进程退出即释放);常驻 48 GB(npz)+ ~100 MB(kmeans)。
-- **RAM**: 峰值 <20 GB——嵌入全程 memmap、聚类分块、质量/token
-  数组 ~560 MB。修复前 `embed_texts_streaming` 末尾
-  `np.array(all_embeddings)` 会把 47.6 GB 拷进 RAM,本次改为返回
-  r-mode memmap 本体(tmp 已 unlink,POSIX 下映射仍可读,下游
-  分块 prescan/assign 只需视图)。
-- **已知取舍**: 缓存命中的重跑(调阈值/生产 Step 1)会 np.load
-  48 GB 进 RAM 走单发指派——本机级别(NPU 服务器)RAM 充裕,属快路径;
-  真 100B 池(512 GB npz)需要再议(npy 旁车 mmap),到时再说。
-- **验收标志**: `[Embed-Stream] Encoded 11,610,000 docs ... ~750 docs/s`
-  → `[Embed] Validate: NaN=0 ...` → `[Cluster] memmap input (11,610,000
-  x 1024) — chunked prescan/assign` → `[Cluster] FAISS K-means ...
-  threads=24, blas=1(pinned+reassert)` → `[Cluster] Done in ...` →
-  clusters.csv 全量 1000 行。
+- **规模前提(20-分片冒烟实测, 2026-08-31)**: 2,319,341 docs / 20
+  分片 → 116K/分片 × 1000 ≈ **116M docs / ~93B tokens**。全量跑
+  = 一次性 ~40h 嵌入 + ~950 GB 磁盘峰值,**不是过夜量级**——决策:
+  单节点 40h(周末挂机,缓存一次付费)或多节点 E(40/J h),二选一;
+  首个生产 run 不等它(抽样模式 500K 精标签 + domain 映射即可)。
+- **流式路径冒烟已验证(20 分片, ~232K docs)**: 8 worker 均衡
+  (2-3 分片/卡),速率爬坡 ~5 min 后稳定 **780-820 docs/s**
+  (500K 采样路径的 750 预测被证实,流式无额外开销);memmap 写入/
+  validate/分块聚类链路全通。子集缓存键与全池键不同,零污染,
+  测完可删。
+- **时间线(全池)**: ~20-40 min 全量 metadata 扫描(一次性,进缓存)
+  + **~40h 嵌入**(116M ÷ 800 docs/s;memmap,分片级断点续跑,
+  monitor 15s 打 docs/s+ETA) + ~7 min 聚类训练(固定 256K 子采样)
+  + 15-50 min 全量指派 + 分钟级 profile。
+- **磁盘**: 峰值 ~950 GB(475 GB embedding_cache.npz + 475 GB 临时
+  memmap,进程退出释放);常驻 475 GB(npz)+ ~100 MB(kmeans)。
+  **跑前必须 df 确认**;不够则先清空间或改走 E。
+- **RAM**: 嵌入/聚类全程 <20 GB(memmap + 分块指派)。缓存命中的
+  重跑(调阈值/生产 Step 1)np.load 475 GB 进 RAM——本机 1.5 TB
+  可容但分钟级 I/O;npy-memmap 旁车是更优解(列入 TODO,非阻塞)。
+- **验收标志**: `[Embed-Stream] Encoded ~116,000,000 docs ...
+  ~800 docs/s` → `[Embed] Validate: NaN=0 ...` → `[Cluster] memmap
+  input (~116,000,000 x 1024) — chunked prescan/assign` →
+  `[Cluster] FAISS K-means ... threads=24, blas=1(pinned+reassert)`
+  → `[Cluster] Done in ...` → clusters.csv 全量 1000 行。
+- **生产复用**: 缓存键 = 分片清单 + model + truncate-len(sample=0
+  无 sample 分量),与 run_climbmix.sh Step 1(EMBEDDING_SAMPLE_SIZE=0)
+  完全一致——40h 一次付费,discovery 与生产共用;fingerprint 归档
+  只动 OUTPUT_DIR,不碰 pool 缓存。
