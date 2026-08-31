@@ -927,7 +927,12 @@ def embed_texts_streaming(
     Stream-embed texts shard by shard, avoiding loading all texts into memory.
 
     Reads one shard's text column at a time, embeds it, stores embeddings
-    in a preallocated array, then frees the text memory.
+    in a preallocated memmap, then frees the text memory. A fresh run
+    returns the backing read-only memmap (never an in-RAM copy — 48 GB at
+    the current 11.6M pool, 512 GB at the real 100B pool); the tmp file is
+    unlinked before return and stays readable through the mapping (POSIX).
+    A cache hit returns the npz-loaded ndarray. Both forms feed
+    cluster_embeddings (memmaps take the chunked prescan/assign path).
     """
     cached = _load_cached_embeddings(
         cache_path, getattr(metadata_manager, "num_docs", None), "[Embed-Stream]")
@@ -1082,7 +1087,15 @@ def embed_texts_streaming(
             print(f"[Embed-Stream] Cached embeddings to: {cache_path}")
         _clear_partial_embedding_state(cache_dir, memmap_path)
 
-        return np.array(all_embeddings)
+        # Return the r-mode memmap itself. np.array(...) would materialize
+        # n*dim*4 bytes of RAM (48 GB at the current 11.6M pool, 512 GB at
+        # the real 100B pool) — exactly what the memmap design exists to
+        # avoid, and the chunked prescan/assign path in
+        # cluster_embeddings_faiss only needs views. The tmp file was just
+        # unlinked above; POSIX keeps an mmap'd file readable after unlink,
+        # so downstream reads the surviving mapping and disk space is
+        # reclaimed at process exit.
+        return all_embeddings
 
     # Single NPU / CPU path — same memmap + ledger resume semantics as the
     # multi-NPU path (memmap-backed writes, per-shard progress ledger).
@@ -1178,7 +1191,9 @@ def embed_texts_streaming(
         del model
         _flush_device_cache(actual_device, "[Embed-Stream]")
 
-    return np.array(all_embeddings)
+    # See the multi-NPU return above: never copy the memmap into RAM; the
+    # unlinked tmp file stays readable through this mapping.
+    return all_embeddings
 
 
 def _cluster_thread_count() -> int:

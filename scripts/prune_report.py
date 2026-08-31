@@ -29,6 +29,18 @@ Typical (server, full 100B pool, first run):
   # steps; 20K → ~20/cluster).
 Re-run: seconds (all caches hit).
 
+Full-pool mode (analyze EVERY doc — the pre-production cache warm-up):
+  python3 scripts/prune_report.py --data-dir <pool> --sample-shards 0 --sample-size 0
+  # ~20-40 min full metadata scan + ~4.3 h 8-NPU streaming embed (memmap,
+  # per-shard crash resume) + ~10 min cluster (256K train subsample +
+  # chunked full-pool assign) + minutes of profiles. Disk: ~48 GB npz
+  # cache + ~48 GB transient tmp (space freed at exit); RAM stays <20 GB —
+  # embeddings never materialize in RAM. The cache dir this writes (key:
+  # shard manifest + model + truncate-len, no sample component) is EXACTLY
+  # the key run_climbmix.sh Step 1 uses (EMBEDDING_SAMPLE_SIZE=0 default),
+  # so the 4.3 h is paid once for discovery AND production. Cache-hit
+  # re-runs npz-load 48 GB into RAM (fat-RAM hosts) instead of re-embedding.
+
 No NPU? --embedding-device cpu works (20K docs ≈ tens of minutes).
 """
 
@@ -208,50 +220,69 @@ def main():
     import numpy as np
     kmeans_cache = (os.path.join(pool_cache_dir, f"kmeans_K{args.K_init}.npz")
                     if pool_cache_dir else None)
+
+    def _emit_cluster_table(labels, q_rows, tok_rows):
+        from climbmix.core.cluster_merge import _cluster_quality_matrix
+        col_means, counts, token_sums, n_excl = _cluster_quality_matrix(
+            labels, q_rows, token_counts=tok_rows)
+        col_names = list(schema.quality_cols)
+        rows = []
+        for cid in range(len(counts)):
+            if counts[cid] == 0:
+                continue
+            row = {
+                "cluster_id": cid,
+                "n_docs": int(counts[cid]),
+                "tokens": int(token_sums[cid]) if token_sums is not None else "",
+                "avg_quality": round(float(col_means[cid].mean()), 4),
+                **{f"mean_{n}": round(float(col_means[cid, j]), 4)
+                   for j, n in enumerate(col_names)},
+                "pruned": int(col_means[cid].mean() < prune_threshold),
+            }
+            rows.append(row)
+        if not rows:
+            print("[Report] no non-empty clusters — skipping clusters.csv")
+            return
+        rows.sort(key=lambda r: r["avg_quality"])
+        csv_path = os.path.join(output_dir, "clusters.csv")
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+        n_pruned_rows = sum(r["pruned"] for r in rows)
+        print(f"[Report] Per-cluster table → {csv_path} "
+              f"({len(rows)} clusters, {n_pruned_rows} below "
+              f"threshold={prune_threshold}; weakest 10:")
+        for r in rows[:10]:
+            cols = " ".join(f"{r[f'mean_{n}']:.2f}" for n in col_names)
+            print(f"    C{r['cluster_id']:<4} avg={r['avg_quality']:.2f} "
+                  f"docs={r['n_docs']:<6} tokens={r['tokens']:<10} [{cols}]")
+
     if kmeans_cache and os.path.exists(kmeans_cache):
         data = np.load(kmeans_cache)
         sample_labels = data["labels"]
-        rng = np.random.default_rng(42)
-        sample_indices = np.sort(rng.choice(n_total, size=args.sample_size,
-                                            replace=False))
-        if sample_labels.shape[0] == len(sample_indices):
-            from climbmix.core.cluster_merge import _cluster_quality_matrix
-            q_sample = quality_scores[sample_indices]
-            col_means, counts, token_sums, n_excl = _cluster_quality_matrix(
-                sample_labels, q_sample, token_counts=token_counts[sample_indices])
-            col_names = list(schema.quality_cols)
-            rows = []
-            for cid in range(len(counts)):
-                if counts[cid] == 0:
-                    continue
-                row = {
-                    "cluster_id": cid,
-                    "n_docs": int(counts[cid]),
-                    "tokens": int(token_sums[cid]) if token_sums is not None else "",
-                    "avg_quality": round(float(col_means[cid].mean()), 4),
-                    **{f"mean_{n}": round(float(col_means[cid, j]), 4)
-                       for j, n in enumerate(col_names)},
-                    "pruned": int(col_means[cid].mean() < prune_threshold),
-                }
-                rows.append(row)
-            rows.sort(key=lambda r: r["avg_quality"])
-            csv_path = os.path.join(output_dir, "clusters.csv")
-            with open(csv_path, "w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-                writer.writeheader()
-                writer.writerows(rows)
-            n_pruned_rows = sum(r["pruned"] for r in rows)
-            print(f"[Report] Per-cluster table → {csv_path} "
-                  f"({len(rows)} clusters, {n_pruned_rows} below "
-                  f"threshold={prune_threshold}; weakest 10:")
-            for r in rows[:10]:
-                cols = " ".join(f"{r[f'mean_{n}']:.2f}" for n in col_names)
-                print(f"    C{r['cluster_id']:<4} avg={r['avg_quality']:.2f} "
-                      f"docs={r['n_docs']:<6} tokens={r['tokens']:<10} [{cols}]")
+        if args.sample_size == 0:
+            # Full-pool mode: the kmeans cache labels EVERY doc — build the
+            # table from the full quality/token arrays (exact per-cluster
+            # stats, no sampling error).
+            if (quality_scores is not None
+                    and sample_labels.shape[0] == len(quality_scores)):
+                _emit_cluster_table(sample_labels, quality_scores, token_counts)
+            else:
+                print(f"[Report] kmeans labels ({sample_labels.shape[0]:,}) "
+                      f"don't match pool rows — skipping clusters.csv")
         else:
-            print(f"[Report] kmeans cache row count mismatch "
-                  f"({sample_labels.shape[0]} vs {len(sample_indices)}) — "
-                  f"skipping clusters.csv")
+            rng = np.random.default_rng(42)
+            sample_indices = np.sort(rng.choice(n_total, size=args.sample_size,
+                                                replace=False))
+            if sample_labels.shape[0] == len(sample_indices):
+                q_sample = quality_scores[sample_indices]
+                _emit_cluster_table(sample_labels, q_sample,
+                                    token_counts[sample_indices])
+            else:
+                print(f"[Report] kmeans cache row count mismatch "
+                      f"({sample_labels.shape[0]} vs {len(sample_indices)}) — "
+                      f"skipping clusters.csv")
     else:
         print("[Report] kmeans cache not found — skipping clusters.csv")
 

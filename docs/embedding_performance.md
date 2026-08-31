@@ -322,6 +322,15 @@ GFLOP/call):
   判窗口方法: 空闲时重跑 cluster_bench(banner 现打印 cgroup
   配额/affinity/loadavg/steal%;若 24 线程回到 ~280 即窗口波动
   实锤,若 steal% 持续非零即宿主超卖实锤)。
+- **空闲窗口复测定案**(同日, 服务器实测): 12/24/48 线程 =
+  192/**274**/181 GFLOP/s——24 线程复现原始 bench 的 281(方差内),
+  >24 崩塌第三次复现,甜点恒为 24;steal 0.0% 排除宿主超卖通道;
+  loadavg ~8.9 与低谷期相同却一个 146 一个 274 → 波动源在容器
+  可观测范围之外(宿主侧邻居/lxcfs 遮蔽),内部不可判也不可控。
+  aarch64 wheel 的 pin probe 同样报 CLOBBERED(set 24→inside 1)
+  ——确认服务器 wheel 与 x86 同病,生产 re-assert 修复在该机
+  实打实扛住 clobber。**定格: 本机 CPU 聚类吞吐 130-280 GFLOP/s
+  随宿主窗口波动,500K 训练 3.2-7 min,聚类在任何规模非瓶颈。**
 - **对全量跑的量级**(按重跑终局 ~130-151 GFLOP/s 折算): kmeans
   训练固定采样 256K 点(与池大小无关)≈ 100×3.5-4s+预处理 ≈ **~7
   min**(宿主好窗口下 ~3.5 min);当前池全量指派 11.61M docs =
@@ -337,3 +346,41 @@ GFLOP/call):
   用户确认**最终会拓展到真 100B token 池**(≈125M docs → 单节点
   ≈47 h),E 里程碑(弹性多节点, 47/J h)对那个规模成立,是 100B
   扩池的前置项而非首个生产 run 的前置项。
+
+## 9. 全池 prune_report 跑法与预算（2026-08-31, 11.61M docs）
+
+```bash
+python3 scripts/prune_report.py \
+    --data-dir /home/ma-user/work/100B_stem_parquet_filtered \
+    --sample-shards 0 --sample-size 0
+```
+
+- **为什么值得跑**: 出全量 prune/merge profile(真·每簇统计,无采样误差)
+  + clusters.csv 全量版;同时**预热生产缓存**——缓存键 = 分片清单 +
+  model + truncate-len(sample=0 无 sample 分量),与 run_climbmix.sh
+  Step 1 默认(EMBEDDING_SAMPLE_SIZE=0)完全一致,**4.3h 只付一次**,
+  discovery 与生产共用。
+- **时间线**: ~20-40 min 全量 metadata 扫描(1000 分片) + 嵌入
+  (memmap,分片级断点续跑) + ~10 min 聚类(训练固定 256K 子采样 +
+  分块全量指派) + 分钟级 profile。嵌入时长: 4.3h = 11.61M ÷ 750
+  docs/s 的线性外推(750 = 500K 采样 11 min 实测),是**好窗口下限**;
+  4-5h 长跑要平均过宿主有效核波动(实测 12-23 核),且流式路径
+  (每 worker 自读 parquet + tokenize)是首次全量运行——规划按
+  **4.5-7h**;开跑后 monitor 每 15s 打 docs/s+ETA,前 10 min 即可
+  读到真实速率,不必等跑完才知道。速率掉档参照: 500 docs/s →
+  6.4h,300 → 10.7h。
+- **磁盘**: 峰值 ~96 GB(48 GB embedding_cache.npz + 48 GB 临时
+  memmap,进程退出即释放);常驻 48 GB(npz)+ ~100 MB(kmeans)。
+- **RAM**: 峰值 <20 GB——嵌入全程 memmap、聚类分块、质量/token
+  数组 ~560 MB。修复前 `embed_texts_streaming` 末尾
+  `np.array(all_embeddings)` 会把 47.6 GB 拷进 RAM,本次改为返回
+  r-mode memmap 本体(tmp 已 unlink,POSIX 下映射仍可读,下游
+  分块 prescan/assign 只需视图)。
+- **已知取舍**: 缓存命中的重跑(调阈值/生产 Step 1)会 np.load
+  48 GB 进 RAM 走单发指派——本机级别(NPU 服务器)RAM 充裕,属快路径;
+  真 100B 池(512 GB npz)需要再议(npy 旁车 mmap),到时再说。
+- **验收标志**: `[Embed-Stream] Encoded 11,610,000 docs ... ~750 docs/s`
+  → `[Embed] Validate: NaN=0 ...` → `[Cluster] memmap input (11,610,000
+  x 1024) — chunked prescan/assign` → `[Cluster] FAISS K-means ...
+  threads=24, blas=1(pinned+reassert)` → `[Cluster] Done in ...` →
+  clusters.csv 全量 1000 行。
