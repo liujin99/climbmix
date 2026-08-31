@@ -178,6 +178,24 @@ Second run (after first green): λ_max ≈ 10h → **k=2**, recompute C and
 `REMOTE_MAX_JOBS` with the same formulas; A_eff should be re-eyeballed
 from the first run's observed pool.
 
+### Backend repo layout
+
+Two equivalent layouts — only `PYTHONPATH` matters:
+
+```bash
+# nested (recommended): the backend clone lives INSIDE this checkout
+git clone <your-backend-repo-url> climbmix/climbmix-<name>
+export PYTHONPATH=$PWD/climbmix/src:$PWD/climbmix/climbmix-<name>
+
+# side-by-side: two sibling checkouts
+export PYTHONPATH=$PWD/climbmix/src:$PWD/climbmix-<name>
+```
+
+Nested clones are ignored by git (`.gitignore` `/climbmix-*/`), so they
+never pollute `git status` or get committed by accident. Do NOT use git
+submodules — the submodule URL would leak the private repo's existence
+into this public history.
+
 ### Launch command
 
 ```bash

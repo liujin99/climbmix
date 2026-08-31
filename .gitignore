@@ -45,3 +45,8 @@ remote_*.json
 remote_*.local.json
 iam_tokens.json
 guard_patterns.json
+
+# Out-of-tree backend repos cloned INTO this checkout (nested layout:
+# recommended — they are their own git checkouts and are NEVER committed
+# here). Generic prefix so no specific backend is implied.
+/climbmix-*/
