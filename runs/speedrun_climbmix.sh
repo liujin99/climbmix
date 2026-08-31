@@ -67,6 +67,9 @@ K_CLUSTER_MAX="${K_CLUSTER_MAX:-15}"
 K_INIT="${K_INIT:-100}"
 FILTER_METHOD="${FILTER_METHOD:-none}"
 PRUNE_THRESHOLD="${PRUNE_THRESHOLD:-3.0}"
+# 0 = off in speedrun: it validates pipeline shape, not prune semantics
+# (production default 2.0 lives in run_climbmix.sh).
+PRUNE_COLUMN_FLOOR="${PRUNE_COLUMN_FLOOR:-0}"
 MERGE_DISTANCE="${MERGE_DISTANCE:-0.9}"
 EMBEDDING_MODEL="${EMBEDDING_MODEL:-NovaSearch/stella_en_400M_v5}"
 # Stable pool-keyed cache for embeddings + K-means (survives fingerprint
@@ -187,6 +190,7 @@ FP_SEARCH_PARAMS=(
     "K_init=$K_INIT"
     "filter_method=$FILTER_METHOD"
     "prune_threshold=$PRUNE_THRESHOLD"
+    "prune_column_floor=$PRUNE_COLUMN_FLOOR"
     "merge_distance=$MERGE_DISTANCE"
     "embedding_model=$EMBEDDING_MODEL"
     "embedding_sample_size=$EMBEDDING_SAMPLE_SIZE"
@@ -337,6 +341,7 @@ else
         --K-init "$K_INIT" \
         --filter-method "$FILTER_METHOD" \
         --prune-threshold "$PRUNE_THRESHOLD" \
+        --prune-column-floor "$PRUNE_COLUMN_FLOOR" \
         --merge-distance "$MERGE_DISTANCE" \
         --embedding-model "$EMBEDDING_MODEL" \
         --num-iterations "$SEARCH_NUM_ITERATIONS" \

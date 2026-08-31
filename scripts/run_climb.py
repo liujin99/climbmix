@@ -68,6 +68,10 @@ def main():
     parser.add_argument("--embedding-sample-size", type=int, default=0,
                         help="Subsample N docs for embedding (0 = all). Speeds up embedding_cluster on large datasets.")
     parser.add_argument("--prune-threshold", type=float, default=3.0)
+    parser.add_argument("--prune-column-floor", type=float, default=0.0,
+                        help="prune clusters whose weakest quality-column mean "
+                             "falls below this (0 = off, mean-threshold only); "
+                             "catches clusters the flat average lets through")
     parser.add_argument("--merge-distance", type=float, default=0.9,
                         help="Merge legality threshold (tau) on centroid L2 distance "
                              "(unit-normalized embeddings: d^2=2(1-cos), 0.9 ~ cos 0.6)")
@@ -213,6 +217,7 @@ def main():
             embedding_device=args.embedding_device,
             embedding_sample_size=args.embedding_sample_size,
             prune_threshold=args.prune_threshold,
+            prune_column_floor=args.prune_column_floor,
             merge_distance=args.merge_distance,
         ),
         filtering=QualityFilterConfig(method=args.filter_method),

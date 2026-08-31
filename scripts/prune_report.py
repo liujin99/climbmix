@@ -114,6 +114,11 @@ def main():
     parser.add_argument("--merge-distance", type=float, default=0.9)
     parser.add_argument("--prune-threshold", type=float, default=None,
                         help="default: schema's prune_threshold (3.0)")
+    parser.add_argument("--prune-column-floor", type=float, default=0.0,
+                        help="prune clusters whose weakest quality-column mean "
+                             "falls below this (0 = off, mean-only; the "
+                             "conservative hybrid from prune_rule_analysis.py "
+                             "is 2.0)")
     parser.add_argument("--embedding-model", default="NovaSearch/stella_en_400M_v5")
     parser.add_argument("--embedding-device", default="npu")
     parser.add_argument("--embedding-truncate-len", type=int, default=512)
@@ -147,7 +152,9 @@ def main():
     print("  Prune-profile report (discovery-only)")
     print(f"  pool: {args.data_dir}")
     print(f"  sample_size={args.sample_size:,}  K_init={args.K_init}  "
-          f"prune_threshold={prune_threshold}")
+          f"prune_threshold={prune_threshold}"
+          + (f"  column_floor={args.prune_column_floor}"
+             if args.prune_column_floor > 0 else ""))
     print("=" * 70)
 
     # ── Stage 0: shard subsample + metadata (domain + quality + char_count).
@@ -183,6 +190,7 @@ def main():
         embedding_device=args.embedding_device,
         embedding_sample_size=args.sample_size,
         prune_threshold=prune_threshold,
+        prune_column_floor=args.prune_column_floor,
         merge_distance=args.merge_distance,
     )
     config = CLIMBConfig(
@@ -226,6 +234,7 @@ def main():
         col_means, counts, token_sums, n_excl = _cluster_quality_matrix(
             labels, q_rows, token_counts=tok_rows)
         col_names = list(schema.quality_cols)
+        floor = args.prune_column_floor
         rows = []
         for cid in range(len(counts)):
             if counts[cid] == 0:
@@ -237,7 +246,8 @@ def main():
                 "avg_quality": round(float(col_means[cid].mean()), 4),
                 **{f"mean_{n}": round(float(col_means[cid, j]), 4)
                    for j, n in enumerate(col_names)},
-                "pruned": int(col_means[cid].mean() < prune_threshold),
+                "pruned": int(col_means[cid].mean() < prune_threshold
+                              or (floor > 0 and col_means[cid].min() < floor)),
             }
             rows.append(row)
         if not rows:
@@ -250,9 +260,10 @@ def main():
             writer.writeheader()
             writer.writerows(rows)
         n_pruned_rows = sum(r["pruned"] for r in rows)
+        rule = (f"threshold={prune_threshold}, column_floor={floor}"
+                if floor > 0 else f"threshold={prune_threshold}")
         print(f"[Report] Per-cluster table → {csv_path} "
-              f"({len(rows)} clusters, {n_pruned_rows} below "
-              f"threshold={prune_threshold}; weakest 10:")
+              f"({len(rows)} clusters, {n_pruned_rows} below {rule}; weakest 10:")
         for r in rows[:10]:
             cols = " ".join(f"{r[f'mean_{n}']:.2f}" for n in col_names)
             print(f"    C{r['cluster_id']:<4} avg={r['avg_quality']:.2f} "

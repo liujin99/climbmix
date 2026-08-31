@@ -55,6 +55,12 @@ K_CLUSTER_MAX="${K_CLUSTER_MAX:-15}"
 K_INIT="${K_INIT:-1000}"
 FILTER_METHOD="${FILTER_METHOD:-none}"
 PRUNE_THRESHOLD="${PRUNE_THRESHOLD:-3.0}"
+# Per-column floor: prune clusters whose WEAKEST quality-column mean falls
+# below this (catches what the flat average washes out — the 69 escape
+# clusters / 6.6% docs / 1.5% tokens population from the 2026-08-31 profile).
+# 2.0 = conservative: only kills knowledge_value <2.0 even under scorer
+# noise; raise after eyeballing pruned samples (0 = off).
+PRUNE_COLUMN_FLOOR="${PRUNE_COLUMN_FLOOR:-2.0}"
 MERGE_DISTANCE="${MERGE_DISTANCE:-0.9}"
 EMBEDDING_MODEL="${EMBEDDING_MODEL:-NovaSearch/stella_en_400M_v5}"
 # Stable pool-keyed cache for embeddings + K-means (survives fingerprint
@@ -206,6 +212,7 @@ FP_SEARCH_PARAMS=(
     "K_init=$K_INIT"
     "filter_method=$FILTER_METHOD"
     "prune_threshold=$PRUNE_THRESHOLD"
+    "prune_column_floor=$PRUNE_COLUMN_FLOOR"
     "merge_distance=$MERGE_DISTANCE"
     "embedding_model=$EMBEDDING_MODEL"
     "discovery_method=$DISCOVERY_METHOD"
@@ -358,6 +365,7 @@ else
         --K-init "$K_INIT" \
         --filter-method "$FILTER_METHOD" \
         --prune-threshold "$PRUNE_THRESHOLD" \
+        --prune-column-floor "$PRUNE_COLUMN_FLOOR" \
         --merge-distance "$MERGE_DISTANCE" \
         --embedding-model "$EMBEDDING_MODEL" \
         --num-iterations "$SEARCH_NUM_ITERATIONS" \

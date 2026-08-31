@@ -88,6 +88,7 @@ class EmbeddingClusterDiscovery:
                     K_enhanced=config.K_enhanced,
                     K_max=config.K_max,
                     prune_threshold=config.prune_threshold,
+                    prune_column_floor=config.prune_column_floor,
                     merge_distance=config.merge_distance,
                     embedding_cache=emb_cache,
                     kmeans_cache=kmeans_cache,
@@ -134,6 +135,7 @@ class EmbeddingClusterDiscovery:
             K_enhanced=config.K_enhanced,
             K_max=config.K_max,
             prune_threshold=config.prune_threshold,
+            prune_column_floor=config.prune_column_floor,
             merge_distance=config.merge_distance,
             embedding_cache=emb_cache,
             kmeans_cache=kmeans_cache,
@@ -271,6 +273,7 @@ class QualityClusterDiscovery:
     ) -> Tuple[list, npt.NDArray[np.int64]]:
         from climbmix.core.cluster_merge import (
             compute_cluster_quality,
+            compute_cluster_column_mins,
             diagnose_prune_profile,
             prune_clusters,
             merge_clusters_by_distance,
@@ -337,8 +340,12 @@ class QualityClusterDiscovery:
             profile_path=os.path.join(cache_dir, "prune_profile.json") if cache_dir else None,
         )
 
+        column_mins = (compute_cluster_column_mins(labels, quality_scores)
+                       if config.prune_column_floor > 0.0 else None)
+
         pruned_labels, pruned_centroids, _ = prune_clusters(
             labels, centroids, cluster_quality, threshold=config.prune_threshold,
+            column_mins=column_mins, column_floor=config.prune_column_floor,
         )
 
         valid_mask = pruned_labels >= 0

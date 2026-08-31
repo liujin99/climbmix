@@ -273,6 +273,16 @@ class ClusterDiscoveryConfig:
     embedding_device: str = "cpu"
     embedding_sample_size: int = 0
     prune_threshold: float = 3.0
+    # Per-column floor: prune a cluster when ANY quality column's cluster mean
+    # falls below this (0.0 = off, the historical mean-only behavior). The
+    # flat average lets "clean formatting" wash out a dead column — the
+    # 2026-08-31 20-shard profile found 69/1000 clusters passing mean>=3.0
+    # with knowledge_value ~1.8-2.0 (a short-formula-list population,
+    # 6.6% of docs but only 1.5% of tokens). See scripts/diagnostics/
+    # prune_rule_analysis.py; deliberately conservative (2.0 < the weakest
+    # column's typical cluster mean) because the 1-5 scorer itself is
+    # unvalidated — raise after eyeballing pruned-cluster samples.
+    prune_column_floor: float = 0.0
     # Merge legality threshold (tau) on unit-normalized embeddings:
     # d^2 = 2(1 - cos), so 0.9 ~ cosine similarity 0.6. NOT from the paper
     # (paper merges to fixed K_enhanced regardless of distance) — deliberate

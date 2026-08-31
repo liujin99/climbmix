@@ -24,6 +24,7 @@
 | D10 | Proxy/Target 规模 | proxy 350M ≈800M tokens;target 1B/40B tokens | proxy d20(435M scaling)1000 步 ≈524M;target d28 524M/1000 步 | 算力;详细换算见 scoring_metric_design.md §12 |
 | D11 | token 计量 | 精确 tokenize(池统计) | chars/4 估算(元数据预计算列) | 池扫描免 tokenize;配比/配额的近似 |
 | D12 | 评测子采样 | 全量 | speedrun 100 题/任务(fixed shuffle seed 1337,跨实验可比较);生产 -1 全量 | speedrun 时间预算;生产无偏差 |
+| D13 | 剪枝规则 | 簇平均质量 < 3.0 即剪(fasttext,§2.1/§3.1) | 平均阈值 + **单列下限** hybrid:任一质量列的簇均值 < `PRUNE_COLUMN_FLOOR`(生产默认 2.0,0=关)即剪 | 平均线漏检"格式干净但知识贫瘠"的簇(2026-08-31 20-分片画像:69/1000 簇过均线但 knowledge_value 1.8-2.0;6.6% docs / 仅 1.5% tokens);标签未校验故取保守档 2.0,见细节 D13 |
 
 ## 细节与出处
 
@@ -94,6 +95,21 @@ band"),τ=0.9 作用在归一化向量上。**勘误**:早前审计记录"1.5/3.
 论文 proxy ≈800M tokens(45 GPU-h,由 6400 GPU-h target 反推,§C.4)、target
 1B/40B。我们 proxy 524M(1000 步)、target 524M——token 口径为论文的 65%/1.3%
 (base 池 ~2-3B vs 论文 10T,场景不同)。完整推导见 scoring_metric_design.md §12。
+
+### D13 剪枝规则(2026-08-31)
+论文用 fasttext 分类器簇均值 < 3.0 剪枝。我们保留均值阈值
+(`PRUNE_THRESHOLD=3.0`),叠加**单列下限** `PRUNE_COLUMN_FLOOR`(生产默认
+2.0,0=关闭即论文语义):任一质量列的簇均值低于下限即剪。动机:2026-08-31
+20-分片全量标签画像(`prune_rule_analysis.py` 离线分析 `prune_profile.json`)
+发现 69/1000 簇过了均线但 knowledge_value 1.8-2.0——notation/noise 满分把
+知识贫瘠平均掉了(公式表/无解法习题干类);该种群 6.6% docs 但仅 1.5%
+tokens(弱簇均为短文档)。取 2.0 而非更狠的 2.5(后者 21% docs 且会连带
+弱在其他列的族)的原因:5 列 scorer 本身未校验,下限越保守对标签噪声越
+稳健——先保守跑,人工抽验被剪簇原文后再提档(改 knob 重跑秒级,pool
+缓存命中)。实现:`prune_clusters(column_mins, column_floor)` +
+`compute_cluster_column_mins`;无质量标签时 floor 与均值剪枝一同失效
+(返回 {})。speedrun 默认 0(只验管道形状);该 knob 进 search-stage
+fingerprint(语义变更 → Steps 1-3 重跑,embedding pool 缓存不受影响)。
 
 ## 已核对一致(正向审计)
 

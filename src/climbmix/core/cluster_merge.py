@@ -78,11 +78,42 @@ def compute_cluster_quality(
     return cluster_quality
 
 
+def compute_cluster_column_mins(
+    cluster_labels: npt.NDArray[np.int64],
+    quality_scores: Optional[npt.NDArray[np.float64]] = None,
+) -> Dict[int, float]:
+    """
+    Per-cluster MINIMUM of per-column mean quality — the floor-rule input.
+
+    Companion to compute_cluster_quality: same None/all-zero gating (returns
+    {} so a floor on top of it stays inert exactly when mean pruning does),
+    but keeps the column axis long enough to take the minimum. A cluster
+    whose weakest column mean is below the floor escapes the flat average
+    even when its overall mean passes the threshold.
+
+    Args:
+        cluster_labels: Per-document cluster labels.
+        quality_scores: Per-document quality scores (num_docs, N).
+
+    Returns:
+        Dict mapping cluster_id -> minimum column-mean quality.
+    """
+    if quality_scores is None or np.all(quality_scores == 0):
+        return {}
+
+    col_means, counts, _, _ = _cluster_quality_matrix(cluster_labels, quality_scores)
+    nonempty = counts > 0
+    return {int(c): float(col_means[c].min())
+            for c in np.nonzero(nonempty)[0]}
+
+
 def prune_clusters(
     cluster_labels: npt.NDArray[np.int64],
     centroids: npt.NDArray[np.float32],
     cluster_quality: Dict[int, float],
     threshold: float = 3.0,
+    column_mins: Optional[Dict[int, float]] = None,
+    column_floor: float = 0.0,
 ) -> Tuple[npt.NDArray[np.int64], npt.NDArray[np.float32], Dict[int, int]]:
     """
     Prune low-quality clusters based on quality threshold.
@@ -91,22 +122,40 @@ def prune_clusters(
         cluster_labels: Per-document cluster labels (K_init clusters).
         centroids: Cluster centroids (K_init, dim).
         cluster_quality: Per-cluster quality scores.
-        threshold: Minimum quality threshold.
+        threshold: Minimum average-quality threshold.
+        column_mins: Per-cluster minimum column mean (from
+            compute_cluster_column_mins). Only consulted when column_floor
+            > 0; clusters missing from it (no-quality pools) are exempt.
+        column_floor: Prune any cluster with a column mean below this
+            (0.0 = off, historical mean-only behavior).
 
     Returns:
         Tuple of (pruned_labels, pruned_centroids, old_to_new_id_map).
     """
     unique_clusters = np.unique(cluster_labels)
     kept_clusters = []
+    n_floor_only = 0
     for c in unique_clusters:
         if c < 0:
             continue
-        if cluster_quality.get(int(c), 0.0) >= threshold:
+        passes_mean = cluster_quality.get(int(c), 0.0) >= threshold
+        passes_floor = (column_floor <= 0.0
+                         or column_mins is None
+                         or column_mins.get(int(c), float("inf")) >= column_floor)
+        if passes_mean and passes_floor:
             kept_clusters.append(int(c))
+        elif passes_mean and not passes_floor:
+            n_floor_only += 1
 
     n_pruned = len(unique_clusters) - len(kept_clusters)
-    print(f"[Prune] Pruned {n_pruned}/{len(unique_clusters)} clusters "
-          f"(threshold={threshold}), keeping {len(kept_clusters)}")
+    if column_floor > 0.0 and column_mins is not None:
+        print(f"[Prune] Pruned {n_pruned}/{len(unique_clusters)} clusters "
+              f"(threshold={threshold}, column_floor={column_floor}; "
+              f"{n_floor_only} passed the mean but failed the floor), "
+              f"keeping {len(kept_clusters)}")
+    else:
+        print(f"[Prune] Pruned {n_pruned}/{len(unique_clusters)} clusters "
+              f"(threshold={threshold}), keeping {len(kept_clusters)}")
 
     old_to_new: Dict[int, int] = {}
     for new_id, old_id in enumerate(sorted(kept_clusters)):
@@ -917,6 +966,7 @@ def preprocess_pipeline(
     domain_labels: Optional[npt.NDArray[np.int64]] = None,
     domain_names: Optional[List[str]] = None,
     prune_profile_path: Optional[str] = None,
+    prune_column_floor: float = 0.0,
 ) -> Tuple[List[ClusterInfo], npt.NDArray[np.int64]]:
     """
     Full CLIMB preprocessing pipeline: embed → cluster → prune → merge → build info.
@@ -944,6 +994,8 @@ def preprocess_pipeline(
         domain_names: Human-readable domain names indexed by domain id.
         prune_profile_path: Where to write prune_profile.json (run-level
             audit of the per-cluster quality analysis).
+        prune_column_floor: Prune clusters whose weakest quality column mean
+            falls below this (0.0 = off, mean-threshold only).
 
     Returns:
         Tuple of (cluster_info_list, final_cluster_labels).
@@ -990,8 +1042,12 @@ def preprocess_pipeline(
         profile_path=prune_profile_path,
     )
 
+    column_mins = (compute_cluster_column_mins(cluster_labels, quality_scores)
+                   if prune_column_floor > 0.0 else None)
+
     pruned_labels, pruned_centroids, _ = prune_clusters(
         cluster_labels, centroids, cluster_quality, threshold=prune_threshold,
+        column_mins=column_mins, column_floor=prune_column_floor,
     )
 
     valid_mask = pruned_labels >= 0
