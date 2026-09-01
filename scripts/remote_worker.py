@@ -20,6 +20,14 @@ Flow:
   4. Claim the CSV out of the private dir, upload it + logs + result.json to
      {result_uri}/.
 
+Progress visibility: a daemon thread streams the IN-PROGRESS mid_train.log
+and eval.log to {result_uri} every log_stream_s seconds (spec field, default
+30). With the mount/local storage backends upload_file lands on the OUTPUT
+MOUNT, so the platform's periodic sync publishes the tail to OBS while the
+stage is still running — watchable from the submit host through its mount
+within about a minute. Best-effort by design: a failed stream never kills
+training, and the post-stage uploads remain the authoritative copies.
+
 Exit code: 0 iff mid_train_rc == 0 and eval_rc == 0 (mirrors the local
 executor's fail-fast). result.json is uploaded even on failure, with the
 error message, so the submit host can report precisely.
@@ -38,6 +46,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 
@@ -48,6 +57,7 @@ import nanochat_cmds  # noqa: E402
 
 SPEC_VERSION = 1
 HEARTBEAT_S = 300  # print progress to the job console every 5 minutes
+LOG_STREAM_S = 30  # default in-progress log upload period (spec-tunable)
 
 
 # ── storage backends ──────────────────────────────────────────────────────
@@ -177,6 +187,37 @@ def run_cmd(cmd, log_path: str, cwd: str, env) -> int:
     return proc.returncode
 
 
+def start_log_streamer(storage, work: str, result_uri: str,
+                       period_s: float):
+    """Best-effort live log upload (see the module docstring). Returns the
+    stop() closure; the thread is a daemon, so early-exit paths never need
+    to call it explicitly."""
+    if period_s <= 0:
+        return lambda: None
+    stop = threading.Event()
+
+    def _loop():
+        while not stop.wait(period_s):
+            for name in ("mid_train.log", "eval.log"):
+                lp = os.path.join(work, name)
+                if not os.path.isfile(lp):
+                    continue
+                try:
+                    storage.upload_file(lp, f"{result_uri}/{name}")
+                except Exception:
+                    pass  # progress visibility only — never fatal
+
+    t = threading.Thread(target=_loop, daemon=True,
+                         name="climbmix-log-stream")
+    t.start()
+
+    def _stop():
+        stop.set()
+        t.join(timeout=5)
+
+    return _stop
+
+
 # ── main ──────────────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -217,6 +258,11 @@ def main() -> int:
     work = s["work_dir"]
     result_uri = s["result_uri"].rstrip("/")
     os.makedirs(work, exist_ok=True)
+    # Live progress: stream the in-progress logs to the result prefix
+    # while the stages run (0/absent disables — final uploads only).
+    stop_stream = start_log_streamer(
+        storage, work, result_uri,
+        float(s.get("log_stream_s", LOG_STREAM_S)))
 
     res = {
         "spec_version": SPEC_VERSION,
@@ -312,6 +358,8 @@ def main() -> int:
         eval_rc = run_cmd(s["eval_cmd"], os.path.join(work, "eval.log"),
                           cwd=s["nanochat_dir"], env=env)
         res["eval_rc"] = eval_rc
+        # stages done — the post-stage uploads below are authoritative
+        stop_stream()
 
         csv_path = nanochat_cmds.claim_eval_csv(work, tag, eval_base)
         if csv_path is not None:

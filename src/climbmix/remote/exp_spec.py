@@ -66,6 +66,12 @@ class ExpSpec:
     # worker also inherits the container's own environment.
     env: Dict[str, str] = field(default_factory=dict)
 
+    # In-progress log upload period (seconds) — the worker's streamer
+    # thread pushes mid_train.log/eval.log to {result_uri} while the
+    # stages run, so progress is watchable from the submit host before
+    # the job finishes. 0 disables streaming (final uploads only).
+    log_stream_s: int = 30
+
     def remote_mixture_data_dir(self) -> str:
         """Container path of the mixture shards (the --data-dir value baked
         into mid_train_cmd)."""
@@ -91,6 +97,7 @@ class ExpSpec:
             "upload_checkpoint": self.upload_checkpoint,
             "visible_devices": list(self.visible_devices),
             "env": dict(self.env),
+            "log_stream_s": self.log_stream_s,
         }
 
     def to_json(self) -> str:
@@ -126,6 +133,7 @@ class ExpSpec:
             upload_checkpoint=bool(d.get("upload_checkpoint", True)),
             visible_devices=[int(x) for x in d.get("visible_devices", [0])],
             env={str(k): str(v) for k, v in d.get("env", {}).items()},
+            log_stream_s=int(d.get("log_stream_s", 30)),
         )
 
     @staticmethod
