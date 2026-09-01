@@ -38,7 +38,7 @@ backend") for the full contract.
 
 import importlib
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Dict, Optional
 
 from climbmix.remote.job_api import JobAPI, MockJobAPI
 from climbmix.remote.obs import MockObsStorage, ObsStorage
@@ -54,6 +54,11 @@ class BackendBundle:
     make_obs_storage: Callable[[object], ObsStorage]
     default_worker_path: str = ""
     validate: Optional[Callable[[object], None]] = None
+    # optional: {asset_name: obs://uri} the platform stages into every
+    # job directly (zero-duplicate shared locations, e.g. a model
+    # library) — check tooling reports these instead of the
+    # {prefix}/assets_big copies they replace
+    asset_mounts: Optional[Callable[[object], Dict[str, str]]] = None
 
 
 def create_mock_backend(remote_config):

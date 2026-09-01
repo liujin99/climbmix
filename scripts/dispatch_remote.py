@@ -115,13 +115,24 @@ def attach_cluster_state(executor, args):
 
 
 def check_assets(remote_config, args):
-    """Verify the one-time OBS bootstrap (big assets, M1 — see the backend
+    """Verify the OBS bootstrap (big assets, M1 — see the backend
     repo's README). The worker code bundle is uploaded automatically by
-    RemoteExecutor; these are NOT."""
+    RemoteExecutor; these are NOT. Assets the backend declares as
+    DIRECT mounts (shared OBS locations) are checked at their own URIs
+    instead of the {prefix}/assets_big copies they replace."""
     from climbmix.remote.backends import resolve_backend
-    obs = resolve_backend(remote_config).make_obs_storage(remote_config)
+    bundle = resolve_backend(remote_config)
+    obs = bundle.make_obs_storage(remote_config)
 
     prefix = (args.obs_prefix or remote_config.obs_prefix).rstrip("/")
+    # direct asset mounts (backend-declared shared OBS locations):
+    # each satisfies the same-named assets_big entry — zero duplicate
+    direct = {}
+    try:
+        direct = dict((getattr(bundle, "asset_mounts", None)
+                       or (lambda rc: {}))(remote_config) or {})
+    except Exception as e:
+        print(f"[check-assets] note: asset mounts unavailable ({e})")
     expected = {
         f"{prefix}/assets/remote_worker.py": "worker code (auto-uploaded)",
         f"{prefix}/assets/nanochat_cmds.py": "worker code (auto-uploaded)",
@@ -137,6 +148,18 @@ def check_assets(remote_config, args):
             ok = bool(obs.list_objects(uri))
         else:
             ok = obs.stat(uri)
+        # covered by a direct mount? check THAT uri instead
+        if not ok and uri.endswith("/") and uri in (
+                f"{prefix}/assets_big/{n}/" for n in direct):
+            name = uri.rstrip("/").rsplit("/", 1)[-1]
+            dm = direct[name]
+            ok = (obs.stat(dm) if not dm.endswith("/")
+                  else bool(obs.list_objects(dm)))
+            print(f"  {'OK ' if ok else 'MISSING'}  {dm}  "
+                  f"({what} — direct mount, replaces {name})")
+            if not ok:
+                missing.append(dm)
+            continue
         print(f"  {'OK ' if ok else 'MISSING'}  {uri}  ({what})")
         if not ok:
             missing.append(uri)
