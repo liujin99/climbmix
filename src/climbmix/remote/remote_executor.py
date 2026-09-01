@@ -310,16 +310,20 @@ class RemoteExecutor(ProxyRunner):
             shutil.copy2(src, dst)
 
     def _ensure_assets_uploaded(self) -> None:
+        """Upload the worker assets on EVERY init (idempotent overwrite).
+
+        The staged copies always match the running code, so an
+        unconditional refresh means worker-side changes take effect on
+        the next launch. Uploading only when absent (the old behavior)
+        would silently keep running stale worker code in jobs. Two tiny
+        files — cheap to write on any backend."""
         assets_uri = f"{self.remote.obs_prefix.rstrip('/')}/assets"
         with self._obs_lock:
-            if not self.obs.stat(f"{assets_uri}/remote_worker.py"):
+            for name in ("remote_worker.py", "nanochat_cmds.py"):
                 self.obs.upload_file(
-                    os.path.join(self.assets_stage_dir, "remote_worker.py"),
-                    f"{assets_uri}/remote_worker.py")
-                self.obs.upload_file(
-                    os.path.join(self.assets_stage_dir, "nanochat_cmds.py"),
-                    f"{assets_uri}/nanochat_cmds.py")
-                print(f"  [RemoteExecutor] uploaded worker assets -> {assets_uri}")
+                    os.path.join(self.assets_stage_dir, name),
+                    f"{assets_uri}/{name}")
+            print(f"  [RemoteExecutor] worker assets fresh -> {assets_uri}")
 
     # ── OBS helpers ──
 

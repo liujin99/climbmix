@@ -8,9 +8,12 @@ touching the search state or fingerprints of a real run. Validation protocol
 (dispatch_remote), then compare the input shards byte-for-byte (sha256) and
 the stem_metric (Δ < 0.002).
 
-Also: --check-assets verifies the one-time OBS bootstrap (big assets:
-nanochat-npu code, d20 checkpoint, tokenizer, eval_bundle/eval_stem — see
-docs/remote_setup.md) and prints what is missing.
+Also: --check-assets verifies the OBS bootstrap and prints what is
+missing. Two channels: {prefix}/assets = fresh code (two worker files,
+auto-uploaded by RemoteExecutor on every launch; may also carry
+nanochat-npu.tar.gz synced by backend-side tooling) and
+{prefix}/assets_big = the one-time big bundle (d* checkpoints,
+tokenizer, eval data; nanochat tar/dir as fallback).
 
 Examples:
   # asset check
@@ -122,7 +125,6 @@ def check_assets(remote_config, args):
     expected = {
         f"{prefix}/assets/remote_worker.py": "worker code (auto-uploaded)",
         f"{prefix}/assets/nanochat_cmds.py": "worker code (auto-uploaded)",
-        f"{prefix}/assets_big/nanochat-npu.tar.gz": "nanochat-npu repo bundle",
         f"{prefix}/assets_big/d20/": "d20 base checkpoint",
         f"{prefix}/assets_big/tokenizer/": "tokenizer",
         f"{prefix}/assets_big/eval_bundle/": "eval datasets (bundle)",
@@ -138,6 +140,19 @@ def check_assets(remote_config, args):
         print(f"  {'OK ' if ok else 'MISSING'}  {uri}  ({what})")
         if not ok:
             missing.append(uri)
+    # nanochat code: the fresh channel (assets/, synced by backend-side
+    # tooling alongside the worker files) OR the one-time assets_big
+    # bundle (tar.gz or plain dir)
+    fresh = obs.stat(f"{prefix}/assets/nanochat-npu.tar.gz")
+    boot = (obs.stat(f"{prefix}/assets_big/nanochat-npu.tar.gz")
+            or bool(obs.list_objects(f"{prefix}/assets_big/nanochat-npu/")))
+    if fresh or boot:
+        where = "assets/ (fresh)" if fresh else "assets_big/ (one-time)"
+        print(f"  OK   nanochat-npu code  ({where})")
+    else:
+        print("  MISSING  nanochat-npu code  (assets/nanochat-npu.tar.gz "
+              "or assets_big/)")
+        missing.append("nanochat-npu code")
     if missing:
         print(f"\n[check-assets] {len(missing)} missing — upload per "
               f"docs/remote_setup.md, then re-run.")
