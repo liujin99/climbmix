@@ -580,6 +580,20 @@ class RemoteExecutor(ProxyRunner):
             if os.path.isdir(exp_dir):
                 shutil.rmtree(exp_dir)
             os.makedirs(exp_dir, exist_ok=True)
+            # Stale OBS artifacts from a PREVIOUS attempt must not
+            # linger: the worker uploads result.json/logs only AFTER a
+            # stage finishes, so until then the result prefix still
+            # holds the old attempt's files — a stale mid_train.log
+            # there reads as THIS attempt's failure (live: user tailed
+            # the previous job's log while the new one was training).
+            for uri in (f"{result_uri}/result.json",
+                        f"{result_uri}/mid_train.log",
+                        f"{result_uri}/eval.log",
+                        f"{result_uri}/eval_{model_tag}.csv"):
+                if self.obs.stat(uri):
+                    self.obs.delete(uri)
+            for uri in self.obs.list_objects(mix_uri):
+                self.obs.delete(uri)
             print(f"\n  [Exp {experiment_id}] Starting REMOTE proxy experiment "
                   f"(d{self.proxy_depth}, tag={model_tag}, "
                   f"npu_per_job={self.remote.npu_per_job})")
