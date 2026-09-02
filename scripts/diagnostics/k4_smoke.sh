@@ -40,7 +40,7 @@ OUT_DIR="/tmp/remote_validation_k4"
 EXP_ID="900"
 EXP_NAME="remoteval-k4"
 M3_DIR="$REPO/remote_validation/exp_0000"
-K4_DIR="$OUT_DIR/exp_${EXP_ID}"
+K4_DIR="$OUT_DIR/exp_$(printf '%04d' "$EXP_ID")"
 
 mode="${1:-run}"
 explicit_cmd="${2:-}"
@@ -150,11 +150,15 @@ print(f"worker elapsed:     M3 {fmt(rr3.get('elapsed_seconds'))}s"
 print(f"master elapsed:     M3 {fmt(m3.get('elapsed_seconds'))}s"
       f"   k4 {fmt(k4.get('elapsed_seconds'))}s  (incl prep+upload+eval)")
 print(f"stem_metric:        M3 {m3.get('stem_metric', float('nan')):.4f}"
-      f"   k4 {k4.get('stem_metric', float('nan')):.4f}"
-      f"   (sampling noise band ~+-0.005; NOT expected to match)")
+      f"   k4 {k4.get('stem_metric', float('nan')):.4f}")
+print(f"stem_nll:           M3 {m3.get('stem_nll', float('nan'))}"
+      f"   k4 {k4.get('stem_nll', float('nan'))}")
+print("(metric note: comparable only if both runs used the same "
+      "--proxy-target-tokens; an uncapped run trains on the full "
+      "weight-selected pool and the metric shifts — not a k=4 defect)")
 print("=" * 64)
-print("verdict criteria: rc 0/0; accum k4 = M3/4; tok/sec ~4x;"
-      " train time ~54m -> ~15-20m; metric in a sane band")
+print("verdict criteria (perf gate): rc 0/0; accum k4 = M3/4; tok/sec ~4x;"
+      " train time well under M3. Metric is informational only.")
 PY
 }
 
