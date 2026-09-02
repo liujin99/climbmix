@@ -45,10 +45,12 @@ import numpy as np
 
 try:
     from climbmix.core.types import CLIMBConfig, MixtureConfig, MixtureWeights
+    from climbmix.utils.token_estimate import parse_token_count
 except ImportError:
     sys.path.insert(0, os.path.join(
         os.path.dirname(os.path.abspath(__file__)), '..', 'src'))
     from climbmix.core.types import CLIMBConfig, MixtureConfig, MixtureWeights
+    from climbmix.utils.token_estimate import parse_token_count
 
 
 def build_config(args) -> CLIMBConfig:
@@ -223,7 +225,10 @@ def main():
     p.add_argument("--proxy-lr-scale", type=float, default=1.0)
     p.add_argument("--proxy-warmup", type=float, default=0.0)
     p.add_argument("--proxy-warmdown", type=float, default=0.9)
-    p.add_argument("--proxy-target-tokens", type=int, default=0)
+    p.add_argument("--proxy-target-tokens", type=parse_token_count, default=0,
+                   help="Cap data selection per proxy experiment (0 = all "
+                        "available). Accepts suffixes: 2B, 10M, 500K — "
+                        "same parser as run_climb.py (10M = 10,000,000)")
     p.add_argument("--npu-devices", type=int, default=8)
     p.add_argument("--K-enhanced", type=int, default=3)
     p.add_argument("--K-max", type=int, default=15)
