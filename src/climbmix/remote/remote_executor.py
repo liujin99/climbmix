@@ -307,7 +307,12 @@ class RemoteExecutor(ProxyRunner):
             if not os.path.isfile(src):
                 raise FileNotFoundError(f"remote asset missing: {src}")
             dst = os.path.join(stage, os.path.basename(src))
-            shutil.copy2(src, dst)
+            # temp + atomic rename: concurrent dispatch processes share this
+            # staging dir, and a plain copy2 lets another process upload a
+            # half-written file to OBS
+            tmp = f"{dst}.tmp.{os.getpid()}"
+            shutil.copy2(src, tmp)
+            os.replace(tmp, dst)
 
     def _ensure_assets_uploaded(self) -> None:
         """Upload the worker assets on EVERY init (idempotent overwrite).
