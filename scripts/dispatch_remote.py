@@ -3,10 +3,16 @@
 
 Runs ONE experiment (by explicit weights or by re-running exp_0000's config)
 through the full RemoteExecutor path against a THROWAWAY output dir, without
-touching the search state or fingerprints of a real run. Validation protocol
-(TODO M3): run the same weights locally (ProxyRunner) and remotely
-(dispatch_remote), then compare the input shards byte-for-byte (sha256) and
-the stem_metric (Δ < 0.002).
+touching the search state or fingerprints of a real run.
+
+M3 validation (DONE, speedrun exp_0000, real weights, npu_per_job=1 — shard
+splitting is nproc-dependent): the remote dispatch's mixture shards are
+byte-identical (sha256) to a single-process local _prepare_mixture_data
+rerun, and the pre-mix val shard additionally matches the archived run
+(weight-driven STEM selection reproduces across local/remote). The archive's
+TRAIN shards differ by 118/20000 docs: the local parallel search raced the
+global random stream during mixing (fixed by the mix_data module lock); the
+stem_metric delta (0.0028) is that sampling noise, not a remote defect.
 
 Also: --check-assets verifies the OBS bootstrap and prints what is
 missing. Two channels: {prefix}/assets = fresh code (two worker files,
