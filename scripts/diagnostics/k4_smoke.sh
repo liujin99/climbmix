@@ -15,23 +15,33 @@
 #  分片哈希与 M3 必然不同 (nproc 相关切分, 设计使然), 不比对哈希。
 #
 #  用法 (服务器上; 阻塞 ~30-40 分钟, 建议 tmux):
-#    bash scripts/diagnostics/k4_smoke.sh dry-run     # 只打印确切命令
-#    bash scripts/diagnostics/k4_smoke.sh run         # 执行
-#    bash scripts/diagnostics/k4_smoke.sh run '<cmd>' # 显式传入 M3 原命令
-#    bash scripts/diagnostics/k4_smoke.sh analyze     # 完成后对比 M3
+#    bash scripts/diagnostics/k4_smoke.sh self dry-run  # 推荐: 内部构建完整命令
+#    bash scripts/diagnostics/k4_smoke.sh self run      # (无需粘贴/历史命令)
+#    bash scripts/diagnostics/k4_smoke.sh dry-run '<cmd>'  # 显式命令 (缺任一
+#    bash scripts/diagnostics/k4_smoke.sh run '<cmd>'      # 语义 flag 直接拒绝)
+#    bash scripts/diagnostics/k4_smoke.sh analyze       # 对比 M3 + 语义自检
 #
-#  M3 命令自动从 ~/.bash_history 恢复 (过滤掉 --check-assets 与缺
-#  --proxy-num-iterations 的失败版本); 若在未关闭的会话里, 用 run '<cmd>'
-#  显式传入。命令缺少 --proxy-num-iterations 50 或 --general-data-dir
-#  时会打 WARNING (这两项是 M3 语义的关键)。
+#  self 模式: 权重读自 M3 meta.json, 四个 speedrun 语义 flag
+#  (--proxy-num-iterations 50 / --proxy-target-tokens 10M /
+#   --eval-max-per-task 100 / --general-data-dir) 全部内置, 服务器路径
+#  走已知默认 — 免疫 shell 历史丢失与终端粘贴损坏 (exp_0901 事故:
+#  实际执行的命令丢了两个 flag, 训练落在全池、eval 跑了全量)。
 #
-#  !! speedrun 语义的 dispatch 还需要 (若原命令里没有, 显式传入):
-#     --proxy-target-tokens 10M   (M3/speedrun 的混合数据 cap; 缺省=全池)
-#     --eval-max-per-task 100     (M3/speedrun 的 eval 子采样 cap; 缺省=全量,
-#                                  generation 任务全量会吃掉 ~40m)
+#  显式命令模式: 从 ~/.bash_history 恢复 M3 原命令 (过滤 --check-assets
+#  与缺 --proxy-num-iterations 的版本), 或 run '<cmd>' 传入。四个语义
+#  flag 缺一即 die。
+#
+#  analyze 语义自检: spec.json 的 eval_cmd 必须含 --max-per-task;
+#  mid_train.log 的 "Total tokens" 应为 ~14-15M (10M cap), 52M=全池
+#  (flag 丢失); eval.log 的 gsm8k 每 rank 计数应 25 (cap 100),
+#  330=全量。三项 + metric 差值 (band ±0.008, seed 不同 → ~0.003
+#  抽样噪声) 一起出结论。
 #
 #  环境变量:
 #    SRC_CFG=/tmp/remote_smoke.json   源 RemoteConfig (npu_per_job=1)
+#    EXP_ID=902 EXP_NAME=remoteval-k4c   目标 exp (默认 900)
+#    (self 模式可覆盖: WEIGHTS DATA_DIR CLUSTER_CACHE_DIR NANOCHAT_DIR
+#     NANOCHAT_BASE_DIR PHASE1_CKPT GENERAL_DATA_DIR — 默认服务器布局)
 #    (REPO 自动取本脚本所在仓库根, 无需设置)
 #
 #  本脚本在 scripts/diagnostics/ 下, 不进指纹。
@@ -52,11 +62,52 @@ explicit_cmd="${2:-}"
 
 die() { echo "[k4] ERROR: $*" >&2; exit 1; }
 
+# Canonical M3-semantics dispatch command, built from the repo layout.
+# All four speedrun flags baked in; weights read from the M3 artifacts.
+# Immune to lost shell history and terminal paste corruption.
+build_self_cmd() {
+    python3 - "$M3_DIR" <<'PY'
+import json, os, shlex, sys
+m3 = sys.argv[1]
+weights = os.environ.get("WEIGHTS") or ",".join(
+    repr(x) for x in json.load(open(os.path.join(m3, "meta.json")))["weights"])
+env = lambda k, d: os.environ.get(k, d)
+parts = [
+    "python3", "scripts/dispatch_remote.py",
+    "--remote-config", env("K4_CFG", "/tmp/remote_smoke_k4.json"),
+    "--data-dir", env("DATA_DIR", "/tmp/speedrun_data"),
+    "--schema", "config/schema_stem.yaml",
+    "--cluster-cache-dir", env("CLUSTER_CACHE_DIR",
+                               "result/speedrun_20260828_222129"),
+    "--nanochat-dir", env("NANOCHAT_DIR", "~/work/nanochat-npu"),
+    "--nanochat-base-dir", env("NANOCHAT_BASE_DIR", "~/work/nanochat_model_dir"),
+    "--phase1-checkpoint-path", env("PHASE1_CKPT",
+                                    "~/work/nanochat_model_dir/base_checkpoints/d20"),
+    "--output-dir", env("OUT_DIR", "/tmp/remote_validation_k4"),
+    "--exp-id", env("EXP_ID", "900"),
+    "--exp-name", env("EXP_NAME", "remoteval-k4"),
+    "--weights", weights,
+    "--proxy-num-iterations", "50",
+    "--proxy-target-tokens", "10M",
+    "--eval-max-per-task", "100",
+    "--general-data-dir", env("GENERAL_DATA_DIR",
+                              "/home/ma-user/work/nanochat_model_dir/climbmix_shards"),
+]
+print(shlex.join(parts))
+PY
+}
+
 [ -f "$SRC_CFG" ] || die "remote config not found: $SRC_CFG (set SRC_CFG=...)"
 [ -f "$M3_DIR/meta.json" ] || die "M3 artifacts missing: $M3_DIR/meta.json"
 
+# self mode: canonical command, no pasted input
+if [ "$mode" = "self" ]; then
+    mode="${2:-dry-run}"
+    explicit_cmd="$(build_self_cmd)" || die "self command build failed"
+fi
+
 # ── 1. k4 remote config (npu_per_job 1 -> 4) ────────────────────────────
-WATCH_LOG=$(python3 - "$SRC_CFG" "$K4_CFG" "$EXP_ID" <<'PY'
+_GEO="$(python3 - "$SRC_CFG" "$K4_CFG" "$EXP_ID" <<'PY'
 import json, re, sys
 src, dst, exp_id = sys.argv[1], sys.argv[2], sys.argv[3]
 cfg = json.load(open(src))
@@ -71,18 +122,21 @@ elif not flavor:
 json.dump(cfg, open(dst, "w"), indent=2)
 prefix = cfg["obs_prefix"].rstrip("/")
 fuse = re.sub(r"^obs://[^/]+/(s\d+/)?", "/", prefix)
+print(fuse)
 print(f"{fuse}/exps/exp_{int(exp_id):04d}/result/mid_train.log")
 PY
-)
+)"
+FUSE_ROOT="$(printf '%s\n' "$_GEO" | sed -n 1p)"
+WATCH_LOG="$(printf '%s\n' "$_GEO" | sed -n 2p)"
 echo "[k4] repo: $REPO"
 echo "[k4] wrote $K4_CFG (npu_per_job=4, isolated exp_${EXP_ID})"
 echo "[k4] live log once training starts: tail -F '$WATCH_LOG'"
 
 analyze() {
-  python3 - "$M3_DIR" "$K4_DIR" <<'PY'
+  python3 - "$M3_DIR" "$K4_DIR" "$FUSE_ROOT" "$EXP_ID" <<'PY'
 import json, os, re, sys
 
-m3_dir, k4_dir = sys.argv[1], sys.argv[2]
+m3_dir, k4_dir, fuse_root, exp_id = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
 
 def load(p):
     try:
@@ -118,6 +172,28 @@ def log_stats(path):
         total_m=total_m,
     )
 
+def train_tokens(path):
+    try:
+        with open(path, errors="replace") as f:
+            for line in f:
+                m = re.search(r"Total tokens: ([\d,]+)", line)
+                if m:
+                    return int(m.group(1).replace(",", ""))
+    except OSError:
+        pass
+    return None
+
+def gsm8k_per_rank(path):
+    try:
+        with open(path, errors="replace") as f:
+            for line in f:
+                m = re.search(r"\[gsm8k_cot\] \d+/(\d+) examples", line)
+                if m:
+                    return int(m.group(1))
+    except OSError:
+        pass
+    return None
+
 m3 = load(os.path.join(m3_dir, "meta.json"))
 k4 = load(os.path.join(k4_dir, "meta.json"))
 if k4 is None:
@@ -127,6 +203,16 @@ rr3 = load(os.path.join(m3_dir, "_remote_result.json")) or {}
 rr4 = load(os.path.join(k4_dir, "_remote_result.json")) or {}
 ls3 = log_stats(os.path.join(m3_dir, "mid_train.log"))
 ls4 = log_stats(os.path.join(k4_dir, "mid_train.log"))
+
+# ── semantics gate: did the dispatch actually carry the speedrun caps? ──
+spec_cap = None
+if fuse_root:
+    sp = os.path.join(fuse_root, "exps", f"exp_{exp_id:04d}", "spec.json")
+    spec = load(sp)
+    if spec is not None:
+        spec_cap = "--max-per-task" in (spec.get("eval_cmd") or [])
+tt4 = train_tokens(os.path.join(k4_dir, "mid_train.log"))
+gk4 = gsm8k_per_rank(os.path.join(k4_dir, "eval.log"))
 
 def fmt(x, f="{:.1f}", na="?"):
     return na if x is None else f.format(x)
@@ -154,16 +240,36 @@ print(f"worker elapsed:     M3 {fmt(rr3.get('elapsed_seconds'))}s"
       f"   k4 {fmt(rr4.get('elapsed_seconds'))}s")
 print(f"master elapsed:     M3 {fmt(m3.get('elapsed_seconds'))}s"
       f"   k4 {fmt(k4.get('elapsed_seconds'))}s  (incl prep+upload+eval)")
+print("-" * 64)
+print("semantics gate (speedrun caps actually in effect?):")
+cap_state = ("present" if spec_cap else "MISSING") if spec_cap is not None else "?"
+print(f"  spec --max-per-task:  {cap_state}")
+if tt4 is not None:
+    kind = "capped ~10M" if tt4 < 20_000_000 else "FULL POOL (flag lost!)"
+    print(f"  train token budget:   {tt4:,}  ({kind})")
+else:
+    print("  train token budget:   ?")
+if gk4 is not None:
+    kind = "cap 100" if gk4 <= 30 else "full 1319 (cap lost!)"
+    print(f"  gsm8k per-rank count: {gk4}  ({kind})")
+else:
+    print("  gsm8k per-rank count: ?")
+capped = (spec_cap is True) and (tt4 is not None and tt4 < 20_000_000)
+if capped:
+    d = k4.get("stem_metric", float("nan")) - m3.get("stem_metric", float("nan"))
+    verdict = "PASS" if abs(d) <= 0.008 else "CHECK"
+    print(f"  metric delta vs M3:   {d:+.4f}"
+          f"  (band +-0.008; seeds differ -> ~0.003 sampling noise)  {verdict}")
+else:
+    print("  metric delta vs M3:   NOT comparable (caps missing — rerun)")
+print("-" * 64)
 print(f"stem_metric:        M3 {m3.get('stem_metric', float('nan')):.4f}"
       f"   k4 {k4.get('stem_metric', float('nan')):.4f}")
 print(f"stem_nll:           M3 {m3.get('stem_nll', float('nan'))}"
       f"   k4 {k4.get('stem_nll', float('nan'))}")
-print("(metric note: comparable only if both runs used the same "
-      "--proxy-target-tokens; an uncapped run trains on the full "
-      "weight-selected pool and the metric shifts — not a k=4 defect)")
 print("=" * 64)
 print("verdict criteria (perf gate): rc 0/0; accum k4 = M3/4; tok/sec ~4x;"
-      " train time well under M3. Metric is informational only.")
+      " train time well under M3; semantics gate all-present.")
 PY
 }
 
@@ -206,14 +312,17 @@ setopt("--output-dir", out_dir)
 argv = [os.path.expanduser(a) for a in argv]
 
 has = lambda f: f in argv or any(a.startswith(f + "=") for a in argv)
-for flag in ("--proxy-num-iterations", "--general-data-dir",
-             "--proxy-target-tokens", "--eval-max-per-task"):
-    if not has(flag):
-        print(f"[k4] WARNING: command lacks {flag} — M3/speedrun semantics "
-              f"broken (uncapped pool / full eval sets)!", file=sys.stderr)
+missing = [f for f in ("--proxy-num-iterations", "--general-data-dir",
+                       "--proxy-target-tokens", "--eval-max-per-task")
+           if not has(f)]
+for flag in missing:
+    print(f"[k4] ERROR: command lacks {flag} — refusing to run "
+          f"(M3/speedrun semantics broken; use 'self' mode)", file=sys.stderr)
+if missing:
+    sys.exit(1)
 print(shlex.join(argv))
 PY
-)
+) || die "command rejected: missing speedrun-semantics flags"
 
 echo
 echo "[k4] === command (run from $REPO) ==="
@@ -224,6 +333,10 @@ if [ "$mode" = "dry-run" ]; then
   echo "[k4] dry-run — nothing executed"
   exit 0
 fi
+
+# --proxy-target-tokens 10M needs dispatch_remote >= 29295e8 (parse_token_count)
+grep -q "parse_token_count" "$REPO/scripts/dispatch_remote.py" \
+  || die "dispatch_remote.py predates 29295e8 (10M suffix rejected) — git pull first"
 
 cd "$REPO"
 bash -c "$cmd"
