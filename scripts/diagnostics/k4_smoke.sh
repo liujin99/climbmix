@@ -34,14 +34,18 @@
 #  flag 缺一即 die。
 #
 #  analyze 语义自检 (随时可跑 — job 未完成也行, 分钟级判定, 不用等):
-#    mixture_data 分片数  (dispatch 侧, 提交前就绪:  ~3 = cap / ~73 = 全池)
+#    mixture_data 分片数  (dispatch 侧, 提交前就绪:  ~3 = cap / ~73 = 全池;
+#                          本地目录上传后即删, 需读 FUSE/OBS 上的副本)
 #    spec.json eval_cmd   (提交即写, FUSE 可读: 必须含 --max-per-task)
-#    train token budget   (train 结束才打印: ~14-15M = cap / 52M = 全池)
+#    计划训练 token 数     (total_batch_size x steps, 与池 cap 无关;
+#                          仅做 M3 奇偶校验 — 批大小/步数必须一致)
 #    gsm8k 每 rank 计数   (eval 开始后: 25 = cap / 330 = 全量; 25/rank
 #                          无 80 步进进度行时, 回退用 gsm8k 任务耗时判定)
+#    日志截断检测          (streamed 副本可能止步中途步: 标记时间指标不
+#                          完整, 择优取本地/FUSE 副本, 不算失败)
 #    任一硬性信号显示 flag 丢失 -> exit 1 并提示立刻取消 job (提交时打印
-#    过 console 链接), 不再白烧一小时。metric 差值 (band ±0.008,
-#    seed 不同 -> ~0.003 抽样噪声) 仅在 meta.json 落地后给出。
+#    过 console 链接), 不再白烧一小时。metric 差值 informational (跨
+#    seed 噪声 902 实测 ~0.008), 仅在 meta.json 落地后给出。
 #
 #  环境变量:
 #    SRC_CFG=/tmp/remote_smoke.json   源 RemoteConfig (npu_per_job=1)
@@ -152,10 +156,12 @@ def load(p):
         return None
 
 def log_stats(path):
-    dts, toks, accum, total_m = [], [], None, None
+    dts, toks, accum = [], [], None
+    total_m, last_step, total_steps = None, 0, None
     try:
         if not path:
-            return dict(accum=None, dt_ms=None, tok_s=None, total_m=None)
+            return dict(accum=None, dt_ms=None, tok_s=None, total_m=None,
+                        last_step=0, total_steps=None)
         with open(path, errors="replace") as f:
             for line in f:
                 m = re.search(r"Grad accum steps: (\d+)", line)
@@ -167,9 +173,14 @@ def log_stats(path):
                 m = re.search(r"tok/sec: ([\d,]+)", line)
                 if m:
                     toks.append(int(m.group(1).replace(",", "")))
-                m = re.search(r"total time: ([\d.]+)m", line)
+                # 'total time' only exists on step lines; matching the step
+                # prefix guards against unrelated lines and lets us detect
+                # truncated logs (streamed copy ends mid-run)
+                m = re.search(r"step (\d+)/(\d+) .*total time: ([\d.]+)m", line)
                 if m:
-                    total_m = float(m.group(1))
+                    last_step = int(m.group(1))
+                    total_steps = int(m.group(2))
+                    total_m = float(m.group(3))
     except OSError:
         pass
     tail = lambda xs: xs[-10:] if xs else []
@@ -178,18 +189,23 @@ def log_stats(path):
         dt_ms=(sum(tail(dts)) / len(tail(dts))) if dts else None,
         tok_s=(sum(tail(toks)) / len(tail(toks))) if toks else None,
         total_m=total_m,
+        last_step=last_step,
+        total_steps=total_steps,
     )
 
-def train_tokens(path):
+def train_plan(path):
+    # 'Total tokens' = total_batch_size * num_iterations (mid_train.py prints
+    # it BEFORE training): the planned TRAINING budget, independent of the
+    # mixture pool cap. Useful only as an M3-vs-k4 parity check.
     try:
         with open(path, errors="replace") as f:
             for line in f:
-                m = re.search(r"Total tokens: ([\d,]+)", line)
+                m = re.search(r"Total tokens: ([\d,]+), Steps: (\d+)", line)
                 if m:
-                    return int(m.group(1).replace(",", ""))
+                    return (int(m.group(1).replace(",", "")), int(m.group(2)))
     except OSError:
         pass
-    return None
+    return (None, None)
 
 def gsm8k_per_rank(path):
     try:
@@ -228,6 +244,21 @@ def first(*paths):
             pass
     return None
 
+def best_log(*paths):
+    # Prefer the copy that reaches the furthest training step: the streamed
+    # OBS/FUSE copy can lag or end mid-run, and so can the downloaded one.
+    best, best_step = None, -1
+    for p in paths:
+        try:
+            if not p or not os.path.isfile(p):
+                continue
+            s = log_stats(p)
+            if s["last_step"] > best_step:
+                best, best_step = p, s["last_step"]
+        except OSError:
+            pass
+    return best
+
 def fmt(x, f="{:.1f}", na="?"):
     return na if x is None else f.format(x)
 
@@ -237,8 +268,9 @@ k4 = load(os.path.join(k4_dir, "meta.json"))
 rr3 = load(os.path.join(m3_dir, "_remote_result.json")) or {}
 rr4 = load(os.path.join(k4_dir, "_remote_result.json")) or {}
 # local downloaded copies first (post-run); FUSE live logs as mid-run fallback
-train_log = first(os.path.join(k4_dir, "mid_train.log"),
-                  os.path.join(fuse_exp, "result", "mid_train.log"))
+# (best_log picks whichever copy reaches the furthest step)
+train_log = best_log(os.path.join(k4_dir, "mid_train.log"),
+                     os.path.join(fuse_exp, "result", "mid_train.log"))
 eval_log = first(os.path.join(k4_dir, "eval.log"),
                  os.path.join(fuse_exp, "result", "eval.log"))
 ls3 = log_stats(os.path.join(m3_dir, "mid_train.log"))
@@ -246,12 +278,17 @@ ls4 = log_stats(train_log)
 
 # ── semantics gate: did the dispatch actually carry the speedrun caps? ──
 # signals arrive over time: mixture shards (dispatch side, before submit),
-# spec.json (at submission, via FUSE), token budget (train end),
-# gsm8k count/time (eval). A missing artifact is pending, not failure.
-mix_n = len(glob.glob(os.path.join(k4_dir, "mixture_data", "*.parquet")))
+# spec.json (at submission, via FUSE), gsm8k count/time (eval). A missing
+# artifact is pending, not failure.
+# NOTE: the local mixture_data/ dir is deleted after OBS upload
+# (remote_executor), so post-run the FUSE copy is the only source.
+mix_files = set(glob.glob(os.path.join(k4_dir, "mixture_data", "*.parquet")))
+mix_files |= set(glob.glob(os.path.join(fuse_exp, "mixture_data", "*.parquet")))
+mix_n = len(mix_files)
 spec = load(os.path.join(fuse_exp, "spec.json"))
 spec_cap = None if spec is None else "--max-per-task" in (spec.get("eval_cmd") or [])
-tt4 = train_tokens(train_log) if train_log else None
+tt3, steps3 = train_plan(os.path.join(m3_dir, "mid_train.log"))
+tt4, steps4 = train_plan(train_log) if train_log else (None, None)
 gk4 = gsm8k_per_rank(eval_log) if eval_log else None
 gk_t = task_times(eval_log).get("gsm8k_cot") if eval_log else None
 
@@ -277,22 +314,33 @@ else:
     else:
         print(f"tok/sec:            M3 {fmt(ls3['tok_s'], '{:,.0f}')}"
               f"   k4 {fmt(ls4['tok_s'], '{:,.0f}')}")
+    trunc = (ls4["total_steps"] is not None
+             and ls4["last_step"] < ls4["total_steps"])
+    tt_note = " (partial: log truncated)" if trunc else ""
     print(f"train total time:   M3 {fmt(ls3['total_m'], '{:.1f}')}m"
-          f"   k4 {fmt(ls4['total_m'], '{:.1f}')}m")
+          f"   k4 {fmt(ls4['total_m'], '{:.1f}')}m{tt_note}")
+    if trunc:
+        print(f"  ! k4 train log ends at step {ls4['last_step']}/"
+              f"{ls4['total_steps']} (streamed copy cut mid-run); timing"
+              " metrics above are partial — not a failure")
     print(f"worker elapsed:     M3 {fmt(rr3.get('elapsed_seconds'))}s"
           f"   k4 {fmt(rr4.get('elapsed_seconds'))}s")
     print(f"master elapsed:     M3 {fmt(m3.get('elapsed_seconds'))}s"
           f"   k4 {fmt(k4.get('elapsed_seconds'))}s  (incl prep+upload+eval)")
 print("-" * 64)
 print("semantics gate (speedrun caps actually in effect?):")
+train_cap = None  # positive/negative train-side evidence, None = pending
 if mix_n:
     kind = ("capped ~10M" if mix_n <= 6
             else "FULL POOL (flag lost!)" if mix_n >= 40 else "?")
     print(f"  mixture shards:        {mix_n} files  ({kind})")
     if mix_n >= 40:
+        train_cap = False
         fails.append(f"mixture_data has {mix_n} shards: full pool selected")
+    elif mix_n <= 6:
+        train_cap = True
 else:
-    print("  mixture shards:        pending (mixture_data not ready)")
+    print("  mixture shards:        pending (mixture_data not visible)")
 if spec_cap is None:
     print("  spec --max-per-task:   pending (spec.json not visible yet)")
 else:
@@ -300,34 +348,51 @@ else:
     if spec_cap is False:
         fails.append("spec.json eval_cmd lacks --max-per-task")
 if tt4 is not None:
-    kind = "capped ~10M" if tt4 < 20_000_000 else "FULL POOL (flag lost!)"
-    print(f"  train token budget:    {tt4:,}  ({kind})")
-    if tt4 >= 20_000_000:
-        fails.append(f"train tokens {tt4:,}: full pool")
+    # 'Total tokens' is total_batch_size*num_iterations (planned training
+    # tokens) — cap-INDEPENDENT. It must simply match M3: same batch and
+    # iteration count. It is NOT a pool-size signal.
+    if tt3 is not None and tt3 != tt4:
+        kind = f"PARITY FAIL (M3 {tt3:,})"
+        fails.append(f"planned train tokens {tt4:,} != M3 {tt3:,} "
+                     "(batch/iterations differ)")
+    else:
+        kind = "parity with M3 OK"
+    print(f"  planned train tokens:  {tt4:,} x {steps4} steps  ({kind})")
 else:
-    print("  train token budget:    pending (train not finished)")
+    print("  planned train tokens:  pending (train not started)")
+eval_cap = None  # positive/negative eval-side evidence, None = pending
 if gk4 is not None:
     kind = "cap 100" if gk4 <= 30 else "full 1319 (cap lost!)"
     print(f"  gsm8k per-rank count:  {gk4}  ({kind})")
     if gk4 > 30:
+        eval_cap = False
         fails.append(f"gsm8k per-rank {gk4}: full set")
+    else:
+        eval_cap = True
 elif gk_t is not None:
     # cap 100 at k4 -> 25 examples/rank -> the every-80 progress line never
-    # prints; fall back to the task wall time (capped ~150-350s, full ~1800s)
+    # prints; fall back to the task wall time (capped ~110-350s, full ~1800s)
     kind = ("cap 100 (by task time)" if gk_t <= 600
             else "FULL SET (by task time)" if gk_t >= 1200 else "? (by task time)")
     print(f"  gsm8k eval time:       {gk_t:.0f}s  ({kind})")
     if gk_t >= 1200:
+        eval_cap = False
         fails.append(f"gsm8k_cot took {gk_t:.0f}s: full set")
+    elif gk_t <= 600:
+        eval_cap = True
 else:
     print("  gsm8k per-rank count:  pending (eval not started)")
-capped = (spec_cap is True) and (tt4 is not None and tt4 < 20_000_000)
+# caps are confirmed only by POSITIVE evidence on both sides; anything else
+# stays pending (mid-run) or already failed above
+capped = (spec_cap is True
+          and (train_cap is True or eval_cap is True)
+          and not fails)
 if k4 is not None:
     if capped:
         d = k4.get("stem_metric", float("nan")) - m3.get("stem_metric", float("nan"))
-        verdict = "PASS" if abs(d) <= 0.008 else "CHECK"
-        print(f"  metric delta vs M3:   {d:+.4f}"
-              f"  (band +-0.008; seeds differ -> ~0.003 sampling noise)  {verdict}")
+        verdict = "within band" if abs(d) <= 0.008 else "outside band"
+        print(f"  metric delta vs M3:   {d:+.4f}  ({verdict}; informational —"
+              " cross-seed noise measured ~0.008 on exp_0902)")
     else:
         print("  metric delta vs M3:   NOT comparable (caps missing — rerun)")
     print("-" * 64)

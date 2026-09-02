@@ -146,6 +146,10 @@ def build_subprocess_env(
     env = dict(base_env if base_env is not None else os.environ)
     env["PYTHONPATH"] = nanochat_dir + ":" + env.get("PYTHONPATH", "")
     env["NANOCHAT_BASE_DIR"] = base_dir_override or nanochat_base_dir
+    # print0 has no flush=True; with stdout redirected to a log file the
+    # 8KB block buffer delays disk content by ~35 step lines, so streamed
+    # copies of mid_train.log end mid-run and lose the tail on hard kills.
+    env["PYTHONUNBUFFERED"] = "1"
     if device_ids is not None:
         # ASCEND_RT_VISIBLE_DEVICES is the torch_npu-documented pinning var
         # (logical npu:k = k-th entry of the mask). ASCEND_VISIBLE_DEVICES
