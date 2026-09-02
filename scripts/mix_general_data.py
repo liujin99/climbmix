@@ -21,6 +21,7 @@ import time
 import argparse
 import random
 import shutil
+import threading
 from pathlib import Path
 from multiprocessing.pool import ThreadPool
 
@@ -133,6 +134,9 @@ def endless_generator(gen_func, files):
         yield from gen
 
 
+_MIX_LOCK = threading.Lock()
+
+
 def mix_data(stem_dir, climb_files, output_dir, num_output_files, batch_per_file=BATCH_PER_FILE, num_npu=8, stem_ratio=None):
     """Mix STEM + ClimbMix general data at document level.
 
@@ -145,7 +149,23 @@ def mix_data(stem_dir, climb_files, output_dir, num_output_files, batch_per_file
     .done marker is written only after everything (incl. the val shard copy)
     succeeded. Pre-existing shards without .done are treated as a crashed
     partial run and wiped before redoing.
+
+    Thread safety: mixes serialize on a module lock. Both the ratio draws
+    here (random.seed(42) below) and stream_texts_uniform's per-generator
+    reseed use the GLOBAL random module, so two concurrent mixes in one
+    process (the local parallel search runs sibling experiments in threads)
+    interleave their streams — the output shards were statistically fine
+    but not reproducible run to run (live: speedrun exp_0000's train shards
+    could not be regenerated; only the pre-mix val shard matched). Mixing
+    costs ~1s, so serializing is free.
     """
+    with _MIX_LOCK:
+        return _mix_data_locked(stem_dir, climb_files, output_dir,
+                                num_output_files, batch_per_file,
+                                num_npu, stem_ratio)
+
+
+def _mix_data_locked(stem_dir, climb_files, output_dir, num_output_files, batch_per_file=BATCH_PER_FILE, num_npu=8, stem_ratio=None):
     if not climb_files:
         raise ValueError("No ClimbMix files available. Download failed?")
     ratio = STEM_RATIO if stem_ratio is None else stem_ratio
