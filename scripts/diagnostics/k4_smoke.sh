@@ -9,17 +9,19 @@
 #
 #  预期 (数据并行语义: total_batch_size 继承自 d20 预训练, 每个
 #  optimizer step 的 token 数固定):
-#    - mid_train.log 里 "Grad accum steps:" 8 -> 2
-#    - tok/sec ~4x M3; train 总时长 ~54m -> ~15-20m; 整 job 远低于 M3 的 76m
-#    - stem_metric 接近 M3 的 0.1622 (抽样噪声带内, 不要求相等)
+#    - mid_train.log 里 "Grad accum steps:" 128 -> 32 (k4 = M3/4)
+#    - tok/sec ~4x M3; train ~54m -> ~11m; 整 job ~25m (cap 语义下;
+#      900/901 的 64m 正是 flag 丢失 -> 全池训练 + 全量 eval)
+#    - stem_metric 接近 M3 的 0.1622 (抽样噪声带内, 不要求相等;
+#      900 vs 901 同配置复跑实测噪声 ~0.0003)
 #  分片哈希与 M3 必然不同 (nproc 相关切分, 设计使然), 不比对哈希。
 #
-#  用法 (服务器上; 阻塞 ~30-40 分钟, 建议 tmux):
+#  用法 (服务器上; 阻塞 ~25 分钟, 建议 tmux):
 #    bash scripts/diagnostics/k4_smoke.sh self dry-run  # 推荐: 内部构建完整命令
 #    bash scripts/diagnostics/k4_smoke.sh self run      # (无需粘贴/历史命令)
 #    bash scripts/diagnostics/k4_smoke.sh dry-run '<cmd>'  # 显式命令 (缺任一
 #    bash scripts/diagnostics/k4_smoke.sh run '<cmd>'      # 语义 flag 直接拒绝)
-#    bash scripts/diagnostics/k4_smoke.sh analyze       # 对比 M3 + 语义自检
+#    bash scripts/diagnostics/k4_smoke.sh analyze       # 随时可跑, 见下
 #
 #  self 模式: 权重读自 M3 meta.json, 四个 speedrun 语义 flag
 #  (--proxy-num-iterations 50 / --proxy-target-tokens 10M /
@@ -31,11 +33,15 @@
 #  与缺 --proxy-num-iterations 的版本), 或 run '<cmd>' 传入。四个语义
 #  flag 缺一即 die。
 #
-#  analyze 语义自检: spec.json 的 eval_cmd 必须含 --max-per-task;
-#  mid_train.log 的 "Total tokens" 应为 ~14-15M (10M cap), 52M=全池
-#  (flag 丢失); eval.log 的 gsm8k 每 rank 计数应 25 (cap 100),
-#  330=全量。三项 + metric 差值 (band ±0.008, seed 不同 → ~0.003
-#  抽样噪声) 一起出结论。
+#  analyze 语义自检 (随时可跑 — job 未完成也行, 分钟级判定, 不用等):
+#    mixture_data 分片数  (dispatch 侧, 提交前就绪:  ~3 = cap / ~73 = 全池)
+#    spec.json eval_cmd   (提交即写, FUSE 可读: 必须含 --max-per-task)
+#    train token budget   (train 结束才打印: ~14-15M = cap / 52M = 全池)
+#    gsm8k 每 rank 计数   (eval 开始后: 25 = cap / 330 = 全量; 25/rank
+#                          无 80 步进进度行时, 回退用 gsm8k 任务耗时判定)
+#    任一硬性信号显示 flag 丢失 -> exit 1 并提示立刻取消 job (提交时打印
+#    过 console 链接), 不再白烧一小时。metric 差值 (band ±0.008,
+#    seed 不同 -> ~0.003 抽样噪声) 仅在 meta.json 落地后给出。
 #
 #  环境变量:
 #    SRC_CFG=/tmp/remote_smoke.json   源 RemoteConfig (npu_per_job=1)
@@ -134,7 +140,7 @@ echo "[k4] live log once training starts: tail -F '$WATCH_LOG'"
 
 analyze() {
   python3 - "$M3_DIR" "$K4_DIR" "$FUSE_ROOT" "$EXP_ID" <<'PY'
-import json, os, re, sys
+import glob, json, os, re, sys
 
 m3_dir, k4_dir, fuse_root, exp_id = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
 
@@ -148,6 +154,8 @@ def load(p):
 def log_stats(path):
     dts, toks, accum, total_m = [], [], None, None
     try:
+        if not path:
+            return dict(accum=None, dt_ms=None, tok_s=None, total_m=None)
         with open(path, errors="replace") as f:
             for line in f:
                 m = re.search(r"Grad accum steps: (\d+)", line)
@@ -194,82 +202,148 @@ def gsm8k_per_rank(path):
         pass
     return None
 
-m3 = load(os.path.join(m3_dir, "meta.json"))
-k4 = load(os.path.join(k4_dir, "meta.json"))
-if k4 is None:
-    print(f"[analyze] no k4 meta.json at {k4_dir} — job not finished?")
-    sys.exit(1)
-rr3 = load(os.path.join(m3_dir, "_remote_result.json")) or {}
-rr4 = load(os.path.join(k4_dir, "_remote_result.json")) or {}
-ls3 = log_stats(os.path.join(m3_dir, "mid_train.log"))
-ls4 = log_stats(os.path.join(k4_dir, "mid_train.log"))
+def task_times(path):
+    times, cur = {}, None
+    try:
+        with open(path, errors="replace") as f:
+            for line in f:
+                m = re.search(r"Evaluating: (\S+)", line)
+                if m:
+                    cur = m.group(1)
+                    continue
+                m = re.search(r"time: ([\d.]+)s", line)
+                if m and cur:
+                    times[cur] = float(m.group(1))
+                    cur = None
+    except OSError:
+        pass
+    return times
 
-# ── semantics gate: did the dispatch actually carry the speedrun caps? ──
-spec_cap = None
-if fuse_root:
-    sp = os.path.join(fuse_root, "exps", f"exp_{exp_id:04d}", "spec.json")
-    spec = load(sp)
-    if spec is not None:
-        spec_cap = "--max-per-task" in (spec.get("eval_cmd") or [])
-tt4 = train_tokens(os.path.join(k4_dir, "mid_train.log"))
-gk4 = gsm8k_per_rank(os.path.join(k4_dir, "eval.log"))
+def first(*paths):
+    for p in paths:
+        try:
+            if p and os.path.isfile(p):
+                return p
+        except OSError:
+            pass
+    return None
 
 def fmt(x, f="{:.1f}", na="?"):
     return na if x is None else f.format(x)
 
+fuse_exp = os.path.join(fuse_root, "exps", f"exp_{exp_id:04d}") if fuse_root else ""
+m3 = load(os.path.join(m3_dir, "meta.json"))
+k4 = load(os.path.join(k4_dir, "meta.json"))
+rr3 = load(os.path.join(m3_dir, "_remote_result.json")) or {}
+rr4 = load(os.path.join(k4_dir, "_remote_result.json")) or {}
+# local downloaded copies first (post-run); FUSE live logs as mid-run fallback
+train_log = first(os.path.join(k4_dir, "mid_train.log"),
+                  os.path.join(fuse_exp, "result", "mid_train.log"))
+eval_log = first(os.path.join(k4_dir, "eval.log"),
+                 os.path.join(fuse_exp, "result", "eval.log"))
+ls3 = log_stats(os.path.join(m3_dir, "mid_train.log"))
+ls4 = log_stats(train_log)
+
+# ── semantics gate: did the dispatch actually carry the speedrun caps? ──
+# signals arrive over time: mixture shards (dispatch side, before submit),
+# spec.json (at submission, via FUSE), token budget (train end),
+# gsm8k count/time (eval). A missing artifact is pending, not failure.
+mix_n = len(glob.glob(os.path.join(k4_dir, "mixture_data", "*.parquet")))
+spec = load(os.path.join(fuse_exp, "spec.json"))
+spec_cap = None if spec is None else "--max-per-task" in (spec.get("eval_cmd") or [])
+tt4 = train_tokens(train_log) if train_log else None
+gk4 = gsm8k_per_rank(eval_log) if eval_log else None
+gk_t = task_times(eval_log).get("gsm8k_cot") if eval_log else None
+
+fails = []
 print("=" * 64)
-print("k=4 smoke vs M3 (exp_0000, npu_per_job=1)")
+print(f"k=4 smoke vs M3 (exp_0000, npu_per_job=1)  [exp_{exp_id:04d}]")
 print("=" * 64)
-print(f"rc (mid/eval):      M3 {m3['mid_train_rc']}/{m3['eval_rc']}"
-      f"   k4 {k4['mid_train_rc']}/{k4['eval_rc']}"
-      f"   {'OK' if k4['mid_train_rc'] == 0 and k4['eval_rc'] == 0 else 'FAIL'}")
-print(f"grad accum steps:   M3 {ls3['accum']}   k4 {ls4['accum']}"
-      f"   (expect k4 = M3/4 -> data parallel engaged)")
-print(f"mean dt (last 10):  M3 {fmt(ls3['dt_ms'])}ms"
-      f"   k4 {fmt(ls4['dt_ms'])}ms")
-if ls3["tok_s"] and ls4["tok_s"]:
-    r = ls4["tok_s"] / ls3["tok_s"]
-    print(f"tok/sec (last 10):  M3 {ls3['tok_s']:,.0f}   k4 {ls4['tok_s']:,.0f}"
-          f"   ratio {r:.2f}x (expect ~4x)")
+if k4 is None:
+    print("[analyze] k4 meta.json not present — mid-run semantics check only")
+    print("(rerun after the job finishes for the perf table + metric verdict)")
 else:
-    print(f"tok/sec:            M3 {fmt(ls3['tok_s'], '{:,.0f}')}"
-          f"   k4 {fmt(ls4['tok_s'], '{:,.0f}')}")
-print(f"train total time:   M3 {fmt(ls3['total_m'], '{:.1f}')}m"
-      f"   k4 {fmt(ls4['total_m'], '{:.1f}')}m")
-print(f"worker elapsed:     M3 {fmt(rr3.get('elapsed_seconds'))}s"
-      f"   k4 {fmt(rr4.get('elapsed_seconds'))}s")
-print(f"master elapsed:     M3 {fmt(m3.get('elapsed_seconds'))}s"
-      f"   k4 {fmt(k4.get('elapsed_seconds'))}s  (incl prep+upload+eval)")
+    print(f"rc (mid/eval):      M3 {m3['mid_train_rc']}/{m3['eval_rc']}"
+          f"   k4 {k4['mid_train_rc']}/{k4['eval_rc']}"
+          f"   {'OK' if k4['mid_train_rc'] == 0 and k4['eval_rc'] == 0 else 'FAIL'}")
+    print(f"grad accum steps:   M3 {ls3['accum']}   k4 {ls4['accum']}"
+          f"   (expect k4 = M3/4 -> data parallel engaged)")
+    print(f"mean dt (last 10):  M3 {fmt(ls3['dt_ms'])}ms"
+          f"   k4 {fmt(ls4['dt_ms'])}ms")
+    if ls3["tok_s"] and ls4["tok_s"]:
+        r = ls4["tok_s"] / ls3["tok_s"]
+        print(f"tok/sec (last 10):  M3 {ls3['tok_s']:,.0f}   k4 {ls4['tok_s']:,.0f}"
+              f"   ratio {r:.2f}x (expect ~4x)")
+    else:
+        print(f"tok/sec:            M3 {fmt(ls3['tok_s'], '{:,.0f}')}"
+              f"   k4 {fmt(ls4['tok_s'], '{:,.0f}')}")
+    print(f"train total time:   M3 {fmt(ls3['total_m'], '{:.1f}')}m"
+          f"   k4 {fmt(ls4['total_m'], '{:.1f}')}m")
+    print(f"worker elapsed:     M3 {fmt(rr3.get('elapsed_seconds'))}s"
+          f"   k4 {fmt(rr4.get('elapsed_seconds'))}s")
+    print(f"master elapsed:     M3 {fmt(m3.get('elapsed_seconds'))}s"
+          f"   k4 {fmt(k4.get('elapsed_seconds'))}s  (incl prep+upload+eval)")
 print("-" * 64)
 print("semantics gate (speedrun caps actually in effect?):")
-cap_state = ("present" if spec_cap else "MISSING") if spec_cap is not None else "?"
-print(f"  spec --max-per-task:  {cap_state}")
+if mix_n:
+    kind = ("capped ~10M" if mix_n <= 6
+            else "FULL POOL (flag lost!)" if mix_n >= 40 else "?")
+    print(f"  mixture shards:        {mix_n} files  ({kind})")
+    if mix_n >= 40:
+        fails.append(f"mixture_data has {mix_n} shards: full pool selected")
+else:
+    print("  mixture shards:        pending (mixture_data not ready)")
+if spec_cap is None:
+    print("  spec --max-per-task:   pending (spec.json not visible yet)")
+else:
+    print(f"  spec --max-per-task:   {'present' if spec_cap else 'MISSING'}")
+    if spec_cap is False:
+        fails.append("spec.json eval_cmd lacks --max-per-task")
 if tt4 is not None:
     kind = "capped ~10M" if tt4 < 20_000_000 else "FULL POOL (flag lost!)"
-    print(f"  train token budget:   {tt4:,}  ({kind})")
+    print(f"  train token budget:    {tt4:,}  ({kind})")
+    if tt4 >= 20_000_000:
+        fails.append(f"train tokens {tt4:,}: full pool")
 else:
-    print("  train token budget:   ?")
+    print("  train token budget:    pending (train not finished)")
 if gk4 is not None:
     kind = "cap 100" if gk4 <= 30 else "full 1319 (cap lost!)"
-    print(f"  gsm8k per-rank count: {gk4}  ({kind})")
+    print(f"  gsm8k per-rank count:  {gk4}  ({kind})")
+    if gk4 > 30:
+        fails.append(f"gsm8k per-rank {gk4}: full set")
+elif gk_t is not None:
+    # cap 100 at k4 -> 25 examples/rank -> the every-80 progress line never
+    # prints; fall back to the task wall time (capped ~150-350s, full ~1800s)
+    kind = ("cap 100 (by task time)" if gk_t <= 600
+            else "FULL SET (by task time)" if gk_t >= 1200 else "? (by task time)")
+    print(f"  gsm8k eval time:       {gk_t:.0f}s  ({kind})")
+    if gk_t >= 1200:
+        fails.append(f"gsm8k_cot took {gk_t:.0f}s: full set")
 else:
-    print("  gsm8k per-rank count: ?")
+    print("  gsm8k per-rank count:  pending (eval not started)")
 capped = (spec_cap is True) and (tt4 is not None and tt4 < 20_000_000)
-if capped:
-    d = k4.get("stem_metric", float("nan")) - m3.get("stem_metric", float("nan"))
-    verdict = "PASS" if abs(d) <= 0.008 else "CHECK"
-    print(f"  metric delta vs M3:   {d:+.4f}"
-          f"  (band +-0.008; seeds differ -> ~0.003 sampling noise)  {verdict}")
-else:
-    print("  metric delta vs M3:   NOT comparable (caps missing — rerun)")
-print("-" * 64)
-print(f"stem_metric:        M3 {m3.get('stem_metric', float('nan')):.4f}"
-      f"   k4 {k4.get('stem_metric', float('nan')):.4f}")
-print(f"stem_nll:           M3 {m3.get('stem_nll', float('nan'))}"
-      f"   k4 {k4.get('stem_nll', float('nan'))}")
+if k4 is not None:
+    if capped:
+        d = k4.get("stem_metric", float("nan")) - m3.get("stem_metric", float("nan"))
+        verdict = "PASS" if abs(d) <= 0.008 else "CHECK"
+        print(f"  metric delta vs M3:   {d:+.4f}"
+              f"  (band +-0.008; seeds differ -> ~0.003 sampling noise)  {verdict}")
+    else:
+        print("  metric delta vs M3:   NOT comparable (caps missing — rerun)")
+    print("-" * 64)
+    print(f"stem_metric:        M3 {m3.get('stem_metric', float('nan')):.4f}"
+          f"   k4 {k4.get('stem_metric', float('nan')):.4f}")
+    print(f"stem_nll:           M3 {m3.get('stem_nll', float('nan'))}"
+          f"   k4 {k4.get('stem_nll', float('nan'))}")
 print("=" * 64)
-print("verdict criteria (perf gate): rc 0/0; accum k4 = M3/4; tok/sec ~4x;"
-      " train time well under M3; semantics gate all-present.")
+if fails:
+    print("SEMANTICS FAIL — speedrun caps were lost again. Cancel the job now")
+    print("(console URL was printed at submission) and resubmit via 'self run'.")
+    for x in fails:
+        print(f"  - {x}")
+    sys.exit(1)
+print("semantics: OK / pending — items above fill in as the job progresses.")
+print("perf gate: rc 0/0; accum k4 = M3/4; tok/sec ~4x; train well under M3.")
 PY
 }
 
