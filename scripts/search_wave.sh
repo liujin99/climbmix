@@ -46,8 +46,6 @@ OUT_DIR="${OUT_DIR:-/tmp/remote_validation_k4}"
 SPEEDRUN_DIR="${SPEEDRUN_DIR:-result/speedrun_20260828_222129}"
 START_EXP_ID="${START_EXP_ID:-910}"
 MAX_PARALLEL="${MAX_PARALLEL:-6}"
-CMD_DIR="/tmp/wave_cmds"
-LOG_DIR="/tmp/wave_logs"
 WAVE_NAME="${WAVE_NAME:-searchwave-k4}"
 
 mode="${1:-dry-run}"
@@ -58,14 +56,21 @@ grep -q "parse_token_count" "$REPO/scripts/dispatch_remote.py" \
   || die "dispatch_remote.py predates 29295e8 (10M suffix rejected) — git pull first"
 
 # ── collect configs + build commands ────────────────────────────────────
-LIST_FILE="$(mktemp)"
+# The collector writes each run_<exp_id>.sh itself (no TAB parsing between
+# processes — a malformed meta once dispatched a bare word as a command) and
+# prints ONLY the exp ids, one per line, to stdout. The last stderr line is
+# the manifest of archive paths in dispatch order.
+CMD_DIR="${CMD_DIR:-/tmp/wave_cmds}"
+mkdir -p "$CMD_DIR"
+rm -f "$CMD_DIR"/run_*.sh
+IDS_FILE="$(mktemp)"
 if ! python3 - "$REPO" "$SRC_CFG" "$WAVE_CFG" "$SPEEDRUN_DIR" \
        "$START_EXP_ID" "$MAX_PARALLEL" "$OUT_DIR" "$WAVE_NAME" "$mode" \
-       > "$LIST_FILE" <<'PY'
+       "$CMD_DIR" > "$IDS_FILE" <<'PY'
 import glob, json, os, shlex, sys
 
 repo, src_cfg, wave_cfg, speedrun_dir, start_id, max_par, out_dir, name, \
-    mode = sys.argv[1:10]
+    mode, cmd_dir = sys.argv[1:11]
 start_id, max_par = int(start_id), int(max_par)
 
 cfg = json.load(open(src_cfg))
@@ -99,9 +104,18 @@ if mode != "summary":
         sys.exit(1)
 
 env = lambda k, d: os.environ.get(k, d)
+paths = []
 for exp_id, meta_path in zip(exp_ids, metas):
     meta = json.load(open(meta_path))
     ref = meta.get("stem_metric")
+    weights = meta.get("weights")
+    if not isinstance(weights, list) or not weights or not all(
+            isinstance(w, (int, float)) for w in weights):
+        print(f"[wave] ERROR: {meta_path} has no usable weights list "
+              f"(got {type(weights).__name__}); not an experiment meta — "
+              f"clean the archive or point SPEEDRUN_DIR elsewhere",
+              file=sys.stderr)
+        sys.exit(1)
     parts = [
         "python3", "scripts/dispatch_remote.py",
         "--remote-config", wave_cfg,
@@ -117,7 +131,7 @@ for exp_id, meta_path in zip(exp_ids, metas):
         "--output-dir", out_dir,
         "--exp-id", str(exp_id),
         "--exp-name", name,
-        "--weights", ",".join(repr(x) for x in meta["weights"]),
+        "--weights", ",".join(repr(w) for w in weights),
         "--proxy-num-iterations", "50",
         "--proxy-target-tokens", "10M",
         "--eval-max-per-task", "100",
@@ -128,33 +142,39 @@ for exp_id, meta_path in zip(exp_ids, metas):
     # expanduser: shlex.join would quote bare ~/ paths and silently break
     # tilde expansion when the command file is re-executed via bash
     parts = [os.path.expanduser(a) for a in parts]
-    # TAB-separated: commands never contain tabs (shlex.join)
-    print(f"{shlex.join(parts)}\t{'' if ref is None else ref}\t{exp_id}")
-print(f"[wave] {len(metas)} configs from {speedrun_dir} "
-      f"(exp {exp_ids[0]}..{exp_ids[-1]}), k4, eval cap 100", file=sys.stderr)
+    script = ("#!/usr/bin/env bash\n"
+              f"# from {meta_path}"
+              f" (speedrun stem_metric={ref})\n"
+              f"cd {shlex.quote(repo)}\n"
+              f"{shlex.join(parts)}\n")
+    with open(os.path.join(cmd_dir, f"run_{exp_id}.sh"), "w") as f:
+        f.write(script)
+    paths.append(meta_path)
+    print(exp_id)
+print(f"[wave] {len(metas)} configs, dispatch order:", file=sys.stderr)
+for exp_id, p in zip(exp_ids, paths):
+    print(f"[wave]   exp {exp_id} <- {p}", file=sys.stderr)
+print(f"[wave] k4, eval cap 100", file=sys.stderr)
 PY
 then
   die "config collection failed (see messages above)"
 fi
 
-mapfile -t LINES < "$LIST_FILE"
-rm -f "$LIST_FILE"
-[ "${#LINES[@]}" -gt 0 ] || die "no configs collected"
-
-mkdir -p "$CMD_DIR" "$LOG_DIR"
-rm -f "$CMD_DIR"/run_*.sh
-IDS=()
+mapfile -t IDS < "$IDS_FILE"
+rm -f "$IDS_FILE"
+[ "${#IDS[@]}" -gt 0 ] || die "no configs collected"
+for i in "${IDS[@]}"; do
+  [[ "$i" =~ ^[0-9]+$ ]] || die "collector emitted a non-numeric exp id: '$i'"
+done
 FILES=()
-while IFS=$'\t' read -r cmd ref exp_id; do
-  f="$CMD_DIR/run_${exp_id}.sh"
-  {
-    echo "#!/usr/bin/env bash"
-    echo "cd $(printf '%q' "$REPO")"
-    echo "$cmd"
-  } > "$f"
-  IDS+=("$exp_id")
+for i in "${IDS[@]}"; do
+  f="$CMD_DIR/run_${i}.sh"
+  [ -f "$f" ] || die "collector did not write $f"
   FILES+=("$f")
-done < <(printf '%s\n' "${LINES[@]}")
+done
+
+LOG_DIR="${LOG_DIR:-/tmp/wave_logs}"
+mkdir -p "$LOG_DIR"
 
 LAST_ID="${IDS[$(( ${#IDS[@]} - 1 ))]}"
 echo "[wave] ${#FILES[@]} configs, exp ${IDS[0]}..$LAST_ID, " \
@@ -162,8 +182,9 @@ echo "[wave] ${#FILES[@]} configs, exp ${IDS[0]}..$LAST_ID, " \
 
 # ── dry-run ─────────────────────────────────────────────────────────────
 if [ "$mode" = "dry-run" ]; then
-  for line in "${LINES[@]}"; do
-    echo "  ${line%%$'\t'*}"
+  for f in "${FILES[@]}"; do
+    echo "  --- $(basename "$f") ---"
+    tail -n +4 "$f" | sed 's/^/  /'
   done
   echo "[wave] dry-run — nothing executed"
   exit 0
