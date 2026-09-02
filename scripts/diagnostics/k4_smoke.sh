@@ -25,6 +25,11 @@
 #  显式传入。命令缺少 --proxy-num-iterations 50 或 --general-data-dir
 #  时会打 WARNING (这两项是 M3 语义的关键)。
 #
+#  !! speedrun 语义的 dispatch 还需要 (若原命令里没有, 显式传入):
+#     --proxy-target-tokens 10M   (M3/speedrun 的混合数据 cap; 缺省=全池)
+#     --eval-max-per-task 100     (M3/speedrun 的 eval 子采样 cap; 缺省=全量,
+#                                  generation 任务全量会吃掉 ~40m)
+#
 #  环境变量:
 #    SRC_CFG=/tmp/remote_smoke.json   源 RemoteConfig (npu_per_job=1)
 #    (REPO 自动取本脚本所在仓库根, 无需设置)
@@ -37,8 +42,8 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SRC_CFG="${SRC_CFG:-/tmp/remote_smoke.json}"
 K4_CFG="/tmp/remote_smoke_k4.json"
 OUT_DIR="/tmp/remote_validation_k4"
-EXP_ID="900"
-EXP_NAME="remoteval-k4"
+EXP_ID="${EXP_ID:-900}"
+EXP_NAME="${EXP_NAME:-remoteval-k4}"
 M3_DIR="$REPO/remote_validation/exp_0000"
 K4_DIR="$OUT_DIR/exp_$(printf '%04d' "$EXP_ID")"
 
@@ -201,10 +206,11 @@ setopt("--output-dir", out_dir)
 argv = [os.path.expanduser(a) for a in argv]
 
 has = lambda f: f in argv or any(a.startswith(f + "=") for a in argv)
-for flag in ("--proxy-num-iterations", "--general-data-dir"):
+for flag in ("--proxy-num-iterations", "--general-data-dir",
+             "--proxy-target-tokens", "--eval-max-per-task"):
     if not has(flag):
-        print(f"[k4] WARNING: command lacks {flag} — M3 semantics broken!",
-              file=sys.stderr)
+        print(f"[k4] WARNING: command lacks {flag} — M3/speedrun semantics "
+              f"broken (uncapped pool / full eval sets)!", file=sys.stderr)
 print(shlex.join(argv))
 PY
 )
