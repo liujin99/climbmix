@@ -41,8 +41,9 @@
 #                          仅做 M3 奇偶校验 — 批大小/步数必须一致)
 #    gsm8k 每 rank 计数   (eval 开始后: 25 = cap / 330 = 全量; 25/rank
 #                          无 80 步进进度行时, 回退用 gsm8k 任务耗时判定)
-#    日志截断检测          (streamed 副本可能止步中途步: 标记时间指标不
-#                          完整, 择优取本地/FUSE 副本, 不算失败)
+#    日志截断检测          (无 end-of-run 汇总行 = 副本不完整; 最后一步
+#                          不打 step 行属正常。择优取本地/FUSE 副本,
+#                          训练时长以末尾 Total training time 为准)
 #    任一硬性信号显示 flag 丢失 -> exit 1 并提示立刻取消 job (提交时打印
 #    过 console 链接), 不再白烧一小时。metric 差值 informational (跨
 #    seed 噪声 902 实测 ~0.008), 仅在 meta.json 落地后给出。
@@ -157,11 +158,13 @@ def load(p):
 
 def log_stats(path):
     dts, toks, accum = [], [], None
-    total_m, last_step, total_steps = None, 0, None
+    step_m, final_m, val_bpb = None, None, None
+    last_step, total_steps = 0, None
     try:
         if not path:
             return dict(accum=None, dt_ms=None, tok_s=None, total_m=None,
-                        last_step=0, total_steps=None)
+                        final_m=None, val_bpb=None, last_step=0,
+                        total_steps=None)
         with open(path, errors="replace") as f:
             for line in f:
                 m = re.search(r"Grad accum steps: (\d+)", line)
@@ -175,12 +178,23 @@ def log_stats(path):
                     toks.append(int(m.group(1).replace(",", "")))
                 # 'total time' only exists on step lines; matching the step
                 # prefix guards against unrelated lines and lets us detect
-                # truncated logs (streamed copy ends mid-run)
+                # truncated logs. NOTE: the FINAL step never prints a step
+                # line (mid_train runs val + checkpoint save there instead),
+                # so a complete log legitimately ends at total_steps - 1.
                 m = re.search(r"step (\d+)/(\d+) .*total time: ([\d.]+)m", line)
                 if m:
                     last_step = int(m.group(1))
                     total_steps = int(m.group(2))
-                    total_m = float(m.group(3))
+                    step_m = float(m.group(3))
+                # authoritative end-of-run summary; present iff the log
+                # reaches the end (report block may repeat the same text
+                # with the same value — last match wins either way)
+                m = re.search(r"Total training time: ([\d.]+)m", line)
+                if m:
+                    final_m = float(m.group(1))
+                m = re.search(r"Minimum validation bpb: ([\d.]+)", line)
+                if m:
+                    val_bpb = float(m.group(1))
     except OSError:
         pass
     tail = lambda xs: xs[-10:] if xs else []
@@ -188,7 +202,9 @@ def log_stats(path):
         accum=accum,
         dt_ms=(sum(tail(dts)) / len(tail(dts))) if dts else None,
         tok_s=(sum(tail(toks)) / len(tail(toks))) if toks else None,
-        total_m=total_m,
+        total_m=(final_m if final_m is not None else step_m),
+        final_m=final_m,
+        val_bpb=val_bpb,
         last_step=last_step,
         total_steps=total_steps,
     )
@@ -314,15 +330,18 @@ else:
     else:
         print(f"tok/sec:            M3 {fmt(ls3['tok_s'], '{:,.0f}')}"
               f"   k4 {fmt(ls4['tok_s'], '{:,.0f}')}")
-    trunc = (ls4["total_steps"] is not None
-             and ls4["last_step"] < ls4["total_steps"])
-    tt_note = " (partial: log truncated)" if trunc else ""
+    # no end-of-run summary = the copy never reached the end (mid-run
+    # snapshot or cut); a final step line at total_steps-1 is NORMAL
+    trunc = (ls4["final_m"] is None and ls4["total_steps"] is not None)
+    tt_note = " (partial — log incomplete)" if trunc else ""
     print(f"train total time:   M3 {fmt(ls3['total_m'], '{:.1f}')}m"
           f"   k4 {fmt(ls4['total_m'], '{:.1f}')}m{tt_note}")
     if trunc:
-        print(f"  ! k4 train log ends at step {ls4['last_step']}/"
-              f"{ls4['total_steps']} (streamed copy cut mid-run); timing"
-              " metrics above are partial — not a failure")
+        print(f"  ! k4 train log reaches step {ls4['last_step']}/"
+              f"{ls4['total_steps']} with no end-of-run summary (streamed"
+              " copy cut mid-run); timing above is partial — not a failure")
+    print(f"min val bpb:        M3 {fmt(ls3['val_bpb'], '{:.4f}')}"
+          f"   k4 {fmt(ls4['val_bpb'], '{:.4f}')}  (train-side signal)")
     print(f"worker elapsed:     M3 {fmt(rr3.get('elapsed_seconds'))}s"
           f"   k4 {fmt(rr4.get('elapsed_seconds'))}s")
     print(f"master elapsed:     M3 {fmt(m3.get('elapsed_seconds'))}s"
