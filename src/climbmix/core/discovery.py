@@ -15,6 +15,29 @@ import numpy.typing as npt
 from climbmix.core.types import ClusterInfo, ClusterDiscoveryConfig
 from climbmix.core.protocols import ClusterDiscovery
 
+_EMB_CACHE_NPY = "embedding_cache.npy"
+_EMB_CACHE_NPZ = "embedding_cache.npz"
+
+
+def embedding_cache_file(cache_root: str) -> str:
+    """Embeddings cache path inside a cache root dir.
+
+    .npy is the canonical format (streamable multi-node merge output;
+    mmap-able read — a pool-sized cache never materializes in RAM and
+    even reads acceptably through a FUSE-mounted OBS path). Legacy
+    .npz caches (single-node runs before the format switch) keep
+    working: an existing npz is preferred over a fresh npy write, so
+    old investments are not silently invalidated; new writes land as
+    .npy.
+    """
+    npy = os.path.join(cache_root, _EMB_CACHE_NPY)
+    if os.path.exists(npy):
+        return npy
+    npz = os.path.join(cache_root, _EMB_CACHE_NPZ)
+    if os.path.exists(npz):
+        return npz
+    return npy
+
 
 class EmbeddingClusterDiscovery:
     def __init__(self, config: Optional[ClusterDiscoveryConfig] = None):
@@ -40,8 +63,8 @@ class EmbeddingClusterDiscovery:
         # changing K_enhanced / merge_distance archives the output dir but must
         # not re-embed the pool. Run-level artifacts (merge profile) stay in
         # cache_dir (the output dir) and archive normally.
-        emb_cache = os.path.join(embedding_cache_dir, "embedding_cache.npz") if embedding_cache_dir else (
-            os.path.join(cache_dir, "embedding_cache.npz") if cache_dir else None)
+        emb_cache = embedding_cache_file(embedding_cache_dir) if embedding_cache_dir else (
+            embedding_cache_file(cache_dir) if cache_dir else None)
         kmeans_cache = (
             os.path.join(embedding_cache_dir, f"kmeans_K{config.K_init}.npz")
             if embedding_cache_dir else None

@@ -20,7 +20,7 @@ import numpy as np
 import numpy.typing as npt
 from typing import Dict, List, Optional, Tuple
 
-from climbmix.utils.io_utils import atomic_savez
+from climbmix.utils.io_utils import atomic_savez, atomic_save_embeddings
 
 try:
     import xformers  # noqa: F401
@@ -185,17 +185,26 @@ def _load_cached_embeddings(
 ) -> Optional[npt.NDArray[np.float32]]:
     """Load cached embeddings; None when absent or row-count mismatched.
 
-    The pool-keyed cache DIRECTORY names its inputs (shard manifest, model,
-    truncate len, sample size), but this guard is the last line of defense
-    against a stale cache reached through a manually pinned dir or an older
-    key formula: a silent row-count mismatch would misalign labels with
-    sample_indices downstream (discovery passes 20K indices against a 2K
-    array). Returns None → caller re-embeds and overwrites the cache.
+    Accepts both cache formats: .npy (the canonical one — mmap-able, so
+    a 475 GB full-pool cache reads back as a memmap and the chunked
+    cluster path never materializes it in RAM; also the only format
+    that reads efficiently from a FUSE-mounted OBS path) and legacy
+    .npz (fully materialized on load, as before).
+
+    The pool-keyed cache DIRECTORY names its inputs (shard manifest,
+    model, truncate len, sample size), but this guard is the last line
+    of defense against a stale cache reached through a manually pinned
+    dir or an older key formula: a silent row-count mismatch would
+    misalign labels with sample_indices downstream (discovery passes
+    20K indices against a 2K array). Returns None → caller re-embeds
+    and overwrites the cache.
     """
     if not (cache_path and os.path.exists(cache_path)):
         return None
-    data = np.load(cache_path)
-    embeddings = data["embeddings"]
+    if cache_path.endswith(".npy"):
+        embeddings = np.load(cache_path, mmap_mode="r")
+    else:  # legacy npz — fully materialized on load, as before
+        embeddings = np.load(cache_path)["embeddings"]
     if expected_n is not None and embeddings.shape[0] != expected_n:
         print(f"{tag} WARNING: {cache_path} holds {embeddings.shape[0]:,} embeddings "
               f"but {expected_n:,} expected — stale cache, re-embedding")
@@ -376,7 +385,7 @@ def embed_documents(
         _validate_embeddings(embeddings, "[Embed]")
 
         if cache_path:
-            atomic_savez(cache_path, embeddings=embeddings)
+            atomic_save_embeddings(cache_path, embeddings)
             print(f"[Embed] Cached embeddings to: {cache_path}")
     finally:
         # Release the model AND the allocator pool: this function runs inside
@@ -691,7 +700,7 @@ def _embed_documents_multi_npu(texts, model_name, batch_size, cache_path,
         ranges=[(bounds[w], bounds[w + 1], f"worker{w}") for w in range(n_npus)])
 
     if cache_path:
-        atomic_savez(cache_path, embeddings=embeddings)
+        atomic_save_embeddings(cache_path, embeddings)
         print(f"[Embed] Cached embeddings to: {cache_path}")
     return embeddings
 
@@ -939,7 +948,8 @@ def embed_texts_streaming(
     returns the backing read-only memmap (never an in-RAM copy — 48 GB at
     the current 11.6M pool, 512 GB at the real 100B pool); the tmp file is
     unlinked before return and stays readable through the mapping (POSIX).
-    A cache hit returns the npz-loaded ndarray. Both forms feed
+    A cache hit returns the mmap'd .npy (or, for a legacy .npz cache,
+    the materialized ndarray). Both forms feed
     cluster_embeddings (memmaps take the chunked prescan/assign path).
     """
     cached = _load_cached_embeddings(
@@ -1094,7 +1104,7 @@ def embed_texts_streaming(
         _validate_embeddings(all_embeddings, "[Embed-Stream]", ranges=shard_ranges)
 
         if cache_path:
-            atomic_savez(cache_path, embeddings=all_embeddings)
+            atomic_save_embeddings(cache_path, all_embeddings)
             print(f"[Embed-Stream] Cached embeddings to: {cache_path}")
         _clear_partial_embedding_state(cache_dir, memmap_path)
 
@@ -1193,7 +1203,7 @@ def embed_texts_streaming(
         _validate_embeddings(all_embeddings, "[Embed-Stream]", ranges=shard_ranges)
 
         if cache_path:
-            atomic_savez(cache_path, embeddings=all_embeddings)
+            atomic_save_embeddings(cache_path, all_embeddings)
             print(f"[Embed-Stream] Cached embeddings to: {cache_path}")
         _clear_partial_embedding_state(cache_dir, memmap_path)
     finally:

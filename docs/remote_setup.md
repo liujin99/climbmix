@@ -183,16 +183,40 @@ Where the finished embeddings live (three tiers):
    `{obs_prefix}/embed_units/` — they are the DURABLE tier: a wiped
    submit-host disk re-merges from them in ~1-2h instead of paying the
    40h embed again. Do not delete after merging.
- 2. The merged pool cache lands at
-    `<EMBEDDING_CACHE_DIR>/<content-key>/embedding_cache.npz` — the
-    exact path run_climbmix.sh Step 1 hits (written there by
-    `scripts/embed_merge.py`, see below). Point `EMBEDDING_CACHE_DIR`
-    at the production tree (e.g. `<data-mix-run>/climbmix/cache/
-    embeddings`) and the cache investment lives with production.
-    Keep it on local disk (cache-hit `np.load`s 475 GB into RAM;
-    reading through the OBS FUSE mount would be slow).
-3. Optional: upload the merged npz to OBS as a redundancy copy
+2. The merged pool cache lands at
+   `<EMBEDDING_CACHE_DIR>/<content-key>/embedding_cache.npy` — the
+   exact path run_climbmix.sh Step 1 hits (written there by
+   `scripts/embed_merge.py`, see below). Point `EMBEDDING_CACHE_DIR`
+   at the production tree (e.g. `<data-mix-run>/climbmix/cache/
+   embeddings`) and the cache investment lives with production.
+   The merge is a pure streaming append (peak disk = cache + ONE
+   downloaded unit ~7.5 GB, no second copy) and the cache is a raw
+   .npy that Step 1 mmaps — a pool-sized cache never materializes in
+   RAM. That also means `EMBEDDING_CACHE_DIR` MAY point at a
+   FUSE-mounted OBS path (e.g. /l00916525/...) when local disk can't
+   hold ~475 GB: the merge writes through the mount and Step 1 mmaps
+   through it (slower than local NVMe, but zero local footprint).
+   Legacy single-node `.npz` caches keep working (picked when no .npy
+   exists).
+3. Optional: upload the merged cache to OBS as a redundancy copy
    (overnight, mount-speed).
+
+Re-use semantics — the cache is a one-time investment:
+- The cache key hashes only the pool's shard name+size manifest, the
+  model name, and the truncate length. Every downstream knob
+  (K_enhanced/K_max/merge_distance/prune_threshold/lr/iterations/...)
+  is deliberately OUT of the key: ALL ClimbMix experiments on the same
+  pool share ONE embedded pool — each run's Step 1 cache-hits and
+  continues from clustering onward.
+- Pool GREW by appending shards: re-run `runs/embed_wave.sh` (old
+  units' partials are resume-skipped — only the new shards' units get
+  embedded) + re-run `runs/embed_merge.sh` (fresh cache at the new
+  key). Incremental cost = embed(new docs) + one merge. Structural
+  changes (insert/delete/reorder shards) shift unit boundaries and
+  global offsets → the merge fails loudly; that's a new pool and a
+  full re-embed.
+- Old-key cache dirs stay on disk after pool growth; delete them once
+  the new pool is trusted.
 
 Smoke (one 8-card job, 2 shards, ~10 min end to end — verifies the
 mount-read → NPU fp16 math → upload chain; `--compare-local` re-embeds
@@ -238,8 +262,8 @@ the run config's discovery values — the key depends on them):
 bash runs/embed_merge.sh
 # wrapper 默认: --data-dir = run_climbmix.sh 的 DATA_DIR,
 #   --cache-dir = 同名 EMBEDDING_CACHE_DIR 旋钮 (指向生产树即落生产缓存)
-# 磁盘需求 (cache 所在文件系统): 2× 池字节 (memmap + atomic_savez 的
-#   npz 临时) + ~7.5 GB/在飞单元
+# 磁盘需求 (cache 所在文件系统): 池字节 (~475 GB, 流式追加, 无 2x)
+#   + ~7.5 GB/在飞单元; 放不下可把 EMBEDDING_CACHE_DIR 指向 OBS 挂载路径
 ```
 
 After it exits green, the next pipeline run cache-hits Step 1 and

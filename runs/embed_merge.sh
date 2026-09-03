@@ -6,18 +6,28 @@
 #  用法 (波次跑绿后):
 #    bash runs/embed_merge.sh
 #    FORCE=1 bash runs/embed_merge.sh                  # 覆盖已有缓存重拼
-#    UPLOAD_BACKUP=obs://<bk>/<dir>/embedding_cache.npz bash runs/embed_merge.sh
+#    UPLOAD_BACKUP=obs://<bk>/<dir>/embedding_cache.npy bash runs/embed_merge.sh
 #
 #  语义: 校验分片覆盖 (每片恰好一次 + num_docs/全局偏移对账 + manifest
-#  交叉核对 model/truncate_len) → memmap 汇装 (断点续传, ledger 记账) →
-#  全池验证 → atomic_savez 落 EMBEDDING_CACHE_DIR/<key>/embedding_cache.npz。
-#  之后 run_climbmix.sh 的 Step 1 直接缓存命中, 跳过 ~40h 嵌入。
+#  交叉核对 model/truncate_len) → 流式拼接 (单元在全局连续有序, 缓存体 =
+#  header + 逐单元字节追加; 断点续传, ledger 记账, 断裂即整体重来) →
+#  全池验证 → 落 EMBEDDING_CACHE_DIR/<key>/embedding_cache.npy (mmap 可读,
+#  Step-1 命中时不整载进 RAM)。之后 run_climbmix.sh 的 Step 1 直接缓存命中,
+#  跳过 ~40h 嵌入。
+#
+#  复用语义: cache-key 只含 池分片清单+模型+截断长度 — K/prune/lr/迭代数
+#  等下游旋钮全部不影响 key, 所有 ClimbMix 实验共享同一个嵌入池 (Step 1
+#  命中后从聚类继续)。池追加新分片 → 重跑 embed_wave (旧单元 resume-skip,
+#  只嵌新数据) + 重跑本脚本 (新 key), 增量成本 = 嵌新数据 + 一次合并。
+#
+#  磁盘: 缓存所在文件系统 ≈ 池字节 (~475 GB) + 一个在飞单元 (~7.5 GB);
+#  本地盘放不下时 EMBEDDING_CACHE_DIR 可指 OBS 挂载路径 (如 /l00916525/...)
+#  — 合并经挂载写, Step-1 经挂载 mmap (慢一点, 但本地零占用)。
 #
 #  注意:
 #    - 语义旋钮 (EMBEDDING_MODEL/TRUNCATE_LEN/EMB_DIM/UNIT_SHARDS) 必须与
 #      embed_wave.sh 一致; DATA_DIR 必须就是 run_climbmix.sh 的 DATA_DIR
 #      (cache-key 从该目录的分片清单计算)。
-#    - 缓存目录磁盘需求 ≈ 2× 池字节 (memmap + npz 临时) + ~7.5 GB/在飞单元。
 #    - OBS 上的单元 partials 有意保留 (本地盘被清后 ~1-2h 重拼 vs 40h 重嵌)。
 # ═══════════════════════════════════════════════════════════════════════
 set -euo pipefail

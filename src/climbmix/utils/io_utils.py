@@ -53,6 +53,42 @@ def atomic_savez(path: str, **arrays) -> None:
         raise
 
 
+def atomic_save_npy(path: str, array) -> None:
+    """Raw .npy write with tmp+rename (same crash semantics as atomic_savez).
+
+    np.save streams C-contiguous arrays to disk via tofile(), so a
+    pool-sized embeddings array (475 GB at the full pool) writes without
+    an in-RAM copy. .npy (vs npz) is what makes the multi-node merge a
+    pure byte-level append (header + unit blocks) and lets cache reads
+    mmap instead of materializing.
+    """
+    import numpy as np
+
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    tmp = path + ".tmp.npy"
+    _clear_tmp(tmp)
+    try:
+        np.save(tmp, np.ascontiguousarray(array))
+        os.replace(tmp, path)
+    except BaseException:
+        _clear_tmp(tmp)
+        raise
+
+
+def atomic_save_embeddings(path: str, embeddings) -> None:
+    """Embeddings cache writer, dispatched by extension.
+
+    .npy is the canonical format (streamable write, mmap-able read);
+    .npz keeps working for legacy paths and callers that pass a .npz
+    name explicitly (tests pin that behavior)."""
+    if path.endswith(".npy"):
+        atomic_save_npy(path, embeddings)
+    else:
+        atomic_savez(path, embeddings=embeddings)
+
+
+
 def atomic_write_json(path: str, obj, default=None, indent=None) -> None:
     """json.dump with tmp+rename."""
     directory = os.path.dirname(path) or "."

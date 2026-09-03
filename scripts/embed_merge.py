@@ -4,11 +4,11 @@ canonical pool embedding cache that run_climbmix.sh Step 1 reads.
 
 The dispatcher (scripts/embed_dispatch.py) banks per-unit
 partial_block.npz files under {obs_prefix}/embed_units/ (~475 GB
-durable tier). This tool downloads them, copies the rows into one
-pool-shaped memmap at the Step-1 cache key, validates the whole pool
-(same net the single-node run applies), and atomic_savez's the final
-`embedding_cache.npz`. After it exits green, the next pipeline run
-cache-hits and skips the ~40h embed.
+durable tier). This tool streams them, one unit block after another,
+into `embedding_cache.npy` at the Step-1 cache key (a pure byte-level
+append — see below), validates the whole pool (the same net the
+single-node run applies), and publishes it atomically. After it exits
+green, the next pipeline run cache-hits and skips the ~40h embed.
 
 The cache key (utils/embed_cache.pool_embedding_cache_key) is the EXACT
 formula CLIMBPipeline._pool_embedding_cache_dir computes at cache-read
@@ -35,18 +35,46 @@ Semantics:
     matching num_docs and global offsets. Missing units → fail with the
     list (re-run the dispatcher; resume skips what succeeded). Stale
     partials from a different pool version fail the same check.
-  - Resume: a crash mid-merge loses only the in-flight unit — completed
-    units are recorded in merge_progress.json and re-running skips them
-    (their downloaded npz is deleted after copying, so a resumed merge
-    does not even re-download them).
-  - Idempotent: an existing embedding_cache.npz with the right shape is
-    left alone ("already merged"); --force re-merges over it.
+  - The merged cache is a raw .npy written as a pure STREAM: units are
+    consecutive slices of the pool, so unit k's partial is exactly the
+    global row range it covers — the merge is a byte-level append of
+    one unit block after the other (no pool-shaped memmap, no 2x disk:
+    peak = final cache + ONE downloaded partial ~7.5 GB). .npy is also
+    what Step 1 mmaps on cache hit (a pool-sized cache never
+    materializes in RAM) and the only format that reads acceptably
+    from a FUSE-mounted OBS path.
+  - Resume: a crash mid-merge loses only the in-flight unit — the
+    ledger records each unit's appended byte count and re-running
+    verifies the partial file's size before continuing (a mismatch
+    restarts the concat from scratch; the downloads are the slow part
+    and completed units are NOT re-downloaded).
+  - Idempotent: an existing embedding_cache.npy (or legacy .npz) with
+    the right shape is left alone ("already merged"); --force
+    re-merges over it.
   - The OBS unit partials are NEVER deleted — they are the tier that
     survives a wiped submit-host disk (re-merge in ~1-2h instead of a
-    40h re-embed). --upload-backup optionally copies the final npz to
-    OBS as redundancy.
-  - Disk needed at the --cache-dir filesystem: pool_bytes (memmap) +
-    pool_bytes (npz tmp during atomic_savez) + one unit (~7.5 GB).
+    40h re-embed). --upload-backup optionally copies the final cache
+    to OBS as redundancy.
+
+Re-use semantics (why this cache is a one-time investment):
+  - The cache key ignores every downstream knob (K_enhanced/K_max/
+    merge_distance/prune_threshold/lr/iterations): all ClimbMix
+    experiments on the SAME pool + model + truncate_len share ONE
+    embedded pool — Step 1 cache-hits and the run continues from
+    clustering onward.
+  - Pool GREW by appending shards (the supported incremental case):
+    re-run embed_dispatch (old units' partials are resume-skipped,
+    only the new shards' units get embedded) + re-run this merge → a
+    fresh cache at the new key, incremental cost = embed(new docs) +
+    one merge. Structural changes (insert/delete/reorder) shift the
+    unit layout and global offsets → loud failure; that is a new pool
+    and a full re-embed.
+  - Old-key caches stay on disk after pool growth (history is the
+    price of stability); delete them once the new pool is trusted.
+  - --cache-dir may point at a FUSE-mounted OBS path (e.g.
+    /l00916525/...) when local disk can't hold ~475 GB: merge writes
+    through the mount, Step 1 mmaps through it (slower, but zero
+    local disk beyond one unit at a time).
 
 Sample-mode caches (embedding_sample_size > 0) are a different code
 path (subsampled rows) — this tool only merges FULL-pool units.
@@ -80,11 +108,15 @@ def _load_sibling(name):
 def atomic_write_ledger(path, completed):
     """merge_progress.json writer; tmp+rename.
 
-    completed maps unit_id -> [shard names it covered] — the recorded
-    shard list (not just the id) makes resume airtight: if the unit
-    layout (--unit-shards / shard-offset) changed between merge runs,
-    the recorded coverage no longer matches the pool and merge fails
-    loudly instead of leaving a silent hole in the memmap."""
+    completed maps unit_id -> {"shards": [...], "bytes": N} where bytes
+    is the raw block appended to the .npy body for that unit. The
+    recorded shard list (not just the id) makes resume airtight: if the
+    unit layout (--unit-shards / shard-offset) changed between merge
+    runs, the recorded coverage no longer matches the pool and merge
+    fails loudly instead of leaving a silent hole. The byte counts let
+    a resumed run VERIFY the partial file's size before continuing —
+    an append that crashed mid-unit restarts the concat from scratch,
+    never splices a torn block."""
     tmp = f"{path}.tmp.{os.getpid()}"
     with open(tmp, "w") as f:
         json.dump({"completed": completed}, f)
@@ -92,10 +124,12 @@ def atomic_write_ledger(path, completed):
 
 
 def load_ledger(path):
-    """{unit_id: [shard names]} from a previous merge attempt.
+    """{unit_id: {"shards": [names], "bytes": int}} from a previous
+    merge attempt, in append order (dict insertion order survives the
+    json round-trip).
 
-    Garbage/legacy formats degrade to {} (memmap rows from an
-    unaccounted attempt are re-copied — overwrite is idempotent)."""
+    Garbage/legacy formats degrade to {} (bytes from an unaccounted
+    attempt fail the size check → fresh restart — the safe direction)."""
     if not path or not os.path.exists(path):
         return {}
     try:
@@ -104,16 +138,37 @@ def load_ledger(path):
         done = data.get("completed")
         if not isinstance(done, dict):
             return {}
-        return {str(uid): [str(n) for n in names]
-                for uid, names in done.items() if isinstance(names, list)}
+        out = {}
+        for uid, entry in done.items():
+            if (isinstance(entry, dict)
+                    and isinstance(entry.get("shards"), list)
+                    and isinstance(entry.get("bytes"), int)):
+                out[str(uid)] = {"shards": [str(n) for n in entry["shards"]],
+                                 "bytes": entry["bytes"]}
+        return out
     except (OSError, ValueError, TypeError):
         return {}
 
 
-def npz_embeddings_shape(path):
-    """Header-only peek at the 'embeddings' member's shape (a full
-    np.load would materialize ~475 GB). None when unreadable."""
+def npy_header_bytes(shape, dtype="<f4"):
+    """The .npy header a fresh cache file starts with (magic + version
+    + padded header dict) — written once, then unit blocks append."""
+    import io
+    from numpy.lib import format as npfmt
+    buf = io.BytesIO()
+    npfmt.write_array_header_1_0(buf, {
+        "descr": dtype, "fortran_order": False,
+        "shape": tuple(int(s) for s in shape)})
+    return buf.getvalue()
+
+
+def cache_shape(path):
+    """Header-only shape peek for .npy (mmap open — no data read) and
+    legacy .npz (zip member header). None when unreadable."""
     try:
+        import numpy as np
+        if path.endswith(".npy"):
+            return tuple(np.load(path, mmap_mode="r").shape)
         import zipfile
         from numpy.lib import format as npfmt
         with zipfile.ZipFile(path) as zf:
@@ -135,9 +190,10 @@ def load_and_check_units(ed, obs, shard_infos, args, done_units):
     """[(unit_id, manifest), ...] for the units still to merge, fully
     cross-checked against the global shard layout.
 
-    done_units: {unit_id: [shard names]} from a previous attempt's
-    ledger — those units' rows are already in the memmap (their OBS
-    partials may even be gone); their recorded coverage still counts."""
+    done_units: {unit_id: {"shards": ..., "bytes": ...}} from a previous
+    attempt's ledger — those units' bytes are already in the cache body
+    (their OBS partials may even be gone); their recorded coverage
+    still counts."""
     units = ed.build_units(shard_infos, args.unit_shards, smoke=0)
     skip = [p.strip() for p in args.skip_units.split(",") if p.strip()]
     by_name = {os.path.basename(s["path"]): s for s in shard_infos}
@@ -170,14 +226,15 @@ def load_and_check_units(ed, obs, shard_infos, args, done_units):
     covered = {}
     # ledger-done units: coverage from the RECORDED shard names (a
     # changed layout would mismatch here — loud, never silent)
-    for unit_id, names in done_units.items():
-        for name in names:
+    for unit_id, entry in done_units.items():
+        for name in entry["shards"]:
             if name not in by_name:
                 raise SystemExit(
                     f"[merge] FATAL: ledger unit {unit_id} covers "
                     f"unknown shard {name!r} — the pool or unit layout "
                     "changed since that merge attempt; delete "
-                    "merge_progress.json + the memmap and re-merge")
+                    "merge_progress.json + the partial cache file and "
+                    "re-merge")
             if name in covered:
                 raise SystemExit(
                     f"[merge] FATAL: shard {name} covered by BOTH "
@@ -273,9 +330,9 @@ def main() -> int:
                    help="keep the per-unit npz files after copying "
                         "(default: deleted to save ~7.5 GB per unit)")
     p.add_argument("--upload-backup", default="",
-                   help="obs:// URI to copy the final npz to (redundancy)")
+                   help="obs:// URI to copy the final cache to (redundancy)")
     p.add_argument("--force", action="store_true",
-                   help="re-merge over an existing embedding_cache.npz")
+                   help="re-merge over an existing embedding_cache.npy")
     args = p.parse_args()
 
     from climbmix.remote.remote_executor import RemoteConfig
@@ -322,55 +379,71 @@ def main() -> int:
          for n in pool_names),
         args.model, args.truncate_len)
     key_dir = os.path.join(args.cache_dir, key)
-    cache_path = os.path.join(key_dir, "embedding_cache.npz")
+    cache_path = os.path.join(key_dir, "embedding_cache.npy")
+    legacy_npz = os.path.join(key_dir, "embedding_cache.npz")
     print(f"[merge] pool: {len(shard_infos)} shards, {total_docs:,} docs")
     print(f"[merge] cache key: {key}")
     print(f"[merge] target: {cache_path}")
 
     shape = (total_docs, args.emb_dim)
-    if os.path.exists(cache_path) and not args.force:
-        got = npz_embeddings_shape(cache_path)
+    existing = ([p for p in (cache_path, legacy_npz) if os.path.exists(p)]
+                if not args.force else [])
+    for p in existing:
+        got = cache_shape(p)
         if got == shape:
-            print(f"[merge] cache already present with shape {got} — "
+            print(f"[merge] cache already present ({p}, shape {got}) — "
                   "nothing to do (use --force to re-merge)")
             return 0
         raise SystemExit(
-            f"[merge] FATAL: {cache_path} exists with shape {got} "
+            f"[merge] FATAL: {p} exists with shape {got} "
             f"(expected {shape}) — stale cache at this key; delete it or "
             "pass --force")
 
-    # ── assemble: memmap + unit ledger (crash loses only the in-flight
-    # unit — completed ones are not even re-downloaded) ────────────────
+    # ── assemble: streaming .npy concat + unit ledger ──────────────────
+    # Units are consecutive slices of the pool in order, so unit k's
+    # partial IS the global row range it covers: the cache body is the
+    # byte-level append of one unit block after the other (the strict
+    # coverage checks above are what guarantee this equals global row
+    # order). Peak disk = final cache + ONE downloaded partial (~7.5 GB)
+    # — no pool-shaped memmap, no second copy during the final write.
     import numpy as np
     os.makedirs(key_dir, exist_ok=True)
     dl_dir = os.path.join(key_dir, "merge_downloads")
-    memmap_path = os.path.join(key_dir, "embedding_memmap.tmp")
+    body_path = os.path.join(key_dir, "embedding_cache.npy.partial")
     ledger_path = os.path.join(key_dir, "merge_progress.json")
-    expected_bytes = total_docs * args.emb_dim * 4
-    memmap_intact = (os.path.exists(memmap_path)
-                     and os.path.getsize(memmap_path) == expected_bytes)
-    # the ledger only counts when its memmap survived; a wrong-size
-    # memmap means a different pool/dim — stale state, start over
-    done = load_ledger(ledger_path) if memmap_intact else {}
+    header = npy_header_bytes(shape)
+    row_bytes = args.emb_dim * 4
 
-    # full coverage check BEFORE any file is created (a failing merge
-    # must not leave a 475 GB truncated memmap behind)
+    # resume: ledger counts only when the body file survived AND its size
+    # matches the recorded byte accounting (header + done units, in order)
+    done = load_ledger(ledger_path)
+    expected_size = header_len = len(header)
+    for entry in done.values():
+        expected_size += entry["bytes"]
+    body_ok = (done and os.path.exists(body_path)
+               and os.path.getsize(body_path) == expected_size)
+    if not body_ok:
+        done = {}
+        expected_size = header_len
+
+    # full coverage check BEFORE any file is touched (a failing merge
+    # must not leave a half-written cache behind)
     unit_list = load_and_check_units(ed, obs, shard_infos, args, done)
-    print(f"[merge] {len(unit_list)} unit partial(s) to merge, "
-          f"{len(done)} already in the memmap, coverage complete")
+    print(f"[merge] {len(unit_list)} unit partial(s) to append, "
+          f"{len(done)} already in the cache body, coverage complete")
 
-    if not memmap_intact:
-        for junk in (memmap_path, ledger_path):
+    if not done:
+        for junk in (body_path, ledger_path):
             if os.path.exists(junk):
                 os.remove(junk)
-        with open(memmap_path, "wb") as f:
-            f.truncate(expected_bytes)
-        print(f"[merge] preallocated memmap {shape} "
-              f"({expected_bytes / (1024**3):.1f} GB)")
+        with open(body_path, "wb") as f:
+            f.write(header)
+        print(f"[merge] started cache body {shape} "
+              f"({total_docs * row_bytes / (1024**3):.1f} GB when done)")
     else:
-        print(f"[merge] resuming: memmap intact")
+        print(f"[merge] resuming: cache body intact at "
+              f"{expected_size / (1024**3):.1f} GB")
 
-    mm = np.memmap(memmap_path, dtype=np.float32, mode="r+", shape=shape)
     t0 = time.time()
     for i, (unit_id, man) in enumerate(unit_list):
         npz_path = os.path.join(dl_dir, f"{unit_id}.npz")
@@ -380,43 +453,46 @@ def main() -> int:
             f"{args.obs_prefix.rstrip('/')}/embed_units/{unit_id}"
             f"/result/partial_block.npz", npz_path)
         arr = np.load(npz_path)["embeddings"]
-        if arr.shape != (int(man["total_rows"]), args.emb_dim):
+        rows = int(man["total_rows"])
+        if arr.shape != (rows, args.emb_dim):
             raise SystemExit(
                 f"[merge] FATAL: {unit_id} partial shape {arr.shape} != "
-                f"manifest ({man['total_rows']}, {args.emb_dim})")
-        off = 0
-        for s in man["shards"]:
-            nd = int(s["num_docs"])
-            gs = int(s["global_start"])
-            mm[gs:gs + nd] = arr[off:off + nd]
-            off += nd
-        if off != arr.shape[0]:
-            raise SystemExit(f"[merge] FATAL: {unit_id} row accounting")
-        mm.flush()
+                f"manifest ({rows}, {args.emb_dim})")
+        if not arr.flags["C_CONTIGUOUS"]:
+            arr = np.ascontiguousarray(arr)
+        unit_bytes = rows * row_bytes
+        with open(body_path, "ab") as f:
+            arr.tofile(f)          # raw fp32 block, no in-RAM copy
+            f.flush()
+            os.fsync(f.fileno())   # a crash never splices a torn block
         del arr
         if not args.keep_downloads:
             os.remove(npz_path)
-        done[unit_id] = [s["path"] for s in man["shards"]]
+        done[unit_id] = {"shards": [s["path"] for s in man["shards"]],
+                         "bytes": unit_bytes}
         atomic_write_ledger(ledger_path, done)
         rate = (i + 1) / (time.time() - t0)
         eta = (len(unit_list) - i - 1) / rate if rate > 0 else 0
-        print(f"[merge] {unit_id} merged ({i + 1}/{len(unit_list)}, "
+        print(f"[merge] {unit_id} appended ({i + 1}/{len(unit_list)}, "
               f"{(time.time() - tu):.0f}s, ETA {eta/60:.0f}m)", flush=True)
-    del mm
 
     # ── validate the whole pool, then publish atomically ──────────────
     from climbmix.core.embedding_cluster import _validate_embeddings
-    from climbmix.utils.io_utils import atomic_savez
-    final = np.memmap(memmap_path, dtype=np.float32, mode="r", shape=shape)
+    final = np.load(body_path, mmap_mode="r")
+    if tuple(final.shape) != shape:
+        raise SystemExit(
+            f"[merge] FATAL: cache body shape {final.shape} != {shape} "
+            "— bug in the append accounting; NOT publishing")
     ranges = [(int(s["start_idx"]), int(s["start_idx"]) + int(s["num_docs"]),
                os.path.basename(s["path"])) for s in shard_infos]
     _validate_embeddings(final, "[Embed-Merge]", ranges=ranges)
-    atomic_savez(cache_path, embeddings=final)
+    del final
+    os.replace(body_path, cache_path)
     print(f"[merge] wrote {cache_path} "
           f"({os.path.getsize(cache_path) / (1024**3):.1f} GB)")
 
     # cleanup partial-state files (the cache is the product now)
-    for junk in (memmap_path, ledger_path):
+    for junk in (ledger_path,):
         if os.path.exists(junk):
             os.remove(junk)
     if os.path.isdir(dl_dir) and not args.keep_downloads:
