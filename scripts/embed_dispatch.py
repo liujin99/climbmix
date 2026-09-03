@@ -218,9 +218,14 @@ def build_spec(unit_id, shards, args, pool_uri, model_dir):
     }
 
 
-def wait_job(job_api, job_id, timeout_s, unit_id, poll_s=30.0):
+def wait_job(job_api, job_id, timeout_s, unit_id, poll_s=30.0,
+             print_s=300.0):
     """Terminal status; prints a log tail while waiting (mirrors the
-    executor's _wait_job, minus the experiment coupling)."""
+    executor's _wait_job, minus the experiment coupling). poll_s stays
+    tight (a cheap status call — fast completion detection and accurate
+    timeouts), but the CHATTER follows the executor's
+    status_print_interval_s: embed jobs run tens of minutes to hours,
+    minute-level prints are noise."""
     from climbmix.remote.job_api import JobStatus
     t0 = time.time()
     last = 0.0
@@ -234,7 +239,7 @@ def wait_job(job_api, job_id, timeout_s, unit_id, poll_s=30.0):
             raise RuntimeError(
                 f"unit {unit_id}: job {job_id} timed out after "
                 f"{elapsed/60:.0f}m, cancelled")
-        if time.time() - last >= 60.0:
+        if time.time() - last >= print_s:
             tail = (job_api.logs(job_id, 1) or "").strip()
             print(f"  [{unit_id}] job {job_id} {st.value} "
                   f"{elapsed/60:.0f}m | {tail[:120]}", flush=True)
@@ -369,7 +374,9 @@ def dispatch_unit(unit_id, shards, job_api, obs, args, model_dir,
                                getattr(args, "launch_mounts", None))
     print(f"[{unit_id}] job {job_id} submitted")
 
-    st = wait_job(job_api, job_id, args.job_timeout_s, unit_id)
+    st = wait_job(job_api, job_id, args.job_timeout_s, unit_id,
+                  print_s=getattr(remote_config,
+                                  "status_print_interval_s", 300.0))
     if st != JobStatus.SUCCEEDED:
         with _PRINT_LOCK:
             print(f"[{unit_id}] job {job_id} -> {st.value}; logs (tail):\n"
