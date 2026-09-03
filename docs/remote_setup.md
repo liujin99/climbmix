@@ -197,19 +197,23 @@ Where the finished embeddings live (three tiers):
 Smoke (one 8-card job, 2 shards, ~10 min end to end — verifies the
 mount-read → NPU fp16 math → upload chain; `--compare-local` re-embeds
 the same shards through climbmix's own single-card path and demands
-byte-identical output):
+byte-identical output). The `runs/embed_wave.sh` wrapper carries the
+boilerplate; every knob is an env var (MAX_JOBS, UNIT_SHARDS, ... —
+same convention as run_climbmix.sh):
 
 ```
-python3 scripts/embed_dispatch.py \
-    --remote-config climbmix-ma/config/remote_config.ma.json \
-    --shard-info <pool>/metadata_shard_info.json \
-    --smoke 2 --flavor modelarts.pool.visual.8xlarge --npu-per-job 8 \
-    --output-dir /tmp/embed_smoke \
-    --local-model-dir <server-local stella dir> \
-    --compare-local <server-local pool dir>
+SMOKE=2 bash runs/embed_wave.sh
+# 等价的裸命令 (wrapper 内部执行):
+# python3 scripts/embed_dispatch.py \
+#     --remote-config climbmix-ma/config/remote_config.ma.json \
+#     --shard-info <pool>/metadata_shard_info.json \
+#     --smoke 2 --flavor modelarts.pool.visual.8xlarge --npu-per-job 8 \
+#     --output-dir /tmp/embed_smoke \
+#     --local-model-dir <server-local stella dir> \
+#     --compare-local <server-local pool dir>
 ```
 
-Full pool — the WAVE (63 units at `--unit-shards 16`, `--max-jobs 6`
+Full pool — the WAVE (63 units at `--unit-shards 16`, `MAX_JOBS=6`
 = 48 cards in flight → ~7h wall clock; raise/lower to match what the
 shared pool can spare). A FAILED unit never stops its siblings: the
 wave drains everything, prints the failed list, and re-running the
@@ -218,11 +222,9 @@ resume-skipped). submit() rejections (pool full) back off and retry
 with the RemoteConfig `submit_retry_*` knobs.
 
 ```
-python3 scripts/embed_dispatch.py \
-    --remote-config climbmix-ma/config/remote_config.ma.json \
-    --shard-info <pool>/metadata_shard_info.json \
-    --flavor modelarts.pool.visual.8xlarge --npu-per-job 8 \
-    --max-jobs 6 --output-dir <dir>
+bash runs/embed_wave.sh                  # MAX_JOBS=6 默认
+MAX_JOBS=8 bash runs/embed_wave.sh       # 64 卡
+SHARD_OFFSET=160 FORCE=1 ...             # 续波 / 强制重发
 ```
 
 Merge — when the wave drains green, assemble the partials into the
@@ -233,13 +235,11 @@ crash, is idempotent on re-run; `--model`/`--truncate-len` MUST equal
 the run config's discovery values — the key depends on them):
 
 ```
-python3 scripts/embed_merge.py \
-    --remote-config climbmix-ma/config/remote_config.ma.json \
-    --shard-info <pool>/metadata_shard_info.json \
-    --data-dir <LOCAL pool dir — the same dir the run points at> \
-    --cache-dir $EMBEDDING_CACHE_DIR
-# disk needed at the cache filesystem: 2x pool bytes (memmap + npz
-# tmp during atomic_savez) + ~7.5 GB per in-flight unit
+bash runs/embed_merge.sh
+# wrapper 默认: --data-dir = run_climbmix.sh 的 DATA_DIR,
+#   --cache-dir = 同名 EMBEDDING_CACHE_DIR 旋钮 (指向生产树即落生产缓存)
+# 磁盘需求 (cache 所在文件系统): 2× 池字节 (memmap + atomic_savez 的
+#   npz 临时) + ~7.5 GB/在飞单元
 ```
 
 After it exits green, the next pipeline run cache-hits Step 1 and
