@@ -290,9 +290,10 @@ class RemoteExecutor(ProxyRunner):
     # ── assets bundle (worker + shared cmds module) ──
 
     def _stage_assets(self) -> None:
-        """Copy remote_worker.py + nanochat_cmds.py into the local staging
-        dir (fresh on every init — the staged copy always matches the running
-        code, which is what gets uploaded to OBS and executed in jobs)."""
+        """Copy the worker bundle (remote_worker.py + nanochat_cmds.py +
+        embed_worker.py) into the local staging dir (fresh on every init —
+        the staged copy always matches the running code, which is what
+        gets uploaded to OBS and executed in jobs)."""
         import climbmix
         repo_root = os.path.normpath(
             os.path.join(os.path.dirname(climbmix.__file__), "..", ".."))
@@ -301,9 +302,10 @@ class RemoteExecutor(ProxyRunner):
         os.makedirs(stage, exist_ok=True)
         self.assets_stage_dir = stage
         src_worker = os.path.join(repo_root, "scripts", "remote_worker.py")
+        src_embed = os.path.join(repo_root, "scripts", "embed_worker.py")
         src_cmds = os.path.join(os.path.dirname(climbmix.__file__),
                                 "pipeline", "nanochat_cmds.py")
-        for src in (src_worker, src_cmds):
+        for src in (src_worker, src_embed, src_cmds):
             if not os.path.isfile(src):
                 raise FileNotFoundError(f"remote asset missing: {src}")
             dst = os.path.join(stage, os.path.basename(src))
@@ -320,11 +322,12 @@ class RemoteExecutor(ProxyRunner):
         The staged copies always match the running code, so an
         unconditional refresh means worker-side changes take effect on
         the next launch. Uploading only when absent (the old behavior)
-        would silently keep running stale worker code in jobs. Two tiny
-        files — cheap to write on any backend."""
+        would silently keep running stale worker code in jobs. Three
+        tiny files — cheap to write on any backend."""
         assets_uri = f"{self.remote.obs_prefix.rstrip('/')}/assets"
         with self._obs_lock:
-            for name in ("remote_worker.py", "nanochat_cmds.py"):
+            for name in ("remote_worker.py", "embed_worker.py",
+                         "nanochat_cmds.py"):
                 self.obs.upload_file(
                     os.path.join(self.assets_stage_dir, name),
                     f"{assets_uri}/{name}")

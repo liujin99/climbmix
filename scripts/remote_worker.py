@@ -198,7 +198,7 @@ def start_log_streamer(storage, work: str, result_uri: str,
 
     def _loop():
         while not stop.wait(period_s):
-            for name in ("mid_train.log", "eval.log"):
+            for name in ("mid_train.log", "eval.log", "embed.log"):
                 lp = os.path.join(work, name)
                 if not os.path.isfile(lp):
                     continue
@@ -216,6 +216,34 @@ def start_log_streamer(storage, work: str, result_uri: str,
         t.join(timeout=5)
 
     return _stop
+
+
+# ── embed dispatch (TODO E — kind == "embed" specs) ───────────────────────
+
+def run_embed(s: dict, storage, spec_path: str) -> int:
+    """Embed unit: delegate to embed_worker.py (same assets bundle), then
+    upload its outputs. The child's console output lands in embed.log —
+    streamed to {result_uri} by the log streamer while it runs."""
+    work = s["work_dir"]
+    os.makedirs(work, exist_ok=True)
+    result_uri = s["result_uri"].rstrip("/")
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    cmd = [sys.executable, os.path.join(here, "embed_worker.py"),
+           "--spec-path", spec_path, "--work-dir", work]
+    rc = run_cmd(cmd, os.path.join(work, "embed.log"), cwd=work,
+                 env=dict(os.environ))
+
+    # embed_worker writes result.json (kind=embed: embed_rc/docs/error) into
+    # the work dir on every exit path — upload it plus the stage artifacts.
+    result_local = os.path.join(work, "result.json")
+    if os.path.isfile(result_local):
+        storage.upload_file(result_local, f"{result_uri}/result.json")
+    for name in ("embed.log", "manifest.json", "partial_block.npz"):
+        local = os.path.join(work, name)
+        if os.path.isfile(local):
+            storage.upload_file(local, f"{result_uri}/{name}")
+    return rc
 
 
 # ── main ──────────────────────────────────────────────────────────────────
@@ -252,6 +280,20 @@ def main() -> int:
               f"{SPEC_VERSION} — assets bundle and submit host disagree",
               flush=True)
         return 2
+
+    # Embed units (TODO E): a different spec shape entirely — dispatch
+    # before any experiment-field extraction (model_tag etc. are absent).
+    if s.get("kind") == "embed":
+        work = s["work_dir"]
+        result_uri = s["result_uri"].rstrip("/")
+        os.makedirs(work, exist_ok=True)
+        stop_stream = start_log_streamer(
+            storage, work, result_uri,
+            float(s.get("log_stream_s", LOG_STREAM_S)))
+        try:
+            return run_embed(s, storage, spec_path)
+        finally:
+            stop_stream()
 
     tag = s["model_tag"]
     base = s["base_dir"]
