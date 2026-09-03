@@ -3,11 +3,15 @@
 #  ClimbMix: 多节点全池嵌入 — 波次发射 (TODO E; scripts/embed_dispatch.py 的壳)
 #
 #  用法:
-#    bash runs/embed_wave.sh                  # 全量波 (池分片 ÷ UNIT_SHARDS 个单元)
+#    POOL_URI=obs://<池目录> MODEL_URI=obs://<stella目录> \
+#        bash runs/embed_wave.sh   # 全量波 (池分片 ÷ UNIT_SHARDS 个单元)
 #    SMOKE=2 bash runs/embed_wave.sh          # 烟雾: 前 2 片单单元 + 本地逐字节比对
 #    MAX_JOBS=8 bash runs/embed_wave.sh       # 并发单元数 (8×8=64 卡)
 #    FORCE=1 bash runs/embed_wave.sh          # 忽略 OBS 已有 partial 强制重发
 #    SHARD_OFFSET=160 bash runs/embed_wave.sh # 续波: 跳过前 160 片 (10 单元)
+#
+#  POOL_URI/MODEL_URI 是 per-launch 直挂 (只 stage 进本波的 job, 不进
+#  全局后端配置 — 池 197G 绝不能让别的 job 类也白拉)。
 #
 #  波次形状: 1000 分片 ÷ UNIT_SHARDS=16 = 63 单元; MAX_JOBS=6 × NPU_PER_JOB=8
 #  = 48 卡在飞 (共享池, 别全占)。40h 单机嵌入 → ~40/J h。
@@ -42,6 +46,10 @@ BATCH_SIZE="${BATCH_SIZE:-512}"
 TRUNCATE_LEN="${TRUNCATE_LEN:-512}"
 EMB_DIM="${EMB_DIM:-1024}"             # stella_en_400M_v5 输出维度
 
+# ── 资产位置 (per-launch 直挂: embed 专属资产, 不进全局后端配置) ──
+POOL_URI="${POOL_URI:-}"                # 池 parquet 目录 (obs://...; 必填)
+MODEL_URI="${MODEL_URI:-}"              # stella 模型目录 (obs://...; 必填)
+
 # ── 烟雾 / 本地比对 / 续波 ──
 SMOKE="${SMOKE:-0}"
 LOCAL_POOL_DIR="${LOCAL_POOL_DIR:-/home/ma-user/work/100B_stem_parquet_filtered}"
@@ -64,6 +72,15 @@ ARGS=(
   --truncate-len "$TRUNCATE_LEN"
   --emb-dim "$EMB_DIM"
 )
+if [[ -n "$POOL_URI" ]]; then
+  ARGS+=(--pool-uri "$POOL_URI")
+else
+  echo "[embed_wave] FATAL: POOL_URI 未设置 (obs://<池 parquet 目录>)" >&2
+  exit 2
+fi
+if [[ -n "$MODEL_URI" ]]; then
+  ARGS+=(--model-uri "$MODEL_URI")
+fi
 
 if [[ "$SMOKE" != "0" ]]; then
   ARGS+=(--smoke "$SMOKE")

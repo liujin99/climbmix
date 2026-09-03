@@ -168,10 +168,17 @@ Prerequisites (once, on the submit host):
   ```
 
   Each recognized dir becomes a DIRECT asset mount (zero duplicate
-  storage; the container has no network, so the pool and the model
-  MUST be reachable this way). The pool parquet set is data, not a
-  package asset — declare it separately:
-  `--asset-mount pool=obs://<bucket>/<pool dir>`.
+  storage; the container has no network, so everything the jobs read
+  must be reachable this way).
+- The EMBED wave's own assets — the pool parquet set (197 GB, DATA,
+  not a package asset) and the stella model dir — are PER-LAUNCH
+  mounts, not global config: they stage into embed jobs only, via
+  `embed_dispatch.py --pool-uri/--model-uri` (the `runs/embed_wave.sh`
+  `POOL_URI`/`MODEL_URI` env knobs). Keep them OUT of the global
+  backend config on purpose: every job class stages the global set, so
+  a 197 GB pool there would be pulled into every proxy-train job too.
+  (`--model-uri` may point straight at the resource package's
+  `stella/` — the same objects, no second copy.)
 - The dispatcher is fresh-prefix self-sufficient (uploads the worker
   bundle to `{prefix}/assets` + the `assets_big` placeholder the
   gateway validates); the obs_prefix itself is the user config knob —
@@ -196,8 +203,16 @@ Where the finished embeddings live (three tiers):
    FUSE-mounted OBS path (e.g. /l00916525/...) when local disk can't
    hold ~475 GB: the merge writes through the mount and Step 1 mmaps
    through it (slower than local NVMe, but zero local footprint).
-   Legacy single-node `.npz` caches keep working (picked when no .npy
-   exists).
+    Legacy single-node `.npz` caches keep working (picked when no .npy
+    exists).
+    Read-speed note: the OBS-mount cache is fine for the merge, but
+    Step 1's clustering does multiple mmap passes over the 475 GB —
+    through FUSE that's slower (first full pull ~1-1.5h, then page
+    cache). Default plan: OBS-direct and measure the first production
+    run; IF Step 1 becomes the bottleneck, the zero-code fix is a
+    one-time `cp` of the .npy onto the run host's working disk and
+    pointing `EMBEDDING_CACHE_DIR` there (the .npy format is
+    mmap-friendly either way — no tooling change).
 3. Optional: upload the merged cache to OBS as a redundancy copy
    (overnight, mount-speed).
 
@@ -226,11 +241,14 @@ boilerplate; every knob is an env var (MAX_JOBS, UNIT_SHARDS, ... —
 same convention as run_climbmix.sh):
 
 ```
-SMOKE=2 bash runs/embed_wave.sh
+SMOKE=2 POOL_URI=obs://<bucket>/<pool dir> \
+    MODEL_URI=obs://<bucket>/<pkg>/stella bash runs/embed_wave.sh
 # 等价的裸命令 (wrapper 内部执行):
 # python3 scripts/embed_dispatch.py \
 #     --remote-config climbmix-ma/config/remote_config.ma.json \
 #     --shard-info <pool>/metadata_shard_info.json \
+#     --pool-uri obs://<bucket>/<pool dir> \
+#     --model-uri obs://<bucket>/<pkg>/stella \
 #     --smoke 2 --flavor modelarts.pool.visual.8xlarge --npu-per-job 8 \
 #     --output-dir /tmp/embed_smoke \
 #     --local-model-dir <server-local stella dir> \
@@ -246,7 +264,7 @@ resume-skipped). submit() rejections (pool full) back off and retry
 with the RemoteConfig `submit_retry_*` knobs.
 
 ```
-bash runs/embed_wave.sh                  # MAX_JOBS=6 默认
+bash runs/embed_wave.sh                  # MAX_JOBS=6 默认 (POOL_URI/MODEL_URI 同烟雾)
 MAX_JOBS=8 bash runs/embed_wave.sh       # 64 卡
 SHARD_OFFSET=160 FORCE=1 ...             # 续波 / 强制重发
 ```

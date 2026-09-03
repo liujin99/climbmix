@@ -26,12 +26,16 @@ and the merge lands exactly where run_climbmix.sh Step 1 looks. The
 OBS unit partials (~475 GB) are the durable tier: keep them — a wiped
 local disk re-merges in ~1-2h instead of re-embedding 40h.
 
-Container data plane (the resource package's DIRECT asset mounts —
-declared once with ma_setup.py --resource-package, verified here):
-  pool=<obs dir of the parquet pool>   -> /home/ma-user/modelarts/inputs/pool_0/
-  stella=<obs dir of the model>        -> /home/ma-user/modelarts/inputs/stella_0/
-(the pool is DATA, not a package asset — declare it separately with
---asset-mount pool=...)
+Container data plane (per-launch DIRECT mounts — the embed wave's own
+assets stage into ITS jobs only, never into the global backend config
+where every job class would stage them too; the backend's submit()
+treats them as a REPLACE of its global asset mounts):
+  --pool-uri  <obs dir of the parquet pool>  -> inputs/pool_0/
+  --model-uri <obs dir of the model>         -> inputs/stella_0/
+(Unset flags fall back to same-named direct mounts declared in the
+backend config — e.g. a mock simulation. --model-container-dir instead
+points the spec at a NON-staged model path, for mock simulation or
+non-standard layouts.)
 
 Smoke (fast iteration — one 8-card job, 2 shards, ~10 min end to end):
   python3 scripts/embed_dispatch.py \
@@ -290,13 +294,16 @@ def compare_local(unit_id, shards, partial_path, args, pool_local_dir):
     return equal or max_abs == 0.0
 
 
-def submit_with_retry(job_api, name, command, remote_config, unit_id):
+def submit_with_retry(job_api, name, command, remote_config, unit_id,
+                      asset_mounts=None):
     """submit() with exponential backoff on TransientSubmitError.
 
     Port of RemoteExecutor._submit_with_retry (same RemoteConfig knobs,
     same semantics): the shared pool fluctuates, so a rejection now often
     fits minutes later — a retrying thread holds a wave slot but no
-    resources. Hard (non-transient) errors raise immediately."""
+    resources. Hard (non-transient) errors raise immediately.
+    asset_mounts: per-launch direct mounts (replace semantics) —
+    threaded through every retry attempt."""
     from climbmix.remote.job_api import TransientSubmitError
     backoff = remote_config.submit_retry_initial_s
     deadline = time.time() + remote_config.submit_retry_timeout_s
@@ -305,7 +312,8 @@ def submit_with_retry(job_api, name, command, remote_config, unit_id):
     while True:
         attempt += 1
         try:
-            return job_api.submit(name=name, command=command, env={})
+            return job_api.submit(name=name, command=command, env={},
+                                  asset_mounts=asset_mounts)
         except TransientSubmitError as e:
             if time.time() >= deadline:
                 raise RuntimeError(
@@ -358,7 +366,8 @@ def dispatch_unit(unit_id, shards, job_api, obs, args, model_dir,
           f"{spec['shards'][0]['num_docs']:,}+ docs/shard, "
           f"{args.npu_per_job} cards)")
     job_id = submit_with_retry(job_api, f"climbmix_embed_{unit_id}",
-                               command, remote_config, unit_id)
+                               command, remote_config, unit_id,
+                               getattr(args, "launch_mounts", None))
     print(f"[{unit_id}] job {job_id} submitted")
 
     st = wait_job(job_api, job_id, args.job_timeout_s, unit_id)
@@ -400,8 +409,13 @@ def main() -> int:
     p.add_argument("--shard-info", required=True,
                    help="pool metadata_shard_info.json (per_shard_info)")
     p.add_argument("--pool-uri", required=False,
-                   help="OBS dir of the parquet pool (default: the pool "
-                        "direct asset mount from the backend config)")
+                   help="OBS dir of the parquet pool (per-launch direct "
+                        "mount; default: the 'pool' direct mount from "
+                        "the backend config)")
+    p.add_argument("--model-uri", default="",
+                   help="OBS dir of the embedding model (per-launch "
+                        "direct mount; default: the 'stella' direct "
+                        "mount from the backend config)")
     p.add_argument("--model-dir", default="",
                    help="deprecated alias of --model-container-dir")
     p.add_argument("--model-container-dir", default="",
@@ -466,30 +480,34 @@ def main() -> int:
 
     mounts = asset_mount_uris(remote_config, bundle)
     args.pool_uri = args.pool_uri or mounts.get(POOL_MOUNT)
-    if MODEL_MOUNT in mounts:
+    model_uri = args.model_uri or mounts.get(MODEL_MOUNT)
+    if not args.pool_uri:
+        print("FATAL: no pool location. Pass --pool-uri (per-launch "
+              "staging — the pool must NOT live in the global backend "
+              "config: every job class would stage it)")
+        return 2
+    # per-launch direct mounts (replace semantics at the backend): the
+    # embed wave's own assets stage into ITS jobs only
+    launch_mounts = {POOL_MOUNT: args.pool_uri}
+    if model_uri:
         model_dir = f"{CONTAINER_INPUT_BASE}/{MODEL_MOUNT}_0"
+        launch_mounts[MODEL_MOUNT] = model_uri
     elif args.model_container_dir:
         # explicit override (mock simulation / non-standard layouts)
         model_dir = args.model_container_dir
     else:
-        print(f"FATAL: no {MODEL_MOUNT!r} asset mount. Declare it once:\n"
-              "  python3 climbmix-ma/scripts/ma_setup.py "
-              f"--asset-mount {MODEL_MOUNT}=obs://<bucket>/<model dir>")
+        print("FATAL: no model location. Pass --model-uri (per-launch "
+              "staging) or --model-container-dir (non-staged path)")
         return 2
-    if args.pool_uri:
-        src = f"direct mount {mounts.get(POOL_MOUNT)}"
-        print(f"[dispatch] pool: {args.pool_uri} ({src})")
-    else:
-        print("FATAL: no pool location. Pass --pool-uri or declare the "
-              "direct mount once:\n  python3 climbmix-ma/scripts/ma_setup.py "
-              f"--asset-mount {POOL_MOUNT}=obs://<bucket>/<pool dir>")
-        return 2
+    args.launch_mounts = launch_mounts
+    print(f"[dispatch] pool: {args.pool_uri} "
+          f"(per-launch mount {POOL_MOUNT!r})")
     print(f"[dispatch] model dir (container view): {model_dir}")
     # the model dir must actually have content on OBS — a typo'd mount
     # path would burn a job at model-load time (~20 min round trip)
-    if MODEL_MOUNT in mounts and not obs.list_objects(mounts[MODEL_MOUNT]):
-        print(f"FATAL: stella direct mount {mounts[MODEL_MOUNT]} is EMPTY "
-              f"on OBS — upload the model first")
+    if model_uri and not obs.list_objects(model_uri):
+        print(f"FATAL: model dir {model_uri} is EMPTY on OBS — "
+              f"upload the model first")
         return 2
 
     # fresh-prefix readiness: worker bundle + assets_big placeholder
