@@ -332,6 +332,17 @@ class RemoteExecutor(ProxyRunner):
                     os.path.join(self.assets_stage_dir, name),
                     f"{assets_uri}/{name}")
             print(f"  [RemoteExecutor] worker assets fresh -> {assets_uri}")
+            # Some gateways validate EVERY input mount as an existing OBS
+            # dir, and the adapter mounts {prefix}/assets_big — a fresh
+            # prefix would fail its first submit until that dir exists.
+            # A placeholder file is inert: the boot links only known
+            # asset names, workers never read unknown entries.
+            marker = (f"{self.remote.obs_prefix.rstrip('/')}"
+                      "/assets_big/.climbmix_placeholder")
+            if not self.obs.stat(marker):
+                self.obs.upload_bytes(
+                    b"placeholder - big assets are direct mounts or "
+                    b"uploaded per docs/remote_setup.md", marker)
 
     # ── OBS helpers ──
 
