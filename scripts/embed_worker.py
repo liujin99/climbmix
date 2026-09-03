@@ -7,8 +7,10 @@ host). Standalone by design: stdlib only — the container has NO climbmix
 source. The embedding math is a faithful port of climbmix's
 _embed_streaming_worker (core/embedding_cluster.py): fp16 inference,
 fp32 L2-normalized output, NaN retry at batch size 1, tokenize/IO
-prefetch pools, the stella buffer repair. Keep the two in sync when
-touching either.
+prefetch pools, the stella buffer repair, the FAKE XFORMERS shim
+(stella's modeling.py imports xformers unconditionally; without it the
+eager/sdpa fallbacks die at model import in the container). Keep the
+two in sync when touching either.
 
 Unit spec (JSON, spec_version 1):
   kind: "embed"
@@ -77,6 +79,115 @@ def load_ledger(path):
 
 # ── model loading + repair (ported from embedding_cluster) ────────────────
 
+# Fake xformers shim (verbatim port of embedding_cluster's module-level
+# block — live container finding 2026-09-03: the image ships no
+# xformers, stella's modeling.py imports it unconditionally, and BOTH
+# ladder rungs die without it: transformers refuses sdpa for NewModel,
+# and eager dies at stella's `import xformers`). The shim routes
+# memory_efficient_attention to torch SDPA (BlockDiagonalMask goes
+# through the pad + bool-mask fallback — the exact same math the local
+# reference path runs, so outputs stay byte-identical).
+try:
+    import xformers  # noqa: F401
+except ImportError:
+    import types as _types
+
+    import torch
+    import torch.nn.functional as _F
+
+    class _BlockDiagonalMask:
+        """Fake BlockDiagonalMask — stores seq lens, materializes to bool tensor."""
+        def __init__(self, q_seqlen, kv_seqlen=None, device=None):
+            if isinstance(q_seqlen, int):
+                q_seqlen = [q_seqlen]
+            self.q_seqlen = list(q_seqlen)
+            self.kv_seqlen = list(kv_seqlen) if kv_seqlen is not None else self.q_seqlen
+            self.device = device
+
+        @classmethod
+        def from_seqlens(cls, q_seqlen, kv_seqlen=None, device=None, **kw):
+            if (isinstance(q_seqlen, tuple) and len(q_seqlen) == 2
+                    and isinstance(q_seqlen[0], (list, tuple))):
+                q_seqlen, kv_seqlen = q_seqlen
+            return cls(q_seqlen, kv_seqlen, device)
+
+    class _LowerTriangularMask:
+        def __init__(self, *a, **kw):
+            pass
+
+    def _memory_efficient_attention(q, k, v, attn_bias=None, p=0.0, **kw):
+        # xformers layout: (B, S, H, D) — SDPA layout: (B, H, S, D)
+        need_transpose = q.dim() == 4 and q.shape[1] > q.shape[2]
+
+        def _to_sdpa(t):
+            return t.transpose(1, 2) if need_transpose else t
+
+        def _from_sdpa(t):
+            return t.transpose(1, 2).contiguous() if need_transpose else t
+
+        if isinstance(attn_bias, _BlockDiagonalMask):
+            # Always use fallback path (pad + bool mask SDPA) for all docs.
+            # This ensures identical computation path for batch=512 and batch=1,
+            # eliminating any bias from different attention kernels.
+            qs_list = attn_bias.q_seqlen
+            ks_list = attn_bias.kv_seqlen
+            n = len(qs_list)
+            _, _, H, D = q.shape
+
+            max_s = max(qs_list)
+            max_ks = max(ks_list)
+            q_pad = torch.zeros(n, max_s, H, D, dtype=q.dtype, device=q.device)
+            k_pad = torch.zeros(n, max_ks, H, D, dtype=k.dtype, device=k.device)
+            v_pad = torch.zeros(n, max_ks, H, D, dtype=v.dtype, device=v.device)
+            kmask = torch.zeros(n, 1, max_s, max_ks, dtype=torch.bool, device=q.device)
+            q_off = k_off = 0
+            for i, (qs_i, ks_i) in enumerate(zip(qs_list, ks_list)):
+                q_pad[i, :qs_i] = q[0, q_off:q_off + qs_i]
+                k_pad[i, :ks_i] = k[0, k_off:k_off + ks_i]
+                v_pad[i, :ks_i] = v[0, k_off:k_off + ks_i]
+                kmask[i, 0, :, :ks_i] = True
+                q_off += qs_i
+                k_off += ks_i
+            out = _F.scaled_dot_product_attention(
+                q_pad.transpose(1, 2), k_pad.transpose(1, 2), v_pad.transpose(1, 2),
+                attn_mask=kmask, dropout_p=p
+            )
+            out = out.transpose(1, 2)  # (n, max_s, H, D)
+            chunks = [out[i, :qs_i].unsqueeze(0) for i, qs_i in enumerate(qs_list)]
+            return torch.cat(chunks, dim=1)  # (1, total_S, H, D)
+
+        q_s, k_s, v_s = _to_sdpa(q), _to_sdpa(k), _to_sdpa(v)
+        if isinstance(attn_bias, _LowerTriangularMask):
+            out = _F.scaled_dot_product_attention(q_s, k_s, v_s, is_causal=True, dropout_p=p)
+        elif attn_bias is not None:
+            out = _F.scaled_dot_product_attention(q_s, k_s, v_s, attn_mask=attn_bias, dropout_p=p)
+        else:
+            out = _F.scaled_dot_product_attention(q_s, k_s, v_s, dropout_p=p)
+        return _from_sdpa(out)
+
+    # Build fake module hierarchy: xformers.ops.fmha.attn_bias
+    _attn_bias_mod = _types.ModuleType("xformers.ops.fmha.attn_bias")
+    _attn_bias_mod.BlockDiagonalMask = _BlockDiagonalMask
+    _attn_bias_mod.LowerTriangularMask = _LowerTriangularMask
+
+    _fmha_mod = _types.ModuleType("xformers.ops.fmha")
+    _fmha_mod.attn_bias = _attn_bias_mod
+    _fmha_mod.memory_efficient_attention = _memory_efficient_attention
+
+    _ops = _types.ModuleType("xformers.ops")
+    _ops.memory_efficient_attention = _memory_efficient_attention
+    _ops.fmha = _fmha_mod
+
+    _xfm = _types.ModuleType("xformers")
+    _xfm.ops = _ops
+    _xfm.__version__ = "0.0.0"
+
+    sys.modules["xformers"] = _xfm
+    sys.modules["xformers.ops"] = _ops
+    sys.modules["xformers.ops.fmha"] = _fmha_mod
+    sys.modules["xformers.ops.fmha.attn_bias"] = _attn_bias_mod
+
+
 def repair_stella_buffers(model):
     """Re-init stella's non-persistent buffers corrupted at load on
     torch_npu (position_ids / inv_freq / cos_cached / sin_cached hold
@@ -102,7 +213,10 @@ def repair_stella_buffers(model):
 
 def load_model(model_dir, device):
     """SentenceTransformer with xformers/SDPA fallback (same ladder as
-    embedding_cluster._load_model_stream, but from a LOCAL model dir)."""
+    embedding_cluster._load_model_stream, but from a LOCAL model dir).
+    The module-level fake-xformers shim above makes the first branch
+    succeed in the container (no real xformers there) — the plain load
+    then runs the same SDPA math as the local reference path."""
     from sentence_transformers import SentenceTransformer
     try:
         import xformers  # noqa: F401
