@@ -35,6 +35,7 @@ from climbmix.core.iterative_bootstrapper import IterativeBootstrapper
 from climbmix.sampling.data_selector import select_data_by_mixture, compute_mixture_dataset_stats
 from climbmix.utils.token_estimate import estimate_tokens_from_text
 from climbmix.utils.io_utils import atomic_savez, atomic_write_json, atomic_write_parquet
+from climbmix.utils.embed_cache import pool_embedding_cache_key
 
 
 class CLIMBPipeline:
@@ -311,28 +312,29 @@ class CLIMBPipeline:
         the (expensive) embeddings and K-means results. The sample size is
         only hashed when > 0 so full-pool (streaming) keys stay stable.
         Empty config → None (legacy behavior).
+
+        The key formula lives in utils/embed_cache.py (shared with
+        scripts/embed_merge.py so the multi-node merge lands at exactly
+        the path this method reads).
         """
-        import hashlib
         if not self.config.embedding_cache_dir:
             return None
         if not os.path.isdir(data_dir):
             return None
         disc = self.config.discovery
-        hasher = hashlib.sha256()
         shards = sorted(
             f for f in os.listdir(data_dir)
             if f.endswith(".parquet")
         )
         if not shards:
             return None
-        for name in shards:
-            hasher.update(name.encode())
-            hasher.update(str(os.path.getsize(os.path.join(data_dir, name))).encode())
-        hasher.update(disc.embedding_model.encode())
-        hasher.update(str(disc.embedding_truncate_len).encode())
-        if disc.embedding_sample_size and disc.embedding_sample_size > 0:
-            hasher.update(f"sample={disc.embedding_sample_size}".encode())
-        key = hasher.hexdigest()[:12]
+        key = pool_embedding_cache_key(
+            ((name, os.path.getsize(os.path.join(data_dir, name)))
+             for name in shards),
+            disc.embedding_model,
+            disc.embedding_truncate_len,
+            disc.embedding_sample_size,
+        )
         return os.path.join(self.config.embedding_cache_dir, key)
 
     @staticmethod

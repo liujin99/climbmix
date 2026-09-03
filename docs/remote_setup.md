@@ -183,13 +183,14 @@ Where the finished embeddings live (three tiers):
    `{obs_prefix}/embed_units/` — they are the DURABLE tier: a wiped
    submit-host disk re-merges from them in ~1-2h instead of paying the
    40h embed again. Do not delete after merging.
-2. The merged pool cache lands at
-   `<EMBEDDING_CACHE_DIR>/<content-key>/embedding_cache.npz` — the
-   exact path run_climbmix.sh Step 1 hits. Point `EMBEDDING_CACHE_DIR`
-   at the production tree (e.g. `<data-mix-run>/climbmix/cache/
-   embeddings`) and the cache investment lives with production.
-   Keep it on local disk (cache-hit `np.load`s 475 GB into RAM;
-   reading through the OBS FUSE mount would be slow).
+ 2. The merged pool cache lands at
+    `<EMBEDDING_CACHE_DIR>/<content-key>/embedding_cache.npz` — the
+    exact path run_climbmix.sh Step 1 hits (written there by
+    `scripts/embed_merge.py`, see below). Point `EMBEDDING_CACHE_DIR`
+    at the production tree (e.g. `<data-mix-run>/climbmix/cache/
+    embeddings`) and the cache investment lives with production.
+    Keep it on local disk (cache-hit `np.load`s 475 GB into RAM;
+    reading through the OBS FUSE mount would be slow).
 3. Optional: upload the merged npz to OBS as a redundancy copy
    (overnight, mount-speed).
 
@@ -208,10 +209,42 @@ python3 scripts/embed_dispatch.py \
     --compare-local <server-local pool dir>
 ```
 
-Full pool: drop `--smoke`/`--compare-local` (1000 shards ÷ 16 = 63
-units; `--shard-offset` resumes partial waves). The merge into the
-canonical pool cache (memmap assemble + `atomic_savez` at the
-Step-1 cache key) is the follow-up step — smoke green first.
+Full pool — the WAVE (63 units at `--unit-shards 16`, `--max-jobs 6`
+= 48 cards in flight → ~7h wall clock; raise/lower to match what the
+shared pool can spare). A FAILED unit never stops its siblings: the
+wave drains everything, prints the failed list, and re-running the
+SAME command retries only the failures (completed units are
+resume-skipped). submit() rejections (pool full) back off and retry
+with the RemoteConfig `submit_retry_*` knobs.
+
+```
+python3 scripts/embed_dispatch.py \
+    --remote-config climbmix-ma/config/remote_config.ma.json \
+    --shard-info <pool>/metadata_shard_info.json \
+    --flavor modelarts.pool.visual.8xlarge --npu-per-job 8 \
+    --max-jobs 6 --output-dir <dir>
+```
+
+Merge — when the wave drains green, assemble the partials into the
+canonical pool cache (verifies exact shard coverage + num_docs +
+global offsets against metadata_shard_info.json, validates the whole
+pool, `atomic_savez`s at the Step-1 key, resumes from its ledger on a
+crash, is idempotent on re-run; `--model`/`--truncate-len` MUST equal
+the run config's discovery values — the key depends on them):
+
+```
+python3 scripts/embed_merge.py \
+    --remote-config climbmix-ma/config/remote_config.ma.json \
+    --shard-info <pool>/metadata_shard_info.json \
+    --data-dir <LOCAL pool dir — the same dir the run points at> \
+    --cache-dir $EMBEDDING_CACHE_DIR
+# disk needed at the cache filesystem: 2x pool bytes (memmap + npz
+# tmp during atomic_savez) + ~7.5 GB per in-flight unit
+```
+
+After it exits green, the next pipeline run cache-hits Step 1 and
+skips the ~40h embed. The OBS partials are intentionally kept (tier 1
+above).
 
 
 ## Production launch (M5) — recommended knobs & calculation
