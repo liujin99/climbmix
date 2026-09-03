@@ -159,6 +159,14 @@ class RemoteConfig:
     # new wheel by bumping its filename (they are version-named anyway).
     code_wheels: List[str] = field(default_factory=list)
 
+    # Per-launch direct asset mounts ({name: obs uri}) that REPLACE the
+    # backend config's global obs.asset_mounts for THIS fleet's jobs only
+    # (None = inherit the platform config's set, as before). Scopes a
+    # search fleet to its own assets: job-class-specific mounts (embed
+    # models, the parquet pool, target-depth checkpoints) stay out of
+    # proxy jobs, which would otherwise stage them for nothing.
+    asset_mounts: Optional[Dict[str, str]] = None
+
     @staticmethod
     def from_dict(d: Dict) -> "RemoteConfig":
         known = {f for f in RemoteConfig.__dataclass_fields__}
@@ -172,7 +180,11 @@ class RemoteConfig:
                 if not isinstance(v, bool):
                     raise ValueError(f"RemoteConfig.{k} must be a bool, got {v!r}")
                 setattr(cfg, k, v)
-            elif isinstance(cur, dict):
+            elif cur is None or isinstance(cur, dict):
+                # Optional[Dict]/Dict knobs (job_env always; asset_mounts
+                # when present — None default must not hit type(cur)(v))
+                if not isinstance(v, dict):
+                    raise ValueError(f"RemoteConfig.{k} must be a dict, got {v!r}")
                 setattr(cfg, k, dict(v))
             else:
                 setattr(cfg, k, type(cur)(v))
@@ -208,6 +220,14 @@ class RemoteConfig:
                              "submit_retry_initial_s")
         if self.max_prep_parallel < 1:
             raise ValueError("RemoteConfig.max_prep_parallel must be >= 1")
+        if self.asset_mounts is not None:
+            for m_name, m_uri in self.asset_mounts.items():
+                if (not m_name or not isinstance(m_uri, str)
+                        or not m_uri.startswith("obs://")):
+                    raise ValueError(
+                        f"RemoteConfig.asset_mounts entries must be "
+                        f"{{name: obs:// uri}}, got "
+                        f"{m_name!r}: {m_uri!r}")
 
 
 class RemoteExecutor(ProxyRunner):
@@ -602,7 +622,9 @@ class RemoteExecutor(ProxyRunner):
         while True:
             attempt += 1
             try:
-                return self.job_api.submit(name=name, command=command, env=env)
+                return self.job_api.submit(name=name, command=command,
+                                           env=env,
+                                           asset_mounts=self.remote.asset_mounts)
             except TransientSubmitError as e:
                 if time.time() >= deadline:
                     raise RuntimeError(

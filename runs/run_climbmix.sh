@@ -158,6 +158,10 @@ REMOTE_STORAGE_KIND="${REMOTE_STORAGE_KIND:-moxing}"  # 容器内存储后端
 REMOTE_STORAGE_ROOT="${REMOTE_STORAGE_ROOT:-}"    # mock 后端专用: 假 OBS 根目录
 REMOTE_JOB_TIMEOUT_H="${REMOTE_JOB_TIMEOUT_H:-6}" # 单作业超时 (小时)
 REMOTE_CODE_WHEELS="${REMOTE_CODE_WHEELS:-}"  # 离线 wheel 本地路径 (逗号分隔, executor 自动补传)
+# per-launch 直挂资产 (JSON 对象 {"name":"obs://..."}), 替换平台配置的全局
+# asset_mounts — search 舰队只挂自己要的 (d20/tokenizer/eval_*), 不带 embed
+# 专属的 stella/pool/d28。空 = 继承全局 (兼容旧行为)。
+REMOTE_ASSET_MOUNTS="${REMOTE_ASSET_MOUNTS:-}"
 
 # ── HF download endpoint ──
 # The managed runtime's egress proxy selectively rejects Python's bare
@@ -272,7 +276,7 @@ if [ "$REMOTE_ENABLED" = "1" ]; then
            REMOTE_POOL_NAME REMOTE_NPU_PER_JOB REMOTE_MAX_JOBS \
            REMOTE_SUBMIT_RETRY_H REMOTE_MAX_PREP REMOTE_LOCAL_PARALLEL \
            REMOTE_STORAGE_KIND REMOTE_STORAGE_ROOT REMOTE_JOB_TIMEOUT_H \
-           REMOTE_CODE_WHEELS
+           REMOTE_CODE_WHEELS REMOTE_ASSET_MOUNTS
     python3 - "$REMOTE_CONFIG_PATH" "$REMOTE_PLATFORM_CONFIG" "$REMOTE_IMAGE" "$REMOTE_FLAVOR" <<'PYEOF'
 import json, sys, os
 cfg_path, platform_config, image, flavor = sys.argv[1:5]
@@ -297,6 +301,17 @@ cfg = {
 wheels = [w for w in (os.environ.get("REMOTE_CODE_WHEELS") or "").split(",") if w]
 if wheels:
     cfg["code_wheels"] = wheels
+am_raw = os.environ.get("REMOTE_ASSET_MOUNTS") or ""
+if am_raw.strip():
+    am = json.loads(am_raw)
+    if (not isinstance(am, dict)
+            or not all(isinstance(k, str) and k
+                       and isinstance(v, str) and v.startswith("obs://")
+                       for k, v in am.items())):
+        print(f"✗ REMOTE_ASSET_MOUNTS must be a JSON object "
+              f"{{name: obs://...}} (got: {am_raw[:200]})", file=sys.stderr)
+        sys.exit(1)
+    cfg["asset_mounts"] = am
 if os.environ["REMOTE_BACKEND"] != "mock" and os.environ["REMOTE_STORAGE_KIND"] != "local":
     # Real backend fail-fast: resolve the backend bundle + run its
     # validate() HERE, not mid-search (gateway/auth/image mistakes die

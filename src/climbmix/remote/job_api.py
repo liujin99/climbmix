@@ -52,7 +52,15 @@ class TransientSubmitError(Exception):
 class JobAPI(Protocol):
     def submit(self, name: str, command: List[str],
                env: Optional[Dict[str, str]] = None,
-               workdir: Optional[str] = None) -> str: ...
+               workdir: Optional[str] = None,
+               asset_mounts: Optional[Dict[str, str]] = None) -> str: ...
+    # asset_mounts: optional PER-LAUNCH direct mounts ({name: obs uri})
+    # that REPLACE the backend config's global asset mounts for THIS
+    # submit only (None = the global set). Job-class-specific assets
+    # stage into their own jobs without living in the global config —
+    # where every job class would stage them. Backends without the
+    # concept may ignore it (backends implementing it document the
+    # replace semantics in their submit docstring).
     def status(self, job_id: str) -> JobStatus: ...
     def logs(self, job_id: str, tail: int = 50) -> str: ...
     def cancel(self, job_id: str) -> None: ...
@@ -83,6 +91,11 @@ class MockJobAPI:
         os.makedirs(self._log_dir, exist_ok=True)
         self.submit_count = 0
         self.submit_attempts = 0
+        # per-launch asset_mounts seen per submit (None = the caller
+        # let the backend use its global config mounts); recorded for
+        # assertions — the mock doesn't stage anything, it just notes
+        # what a real backend would have staged.
+        self.submitted_mounts: List[Optional[Dict[str, str]]] = []
         # Dynamic capacity model (tests simulate the fluctuating shared
         # pool): max_job_slots = the pool's concurrent-job capacity. None
         # disables the model entirely (free_job_slots() -> None, submit is
@@ -119,9 +132,12 @@ class MockJobAPI:
 
     def submit(self, name: str, command: List[str],
                env: Optional[Dict[str, str]] = None,
-               workdir: Optional[str] = None) -> str:
+               workdir: Optional[str] = None,
+               asset_mounts: Optional[Dict[str, str]] = None) -> str:
         with self._lock:
             self.submit_attempts += 1
+            self.submitted_mounts.append(
+                dict(asset_mounts) if asset_mounts else None)
             if self.fail_submits_remaining > 0:
                 self.fail_submits_remaining -= 1
                 raise TransientSubmitError(
