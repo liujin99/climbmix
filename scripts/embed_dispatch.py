@@ -502,6 +502,14 @@ def dispatch_unit(unit_id, shards, job_api, obs, args, model_dir,
                      "embed.log"):
             uri = f"{result_uri}/{name}"
             if obs.stat(uri):
+                if name == "partial_block.npz" and args.compare_local is None:
+                    # 7.5 GB per unit with NO consumer in wave mode (the
+                    # merge re-downloads from OBS itself; only the smoke's
+                    # --compare-local reads the local copy) — and the
+                    # download would hold _OBS_LOCK, stalling every
+                    # sibling unit's polls and submits for its duration.
+                    # The stat above still gates its OBS presence.
+                    continue
                 obs.download_file(uri, os.path.join(out_dir, name))
             elif name in ("result.json", "manifest.json", "partial_block.npz"):
                 print(f"[{unit_id}] MISSING {name} at {uri}")
