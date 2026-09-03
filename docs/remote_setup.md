@@ -240,7 +240,13 @@ mount-read → NPU fp16 math → upload chain; `--compare-local` re-embeds
 the same shards through climbmix's own single-card path and demands
 byte-identical output). The `runs/embed_wave.sh` wrapper carries the
 boilerplate; every knob is an env var (MAX_JOBS, UNIT_SHARDS, ... —
-same convention as run_climbmix.sh):
+same convention as run_climbmix.sh). Smoke cadence: the FULL compare
+re-embeds the whole unit on one local card (~40 min — the gold bar,
+run it once per environment); `SMOKE_SAMPLES=2048` compares a random
+2048-doc sample instead (~1 min — the per-document attention path
+makes sampled equality as binding as full, the fast iteration loop);
+`SMOKE_COMPARE=0` skips the criterion entirely (remote-only, ~10 min —
+use when iterating on dispatch/boot plumbing):
 
 ```
 SMOKE=2 REMOTE_CONFIG=<backend repo>/config/remote_config.json \

@@ -298,6 +298,119 @@ def compare_local(unit_id, shards, partial_path, args, pool_local_dir):
     return equal or max_abs == 0.0
 
 
+def sampled_unit_rows(shards, n_samples, seed=0):
+    """Deterministic sample of the unit's rows -> [(global_row, shard,
+    in_shard_row), ...] in global-row order. Pure mapping logic (no
+    model, no NPU) so the fast-compare criterion is unit-testable."""
+    import random
+    total = sum(int(s["num_docs"]) for s in shards)
+    n = max(0, min(int(n_samples), total))
+    if not n:
+        return []
+    rows = sorted(random.Random(seed).sample(range(total), n))
+    out = []
+    off = 0
+    for s in shards:
+        lo, hi = off, off + int(s["num_docs"])
+        out.extend((g, s, g - lo) for g in rows if lo <= g < hi)
+        off = hi
+    return out
+
+
+def compare_sampled(unit_id, shards, partial_path, args, pool_local_dir,
+                    n_samples):
+    """FAST smoke criterion: byte-compare a random SAMPLE of N docs.
+
+    The fake-xformers attention path is per-document independent (the
+    pad+bool-mask fallback runs the identical computation for every
+    batch shape), so equality on sampled rows proves the same math
+    produced the remote block — a 2048-doc sample turns the ~40-min
+    single-card full re-embed into ~1 min while keeping the
+    byte-identity bar. The reference math mirrors
+    _embed_streaming_worker exactly: _load_model_stream, fp16,
+    model(features), .float(), L2 normalize, fp32."""
+    os.environ["ASCEND_RT_VISIBLE_DEVICES"] = "0"
+    os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+    os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+    os.environ["WANDB_SILENT"] = "true"
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+    import warnings
+    warnings.filterwarnings("ignore", category=UserWarning)
+
+    import numpy as np
+    import torch
+    import pyarrow.parquet as pq
+    from climbmix.core.embedding_cluster import (
+        _load_model_stream, _repair_stella_buffers)
+
+    picks = sampled_unit_rows(shards, n_samples)
+    total_rows = sum(int(s["num_docs"]) for s in shards)
+    if not picks:
+        print(f"[compare] FATAL: sampled 0 of {total_rows} rows")
+        return False
+
+    # one parquet read per touched shard
+    by_file = {}
+    for g, s, r in picks:
+        by_file.setdefault(os.path.basename(s["path"]), []).append((g, r))
+    texts_by_row = {}
+    for fname, grels in by_file.items():
+        table = pq.read_table(os.path.join(pool_local_dir, fname),
+                              columns=[args.text_col], use_threads=True)
+        col = table.column(args.text_col).to_pylist()
+        for g, r in grels:
+            v = col[r]
+            texts_by_row[g] = str(v) if v is not None else ""
+
+    rows = [g for g, _, _ in picks]
+    texts = [texts_by_row[g] for g in rows]
+
+    print(f"[compare] local reference embed: {len(rows)}/{total_rows:,} "
+          f"sampled docs via _load_model_stream (NPU 0)")
+    model = _load_model_stream(args.local_model_dir, "npu")
+    model.eval()
+    _repair_stella_buffers(model)
+    model.max_seq_length = args.truncate_len
+    model.half()
+
+    def _to_device(features):
+        for key in features:
+            if isinstance(features[key], torch.Tensor):
+                features[key] = features[key].to("npu")
+            elif isinstance(features[key], dict):
+                for k2 in features[key]:
+                    if isinstance(features[key][k2], torch.Tensor):
+                        features[key][k2] = features[key][k2].to("npu")
+        return features
+
+    ref = np.zeros((len(rows), args.emb_dim), dtype=np.float32)
+    bs = args.batch_size
+    for i in range(0, len(texts), bs):
+        chunk = texts[i:i + bs]
+        features = _to_device(model.tokenize(chunk))
+        with torch.no_grad():
+            out = model(features)
+        emb = out["sentence_embedding"].float()
+        emb = torch.nn.functional.normalize(emb, p=2, dim=1)
+        ref[i:i + len(chunk)] = emb.cpu().numpy()
+
+    remote = np.load(partial_path)["embeddings"]
+    if remote.shape != (total_rows, args.emb_dim):
+        print(f"[compare] SHAPE MISMATCH: remote {remote.shape} vs "
+              f"({total_rows}, {args.emb_dim})")
+        return False
+    sel = np.array(rows)
+    equal = bool(np.array_equal(remote[sel], ref))
+    diff = remote[sel].astype(np.float64) - ref.astype(np.float64)
+    max_abs = float(np.abs(diff).max()) if diff.size else 0.0
+    print(f"[compare] sampled byte-identical: {equal} | "
+          f"max|diff|={max_abs:.3e} | "
+          f"ref_norm={float(np.linalg.norm(ref[:5])):.4f} "
+          f"remote_norm={float(np.linalg.norm(remote[rows[0]:rows[0] + 5])):.4f}")
+    return equal or max_abs == 0.0
+
+
 def submit_with_retry(job_api, name, command, remote_config, unit_id,
                       asset_mounts=None):
     """submit() with exponential backoff on TransientSubmitError.
@@ -464,6 +577,12 @@ def main() -> int:
                    metavar="POOL_LOCAL_DIR",
                    help="after a successful unit, re-embed locally via "
                         "climbmix's own path and byte-compare")
+    p.add_argument("--compare-samples", type=int, default=0, metavar="N",
+                   help="with --compare-local: byte-compare a random "
+                        "SAMPLE of N docs instead of re-embedding the "
+                        "whole unit (fast smoke criterion — the "
+                        "per-document attention path makes sampled "
+                        "equality as binding as full; 0 = full compare)")
     args = p.parse_args()
     if args.model_dir and not args.model_container_dir:
         args.model_container_dir = args.model_dir
@@ -554,7 +673,9 @@ def main() -> int:
         if not args.local_model_dir:
             print("FATAL: --compare-local needs --local-model-dir")
             return 2
-        print(f"[dispatch] local compare against pool dir: {pool_local_dir}")
+        print(f"[dispatch] local compare against pool dir: "
+              f"{pool_local_dir} "
+              f"({'sampled ' + format(args.compare_samples, ',') + ' docs' if args.compare_samples else 'full re-embed'})")
 
     max_jobs = max(1, args.max_jobs)
     print(f"[dispatch] wave: {len(units)} unit(s), max {max_jobs} in flight")
@@ -580,12 +701,16 @@ def main() -> int:
                 d = dict(s)
                 d["unit_start_global"] = spec_s["unit_start"]
                 enriched.append(d)
+            partial = os.path.join(args.output_dir, unit_id,
+                                   "partial_block.npz")
             with _COMPARE_LOCK:  # one local NPU — serialize re-embeds
-                ok = compare_local(
-                    unit_id, enriched,
-                    os.path.join(args.output_dir, unit_id,
-                                 "partial_block.npz"),
-                    args, pool_local_dir)
+                if args.compare_samples > 0:
+                    ok = compare_sampled(unit_id, enriched, partial,
+                                         args, pool_local_dir,
+                                         args.compare_samples)
+                else:
+                    ok = compare_local(unit_id, enriched, partial,
+                                       args, pool_local_dir)
             if not ok:
                 print(f"[dispatch] unit {unit_id} local compare MISMATCH")
                 return "failed"

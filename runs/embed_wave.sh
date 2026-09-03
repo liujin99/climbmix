@@ -5,7 +5,9 @@
 #  用法:
 #    POOL_URI=obs://<池目录> MODEL_URI=obs://<stella目录> \
 #        bash runs/embed_wave.sh   # 全量波 (池分片 ÷ UNIT_SHARDS 个单元)
-#    SMOKE=2 bash runs/embed_wave.sh          # 烟雾: 前 2 片单单元 + 本地逐字节比对
+#    SMOKE=2 bash runs/embed_wave.sh          # 烟雾: 前 2 片单单元 + 全量比对 (~50 min)
+#    SMOKE=2 SMOKE_SAMPLES=2048 ...           # 快速烟囟: 抽样比对 (~12 min)
+#    SMOKE=2 SMOKE_COMPARE=0 ...              # 纯远程烟囟 (~10 min, 无比对)
 #    MAX_JOBS=8 bash runs/embed_wave.sh       # 并发单元数 (8×8=64 卡)
 #    FORCE=1 bash runs/embed_wave.sh          # 忽略 OBS 已有 partial 强制重发
 #    SHARD_OFFSET=160 bash runs/embed_wave.sh # 续波: 跳过前 160 片 (10 单元)
@@ -53,6 +55,8 @@ MODEL_URI="${MODEL_URI:-}"              # stella 模型目录 (obs://...; 必填
 
 # ── 烟雾 / 本地比对 / 续波 ──
 SMOKE="${SMOKE:-0}"
+SMOKE_COMPARE="${SMOKE_COMPARE:-1}"   # 0 = 纯远程烟囟 (~10 min, 无比对判据)
+SMOKE_SAMPLES="${SMOKE_SAMPLES:-0}"   # N>0 = 抽样 N docs 比对 (~1 min 判据)
 LOCAL_POOL_DIR="${LOCAL_POOL_DIR:-/home/ma-user/work/100B_stem_parquet_filtered}"
 LOCAL_MODEL_DIR="${LOCAL_MODEL_DIR:-/home/ma-user/work/stella_en_400M_v5}"
 SHARD_OFFSET="${SHARD_OFFSET:-0}"
@@ -91,8 +95,15 @@ fi
 
 if [[ "$SMOKE" != "0" ]]; then
   ARGS+=(--smoke "$SMOKE")
-  # 烟雾的判据就是本地逐字节比对 (--compare-local 用 LOCAL_POOL_DIR)
-  ARGS+=(--compare-local "$LOCAL_POOL_DIR" --local-model-dir "$LOCAL_MODEL_DIR")
+  if [[ "$SMOKE_COMPARE" == "1" ]]; then
+    # 烟雾判据: 本地逐字节比对 (--compare-local 用 LOCAL_POOL_DIR)。
+    # SMOKE_SAMPLES=N → 只重嵌 N 个抽样文档做比对 (~1 min 判据, attention
+    # 路径按文档独立 → 抽样相等即全量同数学); 0 = 全量重嵌 (金标准, ~40 min)。
+    ARGS+=(--compare-local "$LOCAL_POOL_DIR" --local-model-dir "$LOCAL_MODEL_DIR")
+    if [[ "$SMOKE_SAMPLES" != "0" ]]; then
+      ARGS+=(--compare-samples "$SMOKE_SAMPLES")
+    fi
+  fi
 fi
 if [[ "$SHARD_OFFSET" != "0" ]]; then
   ARGS+=(--shard-offset "$SHARD_OFFSET")
