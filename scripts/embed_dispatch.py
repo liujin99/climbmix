@@ -10,15 +10,15 @@ mount. Unit granularity = progress banked (a crashed job re-embeds
 only its own in-flight shards) and retry cost stays bounded.
 
 Layout (OBS, under the RemoteConfig obs_prefix — point the user config
-at the PRODUCTION prefix via `ma_setup.py --obs-prefix` before a full
-run; the smoke can stay on the calibration prefix):
+at the PRODUCTION prefix (the backend config's obs-prefix knob) before
+a full run; the smoke can stay on the calibration prefix):
   {prefix}/embed_units/{unit_id}/spec.json        — written here
   {prefix}/embed_units/{unit_id}/result/          — worker uploads
 The dispatcher is fresh-prefix self-sufficient: it uploads the worker
 bundle to {prefix}/assets and the assets_big placeholder itself.
 
 Where the FINAL cache lives: the merged pool cache is a Step-1 cache
-hit written at `<EMBEDDING_CACHE_DIR>/<content-key>/embedding_cache.npz`
+hit written at `<EMBEDDING_CACHE_DIR>/<content-key>/embedding_cache.npy`
 (the key hashes shard names+sizes+model+truncate-len — see
 CLIMBPipeline._pool_embedding_cache_dir). Set EMBEDDING_CACHE_DIR to
 the production tree (e.g. <data-mix-run>/climbmix/cache/embeddings)
@@ -39,9 +39,9 @@ non-standard layouts.)
 
 Smoke (fast iteration — one 8-card job, 2 shards, ~10 min end to end):
   python3 scripts/embed_dispatch.py \
-      --remote-config climbmix-ma/config/remote_config.ma.json \
+      --remote-config <backend repo>/config/remote_config.json \
       --shard-info /home/ma-user/work/100B_stem_parquet_filtered/metadata_shard_info.json \
-      --smoke 2 --flavor modelarts.pool.visual.8xlarge --npu-per-job 8 \
+      --smoke 2 --flavor <backend 8-card flavor> --npu-per-job 8 \
       --output-dir /tmp/embed_smoke \
       --local-model-dir <server-local stella dir> \
       --compare-local /home/ma-user/work/100B_stem_parquet_filtered
@@ -87,7 +87,6 @@ _SRC = os.path.normpath(os.path.join(_HERE, "..", "src"))
 if os.path.isdir(_SRC) and _SRC not in sys.path:
     sys.path.insert(0, _SRC)  # source-tree fallback (no pip install needed)
 
-CONTAINER_INPUT_BASE = "/home/ma-user/modelarts/inputs"
 DEFAULT_CONTAINER_WORK_ROOT = "/home/ma-user/work/climbmix_exp"
 POOL_MOUNT = "pool"      # obs.asset_mounts key for the parquet pool
 MODEL_MOUNT = "stella"   # obs.asset_mounts key for the model dir
@@ -137,7 +136,7 @@ def ensure_worker_bundle(obs, prefix):
     The backend's boot shell points the job's code dir at
     {prefix}/assets (the adapter's default code_dir), so a FRESH
     prefix needs the three files there BEFORE the first submit (the
-    gateway also validates the dir exists, ModelArts.2802). Mirrors
+    gateway also validates the dir exists). Mirrors
     RemoteExecutor._stage_assets: local temp + atomic rename, then
     upload — concurrent dispatchers must never read a half-written
     file. The upload happens on every dispatcher run (idempotent
@@ -163,8 +162,8 @@ def ensure_worker_bundle(obs, prefix):
 
 
 def ensure_assets_big(obs, prefix):
-    """The gateway validates EVERY input mount as an existing OBS dir
-    (ModelArts.2791), and the adapter mounts {prefix}/assets_big — a
+    """The gateway validates EVERY input mount as an existing OBS dir,
+    and the adapter mounts {prefix}/assets_big — a
     fresh prefix needs the dir to exist. Embed jobs never read it (a
     placeholder file is inert: the boot shell skips unknown entries)."""
     marker = f"{prefix.rstrip('/')}/assets_big/.climbmix_placeholder"
@@ -192,7 +191,7 @@ def build_spec(unit_id, shards, args, pool_uri, model_dir):
     spec_shards = []
     for s in shards:
         spec_shards.append({
-            "path": f"{CONTAINER_INPUT_BASE}/{POOL_MOUNT}_0/"
+            "path": f"{args.container_input_base}/{POOL_MOUNT}_0/"
                     f"{os.path.basename(s['path'])}",
             "num_docs": int(s["num_docs"]),
             "unit_start": unit_start,
@@ -438,8 +437,8 @@ def main() -> int:
                    help="skip the first N shards (partial waves)")
     p.add_argument("--npu-per-job", type=int, default=8)
     p.add_argument("--flavor", default="",
-                   help="job flavor override (e.g. the 8-card "
-                        "modelarts.pool.visual.8xlarge)")
+                   help="job flavor override (e.g. the backend's 8-card "
+                        "flavor; empty = the backend config's default)")
     p.add_argument("--text-col", default="text")
     p.add_argument("--model", default=DEFAULT_MODEL,
                    help="embedding model NAME (goes into the spec -> "
@@ -478,6 +477,17 @@ def main() -> int:
 
     args.obs_prefix = remote_config.obs_prefix
 
+    # where staged input mounts land in the container ({base}/{name}_0)
+    # — a backend-declared convention (platform-specific value lives in
+    # the backend repo, never here)
+    args.container_input_base = getattr(bundle, "container_input_base",
+                                        "") or ""
+    if not args.container_input_base:
+        print("FATAL: the backend bundle provides no container_input_base "
+              "(the container dir staged mounts land under) — embed jobs "
+              "read the pool/model through staged mounts")
+        return 2
+
     mounts = asset_mount_uris(remote_config, bundle)
     args.pool_uri = args.pool_uri or mounts.get(POOL_MOUNT)
     model_uri = args.model_uri or mounts.get(MODEL_MOUNT)
@@ -490,7 +500,7 @@ def main() -> int:
     # embed wave's own assets stage into ITS jobs only
     launch_mounts = {POOL_MOUNT: args.pool_uri}
     if model_uri:
-        model_dir = f"{CONTAINER_INPUT_BASE}/{MODEL_MOUNT}_0"
+        model_dir = f"{args.container_input_base}/{MODEL_MOUNT}_0"
         launch_mounts[MODEL_MOUNT] = model_uri
     elif args.model_container_dir:
         # explicit override (mock simulation / non-standard layouts)

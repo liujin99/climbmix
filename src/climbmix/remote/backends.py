@@ -12,7 +12,7 @@ the auth/token plumbing, and the deployment's platform identity values).
 A backend packages itself as a BackendBundle:
 
   make_job_api(remote_config)  -> JobAPI implementation (submit/status/
-                                  logs/cancel/free_job_slots)
+                                   logs/cancel/free_job_slots)
   make_obs_storage(remote_config) -> ObsStorage implementation
   default_worker_path          -> container path of remote_worker.py under
                                   the platform's code-delivery convention
@@ -21,6 +21,12 @@ A backend packages itself as a BackendBundle:
   validate(remote_config)      -> optional fail-fast hook: resolve/verify
                                   the backend's platform config at launch
                                   (None = nothing to check)
+  asset_mounts(remote_config)  -> optional {name: obs uri} the platform
+                                  stages into every job (the global set)
+  container_input_base        -> container dir where staged input mounts
+                                  land ({base}/{name}_0 — embed waves read
+                                  their pool/model through it; "" = the
+                                  backend has no staging convention)
 
 Registration (either works):
   1. RemoteConfig.backend_module = "pkg.mod:attr" — attr is a callable
@@ -37,6 +43,7 @@ backend") for the full contract.
 """
 
 import importlib
+import os
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional
 
@@ -59,6 +66,10 @@ class BackendBundle:
     # library) — check tooling reports these instead of the
     # {prefix}/assets_big copies they replace
     asset_mounts: Optional[Callable[[object], Dict[str, str]]] = None
+    # container dir where the platform's staged input mounts land
+    # ({base}/{name}_0); the platform-specific value lives in the
+    # backend repo — the public side only ever receives it
+    container_input_base: str = ""
 
 
 def create_mock_backend(remote_config):
@@ -71,8 +82,14 @@ def create_mock_backend(remote_config):
     def make_obs_storage(rc):
         return MockObsStorage(rc.storage_root)
 
-    return BackendBundle(make_job_api=make_job_api,
-                         make_obs_storage=make_obs_storage)
+    # the simulated container's staging area: <fake obs root>/inputs
+    # (nothing actually stages in the mock, but specs get honest paths
+    # a future reading simulation could pre-populate)
+    return BackendBundle(
+        make_job_api=make_job_api,
+        make_obs_storage=make_obs_storage,
+        container_input_base=os.path.join(
+            os.path.abspath(remote_config.storage_root or "."), "inputs"))
 
 
 def _load_from_module_spec(spec: str) -> Callable:

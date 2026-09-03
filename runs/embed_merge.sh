@@ -21,7 +21,7 @@
 #  只嵌新数据) + 重跑本脚本 (新 key), 增量成本 = 嵌新数据 + 一次合并。
 #
 #  磁盘: 缓存所在文件系统 ≈ 池字节 (~475 GB) + 一个在飞单元 (~7.5 GB);
-#  本地盘放不下时 EMBEDDING_CACHE_DIR 可指 OBS 挂载路径 (如 /l00916525/...)
+#  本地盘放不下时 EMBEDDING_CACHE_DIR 可指 OBS 挂载路径 (如 <挂载根>/...)
 #  — 合并经挂载写, Step-1 经挂载 mmap (慢一点, 但本地零占用)。
 #
 #  注意:
@@ -34,7 +34,8 @@ set -euo pipefail
 
 CLIMBMIX_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
-REMOTE_CONFIG="${REMOTE_CONFIG:-$CLIMBMIX_DIR/../climbmix-ma/config/remote_config.ma.json}"
+# 后端 RemoteConfig JSON (必填 — 值含平台身份, 不在本仓)
+REMOTE_CONFIG="${REMOTE_CONFIG:-}"
 SHARD_INFO="${SHARD_INFO:-/home/ma-user/work/100B_stem_parquet_filtered/metadata_shard_info.json}"
 DATA_DIR="${DATA_DIR:-/home/ma-user/work/100B_stem_parquet_filtered}"
 # 与 run_climbmix.sh 的 EMBEDDING_CACHE_DIR 同名同默认 — 两边指同一个地方
@@ -50,6 +51,11 @@ SKIP_UNITS="${SKIP_UNITS:-}"
 KEEP_DOWNLOADS="${KEEP_DOWNLOADS:-0}"
 UPLOAD_BACKUP="${UPLOAD_BACKUP:-}"
 FORCE="${FORCE:-0}"
+
+if [[ -z "$REMOTE_CONFIG" ]]; then
+  echo "[embed_merge] FATAL: REMOTE_CONFIG 未设置 (后端 RemoteConfig JSON 路径)" >&2
+  exit 2
+fi
 
 ARGS=(
   --remote-config "$REMOTE_CONFIG"

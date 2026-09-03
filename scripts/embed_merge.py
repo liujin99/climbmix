@@ -23,7 +23,7 @@ its parquet set; sizes are not exposed through the obs protocol).
 
 Usage (after the wave drains green):
   python3 scripts/embed_merge.py \
-      --remote-config climbmix-ma/config/remote_config.ma.json \
+      --remote-config <backend repo>/config/remote_config.json \
       --shard-info <pool>/metadata_shard_info.json \
       --data-dir <LOCAL pool dir> \
       --cache-dir $EMBEDDING_CACHE_DIR
@@ -72,9 +72,9 @@ Re-use semantics (why this cache is a one-time investment):
   - Old-key caches stay on disk after pool growth (history is the
     price of stability); delete them once the new pool is trusted.
   - --cache-dir may point at a FUSE-mounted OBS path (e.g.
-    /l00916525/...) when local disk can't hold ~475 GB: merge writes
-    through the mount, Step 1 mmaps through it (slower, but zero
-    local disk beyond one unit at a time).
+    <obs mount root>/...) when local disk can't hold ~475 GB: merge
+    writes through the mount, Step 1 mmaps through it (slower, but
+    zero local disk beyond one unit at a time).
 
 Sample-mode caches (embedding_sample_size > 0) are a different code
 path (subsampled rows) — this tool only merges FULL-pool units.

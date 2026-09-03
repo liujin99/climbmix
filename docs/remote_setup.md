@@ -163,7 +163,7 @@ Prerequisites (once, on the submit host):
   ├── eval_bundle/   eval datasets (bundle)
   └── eval_stem/     eval datasets (stem)
 
-  python3 climbmix-ma/scripts/ma_setup.py \
+  python3 <backend repo>/scripts/setup.py \
       --resource-package obs://<bucket>/<you>/climbmix_resource_package ...
   ```
 
@@ -182,8 +182,9 @@ Prerequisites (once, on the submit host):
 - The dispatcher is fresh-prefix self-sufficient (uploads the worker
   bundle to `{prefix}/assets` + the `assets_big` placeholder the
   gateway validates); the obs_prefix itself is the user config knob —
-  `ma_setup.py --obs-prefix obs://<bucket>/<prod area>` before a full
-  production run, so `embed_units/` lands in the production area.
+  set it to the production area (the backend config's obs-prefix
+  option) before a full production run, so `embed_units/` lands in the
+  production area.
 
 Where the finished embeddings live (three tiers):
 1. Unit partials (~475 GB total) stay on OBS under
@@ -200,7 +201,8 @@ Where the finished embeddings live (three tiers):
    downloaded unit ~7.5 GB, no second copy) and the cache is a raw
    .npy that Step 1 mmaps — a pool-sized cache never materializes in
    RAM. That also means `EMBEDDING_CACHE_DIR` MAY point at a
-   FUSE-mounted OBS path (e.g. /l00916525/...) when local disk can't
+    FUSE-mounted OBS path (e.g. <obs mount root>/...) when local disk
+    can't
    hold ~475 GB: the merge writes through the mount and Step 1 mmaps
    through it (slower than local NVMe, but zero local footprint).
     Legacy single-node `.npz` caches keep working (picked when no .npy
@@ -241,15 +243,16 @@ boilerplate; every knob is an env var (MAX_JOBS, UNIT_SHARDS, ... —
 same convention as run_climbmix.sh):
 
 ```
-SMOKE=2 POOL_URI=obs://<bucket>/<pool dir> \
+SMOKE=2 REMOTE_CONFIG=<backend repo>/config/remote_config.json \
+    POOL_URI=obs://<bucket>/<pool dir> \
     MODEL_URI=obs://<bucket>/<pkg>/stella bash runs/embed_wave.sh
 # 等价的裸命令 (wrapper 内部执行):
 # python3 scripts/embed_dispatch.py \
-#     --remote-config climbmix-ma/config/remote_config.ma.json \
+#     --remote-config <backend repo>/config/remote_config.json \
 #     --shard-info <pool>/metadata_shard_info.json \
 #     --pool-uri obs://<bucket>/<pool dir> \
 #     --model-uri obs://<bucket>/<pkg>/stella \
-#     --smoke 2 --flavor modelarts.pool.visual.8xlarge --npu-per-job 8 \
+#     --smoke 2 --flavor <backend 8-card flavor> --npu-per-job 8 \
 #     --output-dir /tmp/embed_smoke \
 #     --local-model-dir <server-local stella dir> \
 #     --compare-local <server-local pool dir>

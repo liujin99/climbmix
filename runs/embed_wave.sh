@@ -28,7 +28,8 @@ set -euo pipefail
 
 CLIMBMIX_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
-REMOTE_CONFIG="${REMOTE_CONFIG:-$CLIMBMIX_DIR/../climbmix-ma/config/remote_config.ma.json}"
+# 后端 RemoteConfig JSON (必填 — 值含平台身份, 不在本仓)
+REMOTE_CONFIG="${REMOTE_CONFIG:-}"
 SHARD_INFO="${SHARD_INFO:-/home/ma-user/work/100B_stem_parquet_filtered/metadata_shard_info.json}"
 OUTPUT_DIR="${OUTPUT_DIR:-$CLIMBMIX_DIR/cache/embed_wave}"
 
@@ -36,7 +37,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-$CLIMBMIX_DIR/cache/embed_wave}"
 UNIT_SHARDS="${UNIT_SHARDS:-16}"       # 每单元分片数
 MAX_JOBS="${MAX_JOBS:-6}"              # 并发单元数 (6×8=48 卡)
 NPU_PER_JOB="${NPU_PER_JOB:-8}"
-FLAVOR="${FLAVOR:-modelarts.pool.visual.8xlarge}"
+FLAVOR="${FLAVOR:-}"                   # 空 = 用后端配置的默认 flavor
 JOB_TIMEOUT_S="${JOB_TIMEOUT_S:-7200}"
 
 # ── 嵌入语义 (与 run_climbmix.sh 对齐) ──
@@ -64,7 +65,6 @@ ARGS=(
   --unit-shards "$UNIT_SHARDS"
   --max-jobs "$MAX_JOBS"
   --npu-per-job "$NPU_PER_JOB"
-  --flavor "$FLAVOR"
   --job-timeout-s "$JOB_TIMEOUT_S"
   --model "$EMBEDDING_MODEL"
   --text-col "$TEXT_COL"
@@ -72,6 +72,13 @@ ARGS=(
   --truncate-len "$TRUNCATE_LEN"
   --emb-dim "$EMB_DIM"
 )
+if [[ -z "$REMOTE_CONFIG" ]]; then
+  echo "[embed_wave] FATAL: REMOTE_CONFIG 未设置 (后端 RemoteConfig JSON 路径)" >&2
+  exit 2
+fi
+if [[ -n "$FLAVOR" ]]; then
+  ARGS+=(--flavor "$FLAVOR")
+fi
 if [[ -n "$POOL_URI" ]]; then
   ARGS+=(--pool-uri "$POOL_URI")
 else
