@@ -416,6 +416,27 @@ def validate_block(arr, ranges):
     return counts
 
 
+def atomic_savez(path, **arrays):
+    """Standalone twin of io_utils.atomic_savez — the container worker
+    imports nothing from climbmix. The write goes through an open file
+    handle because np.savez APPENDS .npz to string paths lacking it
+    (live container finding 2026-09-03: an inline ".npz.tmp" name made
+    savez silently write "<name>.npz.tmp.npz"; os.replace then
+    FileNotFoundError'd after 2x18 min of encoding)."""
+    import numpy as np
+    tmp = path + ".tmp.npz"
+    try:
+        with open(tmp, "wb") as f:
+            np.savez(f, **arrays)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def parent_main(args) -> int:
     with open(args.spec_path) as f:
         spec = json.load(f)
@@ -507,9 +528,8 @@ def parent_main(args) -> int:
             res["error"] = f"validation failed: {counts}"
             return finish(1)
 
-        block_path = os.path.join(work, "partial_block.npz.tmp")
-        np.savez(block_path, embeddings=block)
-        os.replace(block_path, os.path.join(work, "partial_block.npz"))
+        block_path = os.path.join(work, "partial_block.npz")
+        atomic_savez(block_path, embeddings=block)
         manifest = {
             "unit_id": unit_id,
             "spec_version": SPEC_VERSION,
