@@ -157,6 +157,7 @@ REMOTE_MAX_PREP="${REMOTE_MAX_PREP:-4}"           # 本地混料/上传并发
 REMOTE_STORAGE_KIND="${REMOTE_STORAGE_KIND:-moxing}"  # 容器内存储后端
 REMOTE_STORAGE_ROOT="${REMOTE_STORAGE_ROOT:-}"    # mock 后端专用: 假 OBS 根目录
 REMOTE_JOB_TIMEOUT_H="${REMOTE_JOB_TIMEOUT_H:-6}" # 单作业超时 (小时)
+REMOTE_CODE_WHEELS="${REMOTE_CODE_WHEELS:-}"  # 离线 wheel 本地路径 (逗号分隔, executor 自动补传)
 
 # ── HF download endpoint ──
 # The managed runtime's egress proxy selectively rejects Python's bare
@@ -270,7 +271,8 @@ if [ "$REMOTE_ENABLED" = "1" ]; then
            REMOTE_PLATFORM_CONFIG REMOTE_IMAGE REMOTE_FLAVOR \
            REMOTE_POOL_NAME REMOTE_NPU_PER_JOB REMOTE_MAX_JOBS \
            REMOTE_SUBMIT_RETRY_H REMOTE_MAX_PREP REMOTE_LOCAL_PARALLEL \
-           REMOTE_STORAGE_KIND REMOTE_STORAGE_ROOT REMOTE_JOB_TIMEOUT_H
+           REMOTE_STORAGE_KIND REMOTE_STORAGE_ROOT REMOTE_JOB_TIMEOUT_H \
+           REMOTE_CODE_WHEELS
     python3 - "$REMOTE_CONFIG_PATH" "$REMOTE_PLATFORM_CONFIG" "$REMOTE_IMAGE" "$REMOTE_FLAVOR" <<'PYEOF'
 import json, sys, os
 cfg_path, platform_config, image, flavor = sys.argv[1:5]
@@ -292,6 +294,9 @@ cfg = {
     "job_timeout_s": float(os.environ["REMOTE_JOB_TIMEOUT_H"]) * 3600.0,
     "job_env": {"HF_ENDPOINT": os.environ["HF_ENDPOINT"]},
 }
+wheels = [w for w in (os.environ.get("REMOTE_CODE_WHEELS") or "").split(",") if w]
+if wheels:
+    cfg["code_wheels"] = wheels
 if os.environ["REMOTE_BACKEND"] != "mock" and os.environ["REMOTE_STORAGE_KIND"] != "local":
     # Real backend fail-fast: resolve the backend bundle + run its
     # validate() HERE, not mid-search (gateway/auth/image mistakes die

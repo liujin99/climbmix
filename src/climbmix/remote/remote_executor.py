@@ -38,11 +38,14 @@ scores it NaN and a resume re-runs it).
 """
 
 import glob
+import hashlib
 import json
 import os
 import queue
 import re
 import shutil
+import subprocess
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -149,6 +152,12 @@ class RemoteConfig:
     # Local staging dir for the worker assets bundle (default:
     # {repo}/cache/remote_assets — outside the fingerprinted output dir).
     assets_stage_dir: str = ""
+
+    # Platform wheel files (local paths, e.g. the aarch64 rustbpe wheel)
+    # uploaded to {obs_prefix}/assets/ when absent — offline containers
+    # pip-install missing deps from there. Upload-if-missing only: pin a
+    # new wheel by bumping its filename (they are version-named anyway).
+    code_wheels: List[str] = field(default_factory=list)
 
     @staticmethod
     def from_dict(d: Dict) -> "RemoteConfig":
@@ -263,6 +272,7 @@ class RemoteExecutor(ProxyRunner):
                 remote_config.worker_path = os.path.join(
                     self.assets_stage_dir, "remote_worker.py")
         self._ensure_assets_uploaded()
+        self._ensure_code_synced()
 
         print(f"  [RemoteExecutor] backend={remote_config.backend} "
               f"obs_prefix={remote_config.obs_prefix} "
@@ -343,6 +353,116 @@ class RemoteExecutor(ProxyRunner):
                 self.obs.upload_bytes(
                     b"placeholder - big assets are direct mounts or "
                     b"uploaded per docs/remote_setup.md", marker)
+
+    # ── nanochat code channel (auto-publish on every init) ──
+
+    def _git(self, repo: str, *args: str) -> str:
+        r = subprocess.run(["git", "-C", repo, *args],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(f"git {' '.join(args)} failed:\n{r.stderr}")
+        return r.stdout.strip()
+
+    def _ensure_code_synced(self) -> None:
+        """Publish the local nanochat-npu tree to {prefix}/assets (auto).
+
+        nanochat-npu is the one frequently-changing job input the worker
+        bundle does not cover, and job containers have no internet. The
+        master's tree (self.nanochat_dir, validated by ProxyRunner) is
+        tarred (excluding .git/__pycache__/pyc), its sha256 stored beside
+        the upload as a .sha256 sidecar, and the tar uploaded only when
+        the remote sidecar differs — a clean tree at the same commit is a
+        zero-transfer no-op via a local marker, so every dispatch can
+        call this unconditionally. A dirty tree always rebuilds (the
+        marker is only trusted for clean trees: git's status output does
+        not fingerprint file contents). Wheels (remote.code_wheels, e.g.
+        the aarch64 rustbpe wheel for offline pip) upload when absent.
+
+        Version policy stays with the master: this publishes the tree AS
+        IT SITS (no git pull) — the operator decides when to pull."""
+        name = os.path.basename(os.path.normpath(self.nanochat_dir))
+        if name != "nanochat-npu":
+            print(f"  [RemoteExecutor] WARNING: nanochat dir basename is "
+                  f"{name!r}, not 'nanochat-npu' — the boot extracts the "
+                  f"tar's top dir as-is and expects that name")
+        assets_uri = f"{self.remote.obs_prefix.rstrip('/')}/assets"
+        tar_uri = f"{assets_uri}/{name}.tar.gz"
+        sha_uri = tar_uri + ".sha256"
+        marker_path = os.path.join(self.assets_stage_dir,
+                                   ".code_sync_marker.json")
+
+        # A non-git dir (mock/test layouts) degrades to always-rebuild:
+        # no HEAD/dirty signal to trust, but the sha comparison still
+        # prevents re-UPLOADS. Real deployments are git clones.
+        try:
+            head = self._git(self.nanochat_dir, "rev-parse", "--short", "HEAD")
+            dirty = bool(self._git(self.nanochat_dir, "status", "--porcelain"))
+        except (RuntimeError, OSError):
+            head, dirty = "nogit", True
+        print(f"  [RemoteExecutor] nanochat-npu @ {head}"
+              + ("  (DIRTY — tar rebuilt, uncommitted edits ride along)"
+                 if dirty else "  (clean)"))
+
+        def _remote_sha() -> str:
+            try:
+                return self.obs.download_bytes(sha_uri).decode().strip()
+            except Exception:
+                return ""
+
+        # Fast path: clean tree at the same commit this host already
+        # published, and the remote still carries that exact tar.
+        if not dirty and os.path.isfile(marker_path):
+            try:
+                marker = json.load(open(marker_path))
+            except (OSError, ValueError):
+                marker = {}
+            if (marker.get("clean") and marker.get("head") == head
+                    and marker.get("sha")
+                    and _remote_sha() == marker["sha"]):
+                print(f"  [RemoteExecutor] code already published "
+                      f"(sha256:{marker['sha'][:16]}…) — skip")
+                self._sync_wheels(assets_uri)
+                return
+
+        with tempfile.TemporaryDirectory(prefix="climbmix_sync_") as td:
+            tar_path = os.path.join(td, f"{name}.tar.gz")
+            r = subprocess.run(
+                ["tar", "czf", tar_path, "--exclude=.git",
+                 "--exclude=__pycache__", "--exclude=*.pyc",
+                 "-C", os.path.dirname(
+                     os.path.normpath(self.nanochat_dir)), name])
+            if r.returncode != 0:
+                raise RuntimeError("tar of nanochat-npu failed")
+            with open(tar_path, "rb") as f:
+                sha = hashlib.sha256(f.read()).hexdigest()[:16]
+            with self._obs_lock:
+                if _remote_sha() == sha:
+                    print(f"  [RemoteExecutor] remote already at "
+                          f"sha256:{sha}… — skip tar upload")
+                else:
+                    self.obs.upload_file(tar_path, tar_uri)
+                    self.obs.upload_bytes((sha + "\n").encode(), sha_uri)
+                    print(f"  [RemoteExecutor] nanochat code published -> "
+                          f"{tar_uri} (sha256:{sha}…)")
+            # marker written regardless: it records what this tree
+            # publishes, clean or dirty (a clean tree may re-trust it;
+            # a dirty one never does)
+            tmp = marker_path + f".tmp.{os.getpid()}"
+            with open(tmp, "w") as f:
+                json.dump({"head": head, "clean": not dirty, "sha": sha}, f)
+            os.replace(tmp, marker_path)
+        self._sync_wheels(assets_uri)
+
+    def _sync_wheels(self, assets_uri: str) -> None:
+        for wheel in self.remote.code_wheels:
+            wheel = os.path.abspath(os.path.expanduser(wheel))
+            if not os.path.isfile(wheel):
+                raise FileNotFoundError(
+                    f"RemoteConfig.code_wheels: wheel not found: {wheel}")
+            dest = f"{assets_uri}/{os.path.basename(wheel)}"
+            if not self.obs.stat(dest):
+                self.obs.upload_file(wheel, dest)
+                print(f"  [RemoteExecutor] wheel -> {dest}")
 
     # ── OBS helpers ──
 
