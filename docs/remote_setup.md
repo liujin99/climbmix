@@ -141,6 +141,79 @@ for its boot shell's expected layout; `scripts/dispatch_remote.py
    5.3h incidentally and calibrates the pool-full error code.
 4. Green → `REMOTE_ENABLED=1 ... bash runs/run_climbmix.sh`.
 
+## 4b. Multi-node pool embedding (TODO E — `scripts/embed_dispatch.py`)
+
+The full-pool embedding cache (~116M docs, ~40h single-node) can be
+built as UNITS across the job fleet: each unit = `--unit-shards`
+parquet shards (default 16) embedded by one job, uploading
+`partial_block.npz` + `manifest.json` back through its result mount.
+Unit granularity = progress banked (a crashed job re-embeds only its
+own in-flight shards); a unit with a partial already on OBS is skipped
+on re-run (`--force` overrides). J jobs → ~40/J hours.
+
+Prerequisites (once, on the submit host):
+- The resource package — one OBS directory holding every static shared
+  asset, declared in ONE command (see the backend repo's README):
+
+  ```
+  climbmix_resource_package/          # upload once, team-shared
+  ├── d20/           base checkpoint  # d<depth> naming
+  ├── tokenizer/     tokenizer
+  ├── stella/        stella_en_400M_v5 model dir (this pipeline's embedder)
+  ├── eval_bundle/   eval datasets (bundle)
+  └── eval_stem/     eval datasets (stem)
+
+  python3 climbmix-ma/scripts/ma_setup.py \
+      --resource-package obs://<bucket>/<you>/climbmix_resource_package ...
+  ```
+
+  Each recognized dir becomes a DIRECT asset mount (zero duplicate
+  storage; the container has no network, so the pool and the model
+  MUST be reachable this way). The pool parquet set is data, not a
+  package asset — declare it separately:
+  `--asset-mount pool=obs://<bucket>/<pool dir>`.
+- The dispatcher is fresh-prefix self-sufficient (uploads the worker
+  bundle to `{prefix}/assets` + the `assets_big` placeholder the
+  gateway validates); the obs_prefix itself is the user config knob —
+  `ma_setup.py --obs-prefix obs://<bucket>/<prod area>` before a full
+  production run, so `embed_units/` lands in the production area.
+
+Where the finished embeddings live (three tiers):
+1. Unit partials (~475 GB total) stay on OBS under
+   `{obs_prefix}/embed_units/` — they are the DURABLE tier: a wiped
+   submit-host disk re-merges from them in ~1-2h instead of paying the
+   40h embed again. Do not delete after merging.
+2. The merged pool cache lands at
+   `<EMBEDDING_CACHE_DIR>/<content-key>/embedding_cache.npz` — the
+   exact path run_climbmix.sh Step 1 hits. Point `EMBEDDING_CACHE_DIR`
+   at the production tree (e.g. `<data-mix-run>/climbmix/cache/
+   embeddings`) and the cache investment lives with production.
+   Keep it on local disk (cache-hit `np.load`s 475 GB into RAM;
+   reading through the OBS FUSE mount would be slow).
+3. Optional: upload the merged npz to OBS as a redundancy copy
+   (overnight, mount-speed).
+
+Smoke (one 8-card job, 2 shards, ~10 min end to end — verifies the
+mount-read → NPU fp16 math → upload chain; `--compare-local` re-embeds
+the same shards through climbmix's own single-card path and demands
+byte-identical output):
+
+```
+python3 scripts/embed_dispatch.py \
+    --remote-config climbmix-ma/config/remote_config.ma.json \
+    --shard-info <pool>/metadata_shard_info.json \
+    --smoke 2 --flavor modelarts.pool.visual.8xlarge --npu-per-job 8 \
+    --output-dir /tmp/embed_smoke \
+    --local-model-dir <server-local stella dir> \
+    --compare-local <server-local pool dir>
+```
+
+Full pool: drop `--smoke`/`--compare-local` (1000 shards ÷ 16 = 63
+units; `--shard-offset` resumes partial waves). The merge into the
+canonical pool cache (memmap assemble + `atomic_savez` at the
+Step-1 cache key) is the follow-up step — smoke green first.
+
+
 ## Production launch (M5) — recommended knobs & calculation
 
 ### First production run (recommended 2026-08-28)
