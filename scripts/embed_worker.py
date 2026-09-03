@@ -401,6 +401,7 @@ def parent_main(args) -> int:
             "spec_version": SPEC_VERSION,
             "emb_dim": emb_dim,
             "total_rows": total_rows,
+            "model": spec.get("model", ""),
             "model_dir": spec["model_dir"],
             "truncate_len": int(spec.get("truncate_len", 512)),
             "batch_size": int(spec.get("batch_size", 512)),

@@ -52,13 +52,31 @@ Resume: a unit whose {result}/partial_block.npz already exists on OBS
 is SKIPPED (completed units are never re-embedded); --force re-dispatches
 anyway. Smoke units are exp-id-safe: they live under embed_units/, never
 touching the search experiment space.
+
+Wave mode (full pool): --max-jobs units run CONCURRENTLY (default 6 =
+48 cards at --npu-per-job 8; the pool is shared, don't take it all).
+Mirrors RemoteExecutor's concurrency discipline exactly:
+  - every obs storage call goes through one coarse lock (the backend
+    clients are not documented thread-safe);
+  - submit() retries TransientSubmitError with exponential backoff
+    (RemoteConfig.submit_retry_* knobs) — a full pool rejects now and
+    frees minutes later;
+  - job_api.status/logs/cancel are called unlocked (the search wave
+    proved this live at 6 slots);
+  - a FAILED unit never stops its siblings — the wave drains every
+    unit, then prints a retry list (re-running the same command
+    resume-skips everything that succeeded).
+--compare-local re-embeds serially (one local NPU) while remote units
+keep flying.
 """
 
 import argparse
 import json
 import os
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SRC = os.path.normpath(os.path.join(_HERE, "..", "src"))
@@ -69,6 +87,14 @@ CONTAINER_INPUT_BASE = "/home/ma-user/modelarts/inputs"
 DEFAULT_CONTAINER_WORK_ROOT = "/home/ma-user/work/climbmix_exp"
 POOL_MOUNT = "pool"      # obs.asset_mounts key for the parquet pool
 MODEL_MOUNT = "stella"   # obs.asset_mounts key for the model dir
+DEFAULT_MODEL = "NovaSearch/stella_en_400M_v5"
+
+# Wave-mode concurrency discipline (mirrors RemoteExecutor): one coarse
+# lock around EVERY obs storage call, one for multi-line prints, one
+# serializing --compare-local's local-NPU re-embeds.
+_OBS_LOCK = threading.Lock()
+_PRINT_LOCK = threading.Lock()
+_COMPARE_LOCK = threading.Lock()
 
 
 def load_shard_info(path: str):
@@ -173,6 +199,7 @@ def build_spec(unit_id, shards, args, pool_uri, model_dir):
         "spec_version": 1,
         "kind": "embed",
         "unit_id": unit_id,
+        "model": getattr(args, "model", DEFAULT_MODEL),
         "text_col": args.text_col,
         "batch_size": args.batch_size,
         "truncate_len": args.truncate_len,
@@ -263,24 +290,63 @@ def compare_local(unit_id, shards, partial_path, args, pool_local_dir):
     return equal or max_abs == 0.0
 
 
-def dispatch_unit(unit_id, shards, job_api, obs, args, model_dir):
+def submit_with_retry(job_api, name, command, remote_config, unit_id):
+    """submit() with exponential backoff on TransientSubmitError.
+
+    Port of RemoteExecutor._submit_with_retry (same RemoteConfig knobs,
+    same semantics): the shared pool fluctuates, so a rejection now often
+    fits minutes later — a retrying thread holds a wave slot but no
+    resources. Hard (non-transient) errors raise immediately."""
+    from climbmix.remote.job_api import TransientSubmitError
+    backoff = remote_config.submit_retry_initial_s
+    deadline = time.time() + remote_config.submit_retry_timeout_s
+    attempt = 0
+    last_warn = 0.0
+    while True:
+        attempt += 1
+        try:
+            return job_api.submit(name=name, command=command, env={})
+        except TransientSubmitError as e:
+            if time.time() >= deadline:
+                raise RuntimeError(
+                    f"unit {unit_id}: submit still rejected after "
+                    f"{attempt} attempts over "
+                    f"{remote_config.submit_retry_timeout_s/60:.0f}m; "
+                    f"last error: {e}") from e
+            now = time.time()
+            if attempt == 1 or now - last_warn >= 300.0:
+                print(f"  [{unit_id}] submit rejected (attempt "
+                      f"{attempt}: {e}) — capacity full? backing off "
+                      f"{backoff:.0f}s", flush=True)
+                last_warn = now
+            time.sleep(backoff)
+            backoff = min(backoff * 2, remote_config.submit_retry_max_s)
+
+
+def dispatch_unit(unit_id, shards, job_api, obs, args, model_dir,
+                  remote_config):
     """One unit end to end: spec -> upload -> submit -> wait -> download.
 
     shards: the ORIGINAL shard_info dicts (with path/num_docs/start_idx)
-    plus the derived unit-local layout. Returns True on success."""
+    plus the derived unit-local layout. Returns "ok", "skipped" (partial
+    already on OBS) or "failed"."""
     from climbmix.remote.job_api import JobStatus
     unit_prefix = f"{args.obs_prefix.rstrip('/')}/embed_units/{unit_id}"
     result_uri = f"{unit_prefix}/result"
     out_dir = os.path.join(args.output_dir, unit_id)
     os.makedirs(out_dir, exist_ok=True)
 
-    if not args.force and obs.stat(f"{result_uri}/partial_block.npz"):
+    with _OBS_LOCK:
+        already = obs.stat(f"{result_uri}/partial_block.npz")
+    if not args.force and already:
         print(f"[{unit_id}] partial already on OBS — skipping (resume)")
-        return True
+        return "skipped"
 
     spec = build_spec(unit_id, shards, args, args.pool_uri, model_dir)
     spec_uri = f"{unit_prefix}/spec.json"
-    obs.upload_bytes(json.dumps(spec, indent=2).encode("utf-8"), spec_uri)
+    with _OBS_LOCK:
+        obs.upload_bytes(json.dumps(spec, indent=2).encode("utf-8"),
+                         spec_uri)
 
     # command[1]: an ABSOLUTE worker path — the real backend's boot shell
     # replaces it with its code-dir copy anyway, and the mock backend
@@ -291,27 +357,29 @@ def dispatch_unit(unit_id, shards, job_api, obs, args, model_dir):
     print(f"[{unit_id}] submitting ({len(shards)} shards, "
           f"{spec['shards'][0]['num_docs']:,}+ docs/shard, "
           f"{args.npu_per_job} cards)")
-    job_id = job_api.submit(name=f"climbmix_embed_{unit_id}", command=command,
-                            env={})
+    job_id = submit_with_retry(job_api, f"climbmix_embed_{unit_id}",
+                               command, remote_config, unit_id)
     print(f"[{unit_id}] job {job_id} submitted")
 
     st = wait_job(job_api, job_id, args.job_timeout_s, unit_id)
     if st != JobStatus.SUCCEEDED:
-        print(f"[{unit_id}] job {job_id} -> {st.value}; logs (tail):\n"
-              f"{job_api.logs(job_id, 40)}")
-        return False
+        with _PRINT_LOCK:
+            print(f"[{unit_id}] job {job_id} -> {st.value}; logs (tail):\n"
+                  f"{job_api.logs(job_id, 40)}")
+        return "failed"
 
     ok = True
-    for name in ("result.json", "manifest.json", "partial_block.npz",
-                 "embed.log"):
-        uri = f"{result_uri}/{name}"
-        if obs.stat(uri):
-            obs.download_file(uri, os.path.join(out_dir, name))
-        elif name in ("result.json", "manifest.json", "partial_block.npz"):
-            print(f"[{unit_id}] MISSING {name} at {uri}")
-            ok = False
+    with _OBS_LOCK:
+        for name in ("result.json", "manifest.json", "partial_block.npz",
+                     "embed.log"):
+            uri = f"{result_uri}/{name}"
+            if obs.stat(uri):
+                obs.download_file(uri, os.path.join(out_dir, name))
+            elif name in ("result.json", "manifest.json", "partial_block.npz"):
+                print(f"[{unit_id}] MISSING {name} at {uri}")
+                ok = False
     if not ok:
-        return False
+        return "failed"
 
     with open(os.path.join(out_dir, "result.json")) as f:
         res = json.load(f)
@@ -320,7 +388,7 @@ def dispatch_unit(unit_id, shards, job_api, obs, args, model_dir):
     print(f"[{unit_id}] embed_rc={res.get('embed_rc')} "
           f"docs={res.get('docs'):,} elapsed={res.get('elapsed_seconds')}s "
           f"validation={manifest.get('validation')}")
-    return res.get("embed_rc") == 0
+    return "ok" if res.get("embed_rc") == 0 else "failed"
 
 
 def main() -> int:
@@ -348,6 +416,10 @@ def main() -> int:
                         "--unit-shards")
     p.add_argument("--unit-shards", type=int, default=16,
                    help="shards per unit (full-pool mode)")
+    p.add_argument("--max-jobs", type=int, default=6,
+                   help="wave mode: units dispatched CONCURRENTLY (default "
+                        "6 = 48 cards at --npu-per-job 8; the pool is "
+                        "shared — don't take all of it)")
     p.add_argument("--shard-offset", type=int, default=0,
                    help="skip the first N shards (partial waves)")
     p.add_argument("--npu-per-job", type=int, default=8)
@@ -355,6 +427,10 @@ def main() -> int:
                    help="job flavor override (e.g. the 8-card "
                         "modelarts.pool.visual.8xlarge)")
     p.add_argument("--text-col", default="text")
+    p.add_argument("--model", default=DEFAULT_MODEL,
+                   help="embedding model NAME (goes into the spec -> "
+                        "manifest; embed_merge cross-checks it against "
+                        "the run config's discovery.embedding_model)")
     p.add_argument("--batch-size", type=int, default=512)
     p.add_argument("--truncate-len", type=int, default=512)
     p.add_argument("--emb-dim", type=int, default=1024,
@@ -445,10 +521,23 @@ def main() -> int:
             return 2
         print(f"[dispatch] local compare against pool dir: {pool_local_dir}")
 
-    for unit_id, shards in units:
-        if not dispatch_unit(unit_id, shards, job_api, obs, args, model_dir):
-            print(f"[dispatch] unit {unit_id} FAILED — stopping")
-            return 1
+    max_jobs = max(1, args.max_jobs)
+    print(f"[dispatch] wave: {len(units)} unit(s), max {max_jobs} in flight")
+
+    def run_unit(unit_id, shards):
+        """One wave slot: dispatch (+ optional local compare).
+
+        NEVER raises — a failed unit takes itself down, not the wave:
+        siblings keep their slots and the end-of-wave summary lists the
+        retry set."""
+        try:
+            status = dispatch_unit(unit_id, shards, job_api, obs, args,
+                                   model_dir, remote_config)
+        except Exception as e:
+            print(f"[{unit_id}] EXCEPTION: {type(e).__name__}: {e}")
+            status = "failed"
+        if status != "ok":
+            return status
         if pool_local_dir is not None:
             enriched = []
             base = build_spec(unit_id, shards, args, args.pool_uri, model_dir)
@@ -456,15 +545,34 @@ def main() -> int:
                 d = dict(s)
                 d["unit_start_global"] = spec_s["unit_start"]
                 enriched.append(d)
-            ok = compare_local(
-                unit_id, enriched,
-                os.path.join(args.output_dir, unit_id, "partial_block.npz"),
-                args, pool_local_dir)
+            with _COMPARE_LOCK:  # one local NPU — serialize re-embeds
+                ok = compare_local(
+                    unit_id, enriched,
+                    os.path.join(args.output_dir, unit_id,
+                                 "partial_block.npz"),
+                    args, pool_local_dir)
             if not ok:
                 print(f"[dispatch] unit {unit_id} local compare MISMATCH")
-                return 1
-        print(f"[dispatch] unit {unit_id} OK\n")
+                return "failed"
+        print(f"[dispatch] unit {unit_id} OK")
+        return "ok"
 
+    results = {}
+    with ThreadPoolExecutor(max_workers=max_jobs) as pool:
+        futs = {pool.submit(run_unit, uid, sh): uid for uid, sh in units}
+        for fut, uid in futs.items():
+            results[uid] = fut.result()
+
+    ok_n = sum(1 for s in results.values() if s == "ok")
+    skip_n = sum(1 for s in results.values() if s == "skipped")
+    failed = sorted(u for u, s in results.items() if s == "failed")
+    print(f"[dispatch] wave complete: {ok_n} ok, {skip_n} skipped, "
+          f"{len(failed)} failed")
+    if failed:
+        print(f"[dispatch] failed units: {', '.join(failed)}")
+        print("[dispatch] re-run the SAME command to retry them "
+              "(completed units are resume-skipped)")
+        return 1
     print("[dispatch] all units complete")
     return 0
 
