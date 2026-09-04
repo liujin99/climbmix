@@ -642,3 +642,6 @@ Target ~1B tokens vs 论文 40B tokens（40× 差距）。但分母不同：
 - proxy 最优 config 在 target 上是否也最优
 
 如果差异不显著，考虑增加 target 步数到 2000（~2B tokens, ~8h × 2 模型 = 16h）。
+
+> **2026-09-04 决策**: prod1 直接采用 2000 步 / TARGET_TOKENS=2B（用户决策，
+> 预防性消除本节风险；单遍维持：消耗 ~2B ≤ 混合 2.86B）。proxy 搜索仍 1000 步。
