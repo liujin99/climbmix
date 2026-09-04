@@ -172,7 +172,8 @@ REMOTE_SUBMIT_RETRY_H="${REMOTE_SUBMIT_RETRY_H:-24}" # 提交被拒重试时限 
 REMOTE_MAX_PREP="${REMOTE_MAX_PREP:-4}"           # 本地混料/上传并发
 REMOTE_STORAGE_KIND="${REMOTE_STORAGE_KIND:-moxing}"  # 容器内存储后端
 REMOTE_STORAGE_ROOT="${REMOTE_STORAGE_ROOT:-}"    # mock 后端专用: 假 OBS 根目录
-REMOTE_JOB_TIMEOUT_H="${REMOTE_JOB_TIMEOUT_H:-6}" # 单作业超时 (小时)
+REMOTE_JOB_TIMEOUT_H="${REMOTE_JOB_TIMEOUT_H:-6}" # 单作业 RUNTIME 超时 (小时, 排队时间不计 — 首个 RUNNING 起算)
+REMOTE_QUEUE_TIMEOUT_H="${REMOTE_QUEUE_TIMEOUT_H:-24}" # 排队超时 (提交→起跑, 小时; 池满时作业可在平台队列里等卡)
 REMOTE_CODE_WHEELS="${REMOTE_CODE_WHEELS:-}"  # 离线 wheel 本地路径 (逗号分隔, executor 自动补传)
 # per-launch 直挂资产 (JSON 对象 {"name":"obs://..."}), 替换平台配置的全局
 # asset_mounts — search 舰队只挂自己要的 (d20/tokenizer/eval_*), 不带 embed
@@ -292,6 +293,7 @@ if [ "$REMOTE_ENABLED" = "1" ]; then
            REMOTE_POOL_NAME REMOTE_NPU_PER_JOB REMOTE_MAX_JOBS \
            REMOTE_SUBMIT_RETRY_H REMOTE_MAX_PREP REMOTE_LOCAL_PARALLEL \
            REMOTE_STORAGE_KIND REMOTE_STORAGE_ROOT REMOTE_JOB_TIMEOUT_H \
+           REMOTE_QUEUE_TIMEOUT_H \
            REMOTE_CODE_WHEELS REMOTE_ASSET_MOUNTS
     python3 - "$REMOTE_CONFIG_PATH" "$REMOTE_PLATFORM_CONFIG" "$REMOTE_IMAGE" "$REMOTE_FLAVOR" <<'PYEOF'
 import json, sys, os
@@ -312,6 +314,7 @@ cfg = {
     "storage_kind": os.environ["REMOTE_STORAGE_KIND"],
     "storage_root": os.environ["REMOTE_STORAGE_ROOT"],
     "job_timeout_s": float(os.environ["REMOTE_JOB_TIMEOUT_H"]) * 3600.0,
+    "queue_timeout_s": float(os.environ["REMOTE_QUEUE_TIMEOUT_H"]) * 3600.0,
     "job_env": {"HF_ENDPOINT": os.environ["HF_ENDPOINT"]},
 }
 wheels = [w for w in (os.environ.get("REMOTE_CODE_WHEELS") or "").split(",") if w]

@@ -144,6 +144,13 @@ class RemoteConfig:
     poll_interval_s: float = 30.0
     status_print_interval_s: float = 300.0
     job_timeout_s: float = 6 * 3600.0
+    # Queue-phase bound (submission → first RUNNING). Platform QUEUE time
+    # does NOT burn job_timeout_s: shared pools can hold a job PENDING for
+    # hours before cards free up (2026-09-04 prod pool: 0 idle at launch),
+    # and cancelling a still-queued job because its runtime budget was
+    # eaten by the queue is pure waste. This knob bounds the PENDING phase
+    # alone (lost/zombie queue entries).
+    queue_timeout_s: float = 24 * 3600.0
 
     # Job-level env (HF_ENDPOINT=hf-mirror.com, ...). Passed to the job
     # process AND baked into the spec for the train/eval subprocesses.
@@ -669,26 +676,46 @@ class RemoteExecutor(ProxyRunner):
         (does not raise on FAILED — the result.json the worker uploads on
         known-stage failures carries the precise rc's, and the caller needs
         it to write the eval-only resume markers). Raises only on timeout
-        (job cancelled)."""
+        (job cancelled).
+
+        Two clocks: job_timeout_s measures RUNTIME (first RUNNING →
+        terminal — platform queue time does not burn it; shared pools can
+        hold a job PENDING for hours, 2026-09-04 prod pool had 0 idle
+        cards at launch), queue_timeout_s bounds the PENDING phase alone
+        (lost/zombie queue entries)."""
         timeout = timeout if timeout is not None else self.remote.job_timeout_s
-        t0 = time.time()
+        queue_timeout = self.remote.queue_timeout_s
+        submitted_at = time.time()
+        first_running_at: Optional[float] = None
         last_print = 0.0
         while True:
             st = self.job_api.status(job_id)
             if st.is_terminal:
                 return st
-            elapsed = time.time() - t0
-            if elapsed > timeout:
+            now = time.time()
+            if first_running_at is None and st == JobStatus.RUNNING:
+                first_running_at = now
+            if first_running_at is None:
+                # queue phase (PENDING/UNKNOWN): submission → start clock
+                if now - submitted_at > queue_timeout:
+                    self.job_api.cancel(job_id)
+                    raise RuntimeError(
+                        f"remote job {job_id} (exp {experiment_id}) never "
+                        f"started — queued {(now - submitted_at)/60:.0f}m "
+                        f"(limit {queue_timeout/60:.0f}m); cancelled. "
+                        f"logs (tail):\n{self.job_api.logs(job_id, 20)}")
+            elif now - first_running_at > timeout:
                 self.job_api.cancel(job_id)
                 raise RuntimeError(
                     f"remote job {job_id} (exp {experiment_id}) timed out "
-                    f"after {elapsed/60:.0f}m (limit {timeout/60:.0f}m); "
+                    f"after {(now - first_running_at)/60:.0f}m of RUNTIME "
+                    f"(limit {timeout/60:.0f}m, queue time excluded); "
                     f"cancelled. logs (tail):\n{self.job_api.logs(job_id, 20)}")
-            now = time.time()
             if now - last_print >= self.remote.status_print_interval_s:
                 tail = self.job_api.logs(job_id, 1).strip()
+                phase = "running" if first_running_at is not None else "queued"
                 print(f"  [Exp {experiment_id}] job {job_id} {st.value} "
-                      f"{elapsed/60:.0f}m | {tail[:120]}")
+                      f"{phase} {(now - submitted_at)/60:.0f}m | {tail[:120]}")
                 last_print = now
             time.sleep(self.remote.poll_interval_s)
 
