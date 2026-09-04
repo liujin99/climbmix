@@ -600,9 +600,9 @@ Proxy: 350M 模型, 45 GPU hours
 | Token 比例 | 1.0× | **0.65×** (论文的 65%) |
 | 每 config 时间 | 10.5 min (256 H100) | ~4h (8×910B NPU) |
 | 27 configs 总时间 | 4.7h | ~108h (4.5 天) |
-| Target 模型 | 1B | d28 (1138M scaling) |
+| Target 模型 | 1B | d28 (~1.5B scaling; 2026-09-04 修正 — meta auto-detect 实测, 早前 1138M 是 DEPTH_INFO 外推错值) |
 | Target 步数 | 20,000 | 1000 |
-| Target token 量 | 40B | 524M |
+| Target token 量 | 40B | ~1B (1000 步 × ~1M batch; TARGET_TOKENS=1B STEM cap, 混通用后 1.43B 单遍) |
 
 ### 12.4 为什么选 1000 步
 
@@ -633,12 +633,12 @@ Proxy: 350M 模型, 45 GPU hours
 
 ### 12.6 Target 训练 1000 步的风险
 
-Target 524M tokens vs 论文 40B tokens（76× 差距）。但场景不同：
-- 论文: 1B 模型从 10T 预训练 base 上 mid-train 40B
-- 我们: d28 (1138M) 从 ~2-3B 预训练 base 上 mid-train 524M
+Target ~1B tokens vs 论文 40B tokens（40× 差距）。但分母不同：
+- 论文: 1B 模型从 10T 预训练 base 上 mid-train 40B —— 退火预算 = base 的 +0.4%
+- 我们: d28 (~1.5B) 从 ~2-3B 预训练 base 上 mid-train ~1B —— 退火预算 = base 的 +33~50%（相对预算反而充裕得多）
 
 **如果 target 差异不显著，proxy 搜索可能无法迁移。** 需要在第一轮后检查：
 - 不同 config 间的 score 差异是否大于噪声
 - proxy 最优 config 在 target 上是否也最优
 
-如果差异不显著，考虑增加 target 步数到 2000（1B tokens, ~8h × 2 模型 = 16h）。
+如果差异不显著，考虑增加 target 步数到 2000（~2B tokens, ~8h × 2 模型 = 16h）。
