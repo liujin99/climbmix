@@ -1,18 +1,25 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════════
-#  ClimbMix: 全池嵌入合并 — OBS 单元 partials → Step-1 canonical 缓存
+#  ClimbMix: 全池嵌入合并 — OBS 单元 partials → Step-1 分片缓存
 #  (TODO E; scripts/embed_merge.py 的壳)
 #
 #  用法 (波次跑绿后):
 #    bash runs/embed_merge.sh
 #    FORCE=1 bash runs/embed_merge.sh                  # 覆盖已有缓存重拼
-#    UPLOAD_BACKUP=obs://<bk>/<dir>/embedding_cache.npy bash runs/embed_merge.sh
+#    UPLOAD_BACKUP=obs://<bk>/<dir>/ bash runs/embed_merge.sh
+#
+#  产物 (分片格式 sharded-v1, 落 EMBEDDING_CACHE_DIR/<key>/):
+#    manifest.json            — 发布闸门 (cache 存在 ⇔ 它存在且完整)
+#    block_<unit_id>.npy      — 每单元一块 ~7.5 GB (全局连续行, 可独立 mmap)
+#  为什么分片而非单个 .npy: 全池 ~443 GB 单文件会撞 FUSE 单文件上限
+#  (2026-09-04 实测: 挂载在 ~191 GiB 处 EFBIG 拒写); 分块远低于任何上限,
+#  可独立校验/搬运, 断点续跑按块进行。Step-1 经 ShardedEmbeddingCache
+#  读取 — 切片语义与单文件等价, 聚类路径不变。
 #
 #  语义: 校验分片覆盖 (每片恰好一次 + num_docs/全局偏移对账 + manifest
-#  交叉核对 model/truncate_len) → 流式拼接 (单元在全局连续有序, 缓存体 =
-#  header + 逐单元字节追加; 断点续传, ledger 记账, 断裂即整体重来) →
-#  全池验证 → 落 EMBEDDING_CACHE_DIR/<key>/embedding_cache.npy (mmap 可读,
-#  Step-1 命中时不整载进 RAM)。之后 run_climbmix.sh 的 Step 1 直接缓存命中,
+#  交叉核对 model/truncate_len) → 逐单元下载→写块→sidecar 记账 (断点续跑
+#  按块, 断裂块重新下载, sidecar 分片名漂移即大声失败) → 逐块全池验证 →
+#  原子发布 manifest。之后 run_climbmix.sh 的 Step 1 直接缓存命中,
 #  跳过 ~40h 嵌入。
 #
 #  复用语义: cache-key 只含 池分片清单+模型+截断长度 — K/prune/lr/迭代数
@@ -22,7 +29,7 @@
 #
 #  磁盘: 缓存所在文件系统 ≈ 池字节 (~475 GB) + 一个在飞单元 (~7.5 GB);
 #  本地盘放不下时 EMBEDDING_CACHE_DIR 可指 OBS 挂载路径 (如 <挂载根>/...)
-#  — 合并经挂载写, Step-1 经挂载 mmap (慢一点, 但本地零占用)。
+#  — 分块经挂载写 (~7.5 GB/块, 无单文件 EFBIG 风险), Step-1 经挂载 mmap。
 #
 #  注意:
 #    - 语义旋钮 (EMBEDDING_MODEL/TRUNCATE_LEN/EMB_DIM/UNIT_SHARDS) 必须与

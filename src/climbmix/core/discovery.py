@@ -22,17 +22,21 @@ _EMB_CACHE_NPZ = "embedding_cache.npz"
 def embedding_cache_file(cache_root: str) -> str:
     """Embeddings cache path inside a cache root dir.
 
-    .npy is the canonical format (streamable multi-node merge output;
+    .npy is the single-machine canonical format (streamable write,
     mmap-able read — a pool-sized cache never materializes in RAM and
-    even reads acceptably through a FUSE-mounted OBS path). Legacy
-    .npz caches (single-node runs before the format switch) keep
-    working: an existing npz is preferred over a fresh npy write, so
-    old investments are not silently invalidated; new writes land as
-    .npy.
+    even reads acceptably through a FUSE-mounted OBS path). The
+    multi-node merge now writes the SHARDED format instead (a 443 GB
+    single file hits FUSE limits): manifest.json + block_*.npy inside
+    the same key dir — detected here and returned as the DIR;
+    _load_cached_embeddings recognizes it. Legacy .npz caches keep
+    working. Precedence: npy, sharded manifest, npz, then the fresh
+    npy default.
     """
     npy = os.path.join(cache_root, _EMB_CACHE_NPY)
     if os.path.exists(npy):
         return npy
+    if os.path.isfile(os.path.join(cache_root, "manifest.json")):
+        return cache_root
     npz = os.path.join(cache_root, _EMB_CACHE_NPZ)
     if os.path.exists(npz):
         return npz

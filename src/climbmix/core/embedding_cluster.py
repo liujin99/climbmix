@@ -185,22 +185,42 @@ def _load_cached_embeddings(
 ) -> Optional[npt.NDArray[np.float32]]:
     """Load cached embeddings; None when absent or row-count mismatched.
 
-    Accepts both cache formats: .npy (the canonical one — mmap-able, so
-    a 475 GB full-pool cache reads back as a memmap and the chunked
-    cluster path never materializes it in RAM; also the only format
-    that reads efficiently from a FUSE-mounted OBS path) and legacy
-    .npz (fully materialized on load, as before).
+    Accepts three cache formats: sharded (a cache DIR holding
+    manifest.json — the multi-node merge output; returned as a
+    ShardedEmbeddingCache whose slicing keeps the chunked cluster path
+    working unchanged), .npy (the single-machine canonical — mmap-able,
+    so a pool-sized cache reads back as a memmap and never materializes
+    in RAM) and legacy .npz (fully materialized on load, as before).
 
     The pool-keyed cache DIRECTORY names its inputs (shard manifest,
     model, truncate len, sample size), but this guard is the last line
     of defense against a stale cache reached through a manually pinned
     dir or an older key formula: a silent row-count mismatch would
     misalign labels with sample_indices downstream (discovery passes
-    20K indices against a 2K array). Returns None → caller re-embeds
-    and overwrites the cache.
+    20K indices against a 2K array). A stale SHARDED cache is a hard
+    stop, not a re-embed — re-embedding a full pool costs ~40h and the
+    miss path cannot write over a directory; the message says exactly
+    what to delete. npy/npz return None → caller re-embeds and
+    overwrites the cache.
     """
+    from climbmix.core.embedding_cache import (
+        ShardedEmbeddingCache, is_sharded_cache)
+
     if not (cache_path and os.path.exists(cache_path)):
         return None
+    if os.path.isdir(cache_path) and is_sharded_cache(cache_path):
+        cache = ShardedEmbeddingCache(cache_path)
+        if expected_n is not None and cache.shape[0] != expected_n:
+            raise SystemExit(
+                f"{tag} FATAL: sharded cache {cache_path} holds "
+                f"{cache.shape[0]:,} rows but {expected_n:,} expected — "
+                "stale cache at this key; delete the directory to "
+                "re-embed")
+        print(f"{tag} Loading cached embeddings from: {cache_path} "
+              f"(sharded, {cache.block_count} blocks)")
+        print(f"{tag} Loaded {cache.shape[0]:,} embeddings, dim={cache.shape[1]}")
+        _validate_embeddings(cache, tag, fail_on_nan=False)
+        return cache
     if cache_path.endswith(".npy"):
         embeddings = np.load(cache_path, mmap_mode="r")
     else:  # legacy npz — fully materialized on load, as before
@@ -424,14 +444,23 @@ def _validate_embeddings(
     already zero-replaces NaN / excludes zero rows downstream.
 
     Chunked pass (views only, no full-size temporaries); works on ndarray
-    and memmap alike. Returns the anomaly counts dict.
+    and memmap alike, and on ShardedEmbeddingCache (validation iterates
+    its blocks — global row indices are preserved for the ranges
+    attribution). Returns the anomaly counts dict.
     """
     import numpy as np
+    from climbmix.core.embedding_cache import ShardedEmbeddingCache
 
-    arr = np.asarray(embeddings)
-    if arr.ndim != 2 or arr.shape[0] == 0:
-        return {"nan": 0, "inf": 0, "zero": 0, "off_norm": 0}
-    n, dim = arr.shape
+    if isinstance(embeddings, ShardedEmbeddingCache):
+        n, dim = embeddings.shape
+        views = list(embeddings.iter_blocks())
+    else:
+        arr = np.asarray(embeddings)
+        if arr.ndim != 2 or arr.shape[0] == 0:
+            return {"nan": 0, "inf": 0, "zero": 0, "off_norm": 0}
+        n, dim = arr.shape
+        views = [(0, arr)]
+
     rows_per_chunk = max(1, min(65536, (1 << 28) // max(1, dim)))
     stride = max(1, n // 2_000_000)  # norm percentile subsample cap
 
@@ -440,33 +469,35 @@ def _validate_embeddings(
     starts = np.array([r[0] for r in ranges], dtype=np.int64) if ranges else None
     per_range = [0] * len(ranges) if ranges else None
 
-    for lo in range(0, n, rows_per_chunk):
-        c = arr[lo:lo + rows_per_chunk]
-        nan_rows = np.isnan(c).any(axis=1)
-        inf_rows = np.isinf(c).any(axis=1)
-        bad = nan_rows | inf_rows
-        sq = np.einsum("ij,ij->i", c, c, dtype=np.float64)
-        zero_rows = (sq <= 1e-12) & ~bad
-        off_rows = (((sq < 0.25) | (sq > 2.25)) & ~bad) & ~zero_rows
+    for view_offset, view in views:
+        vlen = view.shape[0]
+        for lo in range(0, vlen, rows_per_chunk):
+            c = view[lo:lo + rows_per_chunk]
+            nan_rows = np.isnan(c).any(axis=1)
+            inf_rows = np.isinf(c).any(axis=1)
+            bad = nan_rows | inf_rows
+            sq = np.einsum("ij,ij->i", c, c, dtype=np.float64)
+            zero_rows = (sq <= 1e-12) & ~bad
+            off_rows = (((sq < 0.25) | (sq > 2.25)) & ~bad) & ~zero_rows
 
-        counts["nan"] += int(nan_rows.sum())
-        counts["inf"] += int(inf_rows.sum())
-        counts["zero"] += int(zero_rows.sum())
-        counts["off_norm"] += int(off_rows.sum())
+            counts["nan"] += int(nan_rows.sum())
+            counts["inf"] += int(inf_rows.sum())
+            counts["zero"] += int(zero_rows.sum())
+            counts["off_norm"] += int(off_rows.sum())
 
-        if per_range is not None:
-            anomaly = bad | zero_rows | off_rows
-            if anomaly.any():
-                idx = lo + np.where(anomaly)[0]
-                pos = np.searchsorted(starts, idx, side="right") - 1
-                pos = np.clip(pos, 0, len(ranges) - 1)
-                for p in pos:
-                    per_range[int(p)] += 1
+            if per_range is not None:
+                anomaly = bad | zero_rows | off_rows
+                if anomaly.any():
+                    idx = view_offset + lo + np.where(anomaly)[0]
+                    pos = np.searchsorted(starts, idx, side="right") - 1
+                    pos = np.clip(pos, 0, len(ranges) - 1)
+                    for p in pos:
+                        per_range[int(p)] += 1
 
-        if sq_sample is not None:
-            rows = np.arange(0, c.shape[0], stride)
-            if rows.size:
-                sq_sample.append(sq[rows])
+            if sq_sample is not None:
+                rows = np.arange(0, c.shape[0], stride)
+                if rows.size:
+                    sq_sample.append(sq[rows])
 
     n_bad = counts["nan"] + counts["inf"]
     n_anom = n_bad + counts["zero"] + counts["off_norm"]
@@ -1357,23 +1388,36 @@ def cluster_embeddings_faiss(
     print(f"[Cluster] FAISS K-means: K={K_init}, dim={dim}, n_docs={n_docs}, "
           f"threads={n_threads}, {blas_note}")
 
-    # At-scale path: a disk memmap (fresh full-pool embed run) cannot go
-    # through the in-memory prescan/assign — np.isnan() and nan_to_num on
-    # the full matrix materialize 119/475 GB intermediates. Chunked
-    # equivalents are elementwise-identical (row-independent argmax);
-    # sizing is cgroup-aware (see cluster_assign). In-RAM ndarrays
-    # (speedrun / npz cache hit) keep the original single-shot code path.
+    # At-scale path: a disk memmap (fresh full-pool embed run) or a
+    # sharded cache (multi-node merge output) cannot go through the
+    # in-memory prescan/assign — np.isnan() and nan_to_num on the full
+    # matrix materialize 119/475 GB intermediates. Chunked equivalents
+    # are elementwise-identical (row-independent argmax); sizing is
+    # cgroup-aware (see cluster_assign). In-RAM ndarrays (speedrun /
+    # npz cache hit) keep the original single-shot code path.
+    from climbmix.core.embedding_cache import ShardedEmbeddingCache
+    is_sharded = isinstance(embeddings, ShardedEmbeddingCache)
     sanitized_sidecar = None
-    if isinstance(embeddings, np.memmap):
+    if isinstance(embeddings, np.memmap) or is_sharded:
         from climbmix.core.cluster_assign import (
             assign_in_chunks, choose_chunk_rows, sanitize_memmap_to,
             scan_row_anomalies, sidecar_path_for,
         )
         chunk_rows = choose_chunk_rows(dim)
-        print(f"[Cluster] memmap input ({n_docs:,} x {dim}) — chunked "
-              f"prescan/assign, chunk={chunk_rows:,} rows")
+        print(f"[Cluster] {'sharded cache' if is_sharded else 'memmap'} "
+              f"input ({n_docs:,} x {dim}) — chunked prescan/assign, "
+              f"chunk={chunk_rows:,} rows")
         n_nan, n_inf, zero_mask = scan_row_anomalies(embeddings, chunk_rows)
         if n_nan > 0 or n_inf > 0:
+            if is_sharded:
+                # the wave's per-unit validation was clean, so non-finite
+                # rows here mean foreign corruption post-merge — silently
+                # zeroing them would bury that; the OBS partials are kept
+                # and a re-merge is the cheap fix
+                raise SystemExit(
+                    "[Cluster] FATAL: non-finite rows in the sharded "
+                    "cache — foreign corruption; re-run "
+                    "scripts/embed_merge.py (OBS unit partials are kept)")
             print(f"[Cluster] WARNING: {n_nan} NaN + {n_inf} Inf rows found, "
                   f"replacing with zeros (chunked side-car copy)")
             sanitized_sidecar = sidecar_path_for(embeddings)
@@ -1399,15 +1443,29 @@ def cluster_embeddings_faiss(
                 seed=seed,
                 spherical=True,
             )
-            # faiss subsamples training points internally (max 256/centroid),
-            # so train never materializes the full matrix even for a memmap.
-            kmeans.train(embeddings)
+            # faiss subsamples training points internally (max
+            # 256/centroid), so train never materializes the full matrix
+            # even for a memmap. A sharded cache hands faiss exactly
+            # that sample instead — gathered deterministically with
+            # block-sequential I/O (random gathers over a 443 GB FUSE
+            # memmap are the one thing slower than this merge).
+            if is_sharded:
+                mpc = int(getattr(kmeans, "max_points_per_centroid", 256)
+                          or 256)
+                train_n = min(n_docs, mpc * K_init)
+                train_x = embeddings.gather_train_sample(train_n, seed)
+                print(f"[Cluster] K-means training sample: {train_n:,} "
+                      f"rows (deterministic, seed={seed})")
+                kmeans.train(train_x)
+                del train_x
+            else:
+                kmeans.train(embeddings)
 
             centroids = kmeans.centroids
             index = faiss.IndexFlatIP(dim)
             index.add(centroids)
 
-            if isinstance(embeddings, np.memmap):
+            if isinstance(embeddings, np.memmap) or is_sharded:
                 from climbmix.core.cluster_assign import assign_in_chunks
                 labels = assign_in_chunks(index, embeddings, chunk_rows)
             else:
@@ -1501,5 +1559,11 @@ def cluster_embeddings(
     try:
         return cluster_embeddings_faiss(embeddings, K_init, seed=seed, cache_path=cache_path)
     except ImportError:
+        from climbmix.core.embedding_cache import ShardedEmbeddingCache
+        if isinstance(embeddings, ShardedEmbeddingCache):
+            raise SystemExit(
+                "[Cluster] FATAL: a sharded cache needs the faiss chunked "
+                "path — the sklearn fallback would materialize the pool "
+                "in RAM")
         print("[Cluster] FAISS not available, falling back to sklearn")
         return cluster_embeddings_sklearn(embeddings, K_init, seed=seed, cache_path=cache_path)

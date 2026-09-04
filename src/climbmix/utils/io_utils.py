@@ -58,9 +58,10 @@ def atomic_save_npy(path: str, array) -> None:
 
     np.save streams C-contiguous arrays to disk via tofile(), so a
     pool-sized embeddings array (475 GB at the full pool) writes without
-    an in-RAM copy. .npy (vs npz) is what makes the multi-node merge a
-    pure byte-level append (header + unit blocks) and lets cache reads
-    mmap instead of materializing.
+    an in-RAM copy; reads mmap instead of materializing. fsync before
+    the rename: merge blocks live on FUSE mounts where a crash must
+    never leave a renamed-but-unflushed block (resume trusts block
+    files at face value).
     """
     import numpy as np
 
@@ -70,6 +71,8 @@ def atomic_save_npy(path: str, array) -> None:
     _clear_tmp(tmp)
     try:
         np.save(tmp, np.ascontiguousarray(array))
+        with open(tmp, "rb") as f:
+            os.fsync(f.fileno())
         os.replace(tmp, path)
     except BaseException:
         _clear_tmp(tmp)

@@ -192,31 +192,37 @@ Where the finished embeddings live (three tiers):
    submit-host disk re-merges from them in ~1-2h instead of paying the
    40h embed again. Do not delete after merging.
 2. The merged pool cache lands at
-   `<EMBEDDING_CACHE_DIR>/<content-key>/embedding_cache.npy` — the
-   exact path run_climbmix.sh Step 1 hits (written there by
+   `<EMBEDDING_CACHE_DIR>/<content-key>/` as the SHARDED format:
+   `manifest.json` (the publish gate) + one `block_<unit>.npy` per
+   unit (~7.5 GB each, globally consecutive rows) — the exact key
+   run_climbmix.sh Step 1 hits (written there by
    `scripts/embed_merge.py`, see below). Point `EMBEDDING_CACHE_DIR`
    at the production tree (e.g. `<data-mix-run>/climbmix/cache/
    embeddings`) and the cache investment lives with production.
-   The merge is a pure streaming append (peak disk = cache + ONE
-   downloaded unit ~7.5 GB, no second copy) and the cache is a raw
-   .npy that Step 1 mmaps — a pool-sized cache never materializes in
-   RAM. That also means `EMBEDDING_CACHE_DIR` MAY point at a
-    FUSE-mounted OBS path (e.g. <obs mount root>/...) when local disk
-    can't
-   hold ~475 GB: the merge writes through the mount and Step 1 mmaps
-   through it (slower than local NVMe, but zero local footprint).
-    Legacy single-node `.npz` caches keep working (picked when no .npy
-    exists).
-    Read-speed note: the OBS-mount cache is fine for the merge, but
-    Step 1's clustering does multiple mmap passes over the 475 GB —
-    through FUSE that's slower (first full pull ~1-1.5h, then page
-    cache). Default plan: OBS-direct and measure the first production
-    run; IF Step 1 becomes the bottleneck, the zero-code fix is a
-    one-time `cp` of the .npy onto the run host's working disk and
-    pointing `EMBEDDING_CACHE_DIR` there (the .npy format is
-    mmap-friendly either way — no tooling change).
-3. Optional: upload the merged cache to OBS as a redundancy copy
-   (overnight, mount-speed).
+   Why sharded and not one big .npy: a full-pool cache is ~443 GB and
+   a single file that size hits FUSE single-file limits (live finding
+   2026-09-04: the OBS mount refused the append at ~191 GiB with
+   EFBIG). Per-unit blocks are far under any limit, independently
+   mmap-able, and resume is per-block. Step 1 reads the cache through
+   `climbmix.core.embedding_cache.ShardedEmbeddingCache` — chunked
+   prescan/assign slice it unchanged and faiss trains on a
+   deterministic gathered sample, so the read semantics match the
+   old single-file form. Peak merge disk = ONE downloaded unit
+   ~7.5 GB. `EMBEDDING_CACHE_DIR` MAY point at a FUSE-mounted OBS
+   path (e.g. <obs mount root>/...) when local disk can't hold
+   ~475 GB: the merge writes ~7.5 GB blocks through the mount and
+   Step 1 mmaps them through it. Legacy single-node `.npz` and
+   single-file `.npy` caches keep working (picked when present).
+   Read-speed note: the OBS-mount cache is fine for the merge, but
+   Step 1's clustering does multiple passes over the 443 GB —
+   through FUSE that's slower (first full pull ~1-1.5h, then page
+   cache). Default plan: OBS-direct and measure the first production
+   run; IF Step 1 becomes the bottleneck, the zero-code fix is a
+   one-time `cp -r` of the key dir onto the run host's working disk
+   and pointing `EMBEDDING_CACHE_DIR` there (the sharded format is
+   mmap-friendly either way — no tooling change).
+3. Optional: upload the merged cache (manifest + blocks) to OBS as a
+   redundancy copy (overnight, mount-speed).
 
 Re-use semantics — the cache is a one-time investment:
 - The cache key hashes only the pool's shard name+size manifest, the
@@ -280,17 +286,21 @@ SHARD_OFFSET=160 FORCE=1 ...             # 续波 / 强制重发
 
 Merge — when the wave drains green, assemble the partials into the
 canonical pool cache (verifies exact shard coverage + num_docs +
-global offsets against metadata_shard_info.json, validates the whole
-pool, `atomic_savez`s at the Step-1 key, resumes from its ledger on a
-crash, is idempotent on re-run; `--model`/`--truncate-len` MUST equal
-the run config's discovery values — the key depends on them):
+global offsets against metadata_shard_info.json, validates every
+block, publishes the SHARDED cache — `manifest.json` + per-unit
+`block_*.npy` — at the Step-1 key, resumes per-block from sidecars on
+a crash, is idempotent on re-run; `--model`/`--truncate-len` MUST
+equal the run config's discovery values — the key depends on them):
 
 ```
 bash runs/embed_merge.sh
 # wrapper 默认: --data-dir = run_climbmix.sh 的 DATA_DIR,
 #   --cache-dir = 同名 EMBEDDING_CACHE_DIR 旋钮 (指向生产树即落生产缓存)
-# 磁盘需求 (cache 所在文件系统): 池字节 (~475 GB, 流式追加, 无 2x)
-#   + ~7.5 GB/在飞单元; 放不下可把 EMBEDDING_CACHE_DIR 指向 OBS 挂载路径
+# 产物: <EMBEDDING_CACHE_DIR>/<key>/{manifest.json, block_<unit>.npy × 63}
+#   (~7.5 GB/块, 远低于任何单文件上限; 全池 ~443 GB)
+# 磁盘需求 (cache 所在文件系统): 池字节 (~475 GB) + ~7.5 GB/在飞单元;
+#   放不下可把 EMBEDDING_CACHE_DIR 指向 OBS 挂载路径 (分块写入, 无单文件
+#   EFBIG 风险)
 ```
 
 After it exits green, the next pipeline run cache-hits Step 1 and
