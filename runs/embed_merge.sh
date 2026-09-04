@@ -17,19 +17,26 @@
 #  读取 — 切片语义与单文件等价, 聚类路径不变。
 #
 #  语义: 校验分片覆盖 (每片恰好一次 + num_docs/全局偏移对账 + manifest
-#  交叉核对 model/truncate_len) → 逐单元下载→写块→sidecar 记账 (断点续跑
-#  按块, 断裂块重新下载, sidecar 分片名漂移即大声失败) → 逐块全池验证 →
-#  原子发布 manifest。之后 run_climbmix.sh 的 Step 1 直接缓存命中,
-#  跳过 ~40h 嵌入。
+#  交叉核对 model/truncate_len) → 并行逐单元下载→写块→sidecar 记账
+# (断点续跑按块, 断裂块重新下载, sidecar 分片名漂移即大声失败) → 并行
+# 逐块全池验证 → 原子发布 manifest。之后 run_climbmix.sh 的 Step 1 直接
+# 缓存命中, 跳过 ~40h 嵌入。
+#
+#  并行与中转 (合并是 IO 密集, 非 CPU): MERGE_WORKERS 个进程并发取单元/
+# 验证块 (块文件相互独立 + tmp+fsync+rename, 无需协调); npz 下载是纯
+# 暂存, 优先落 /dev/shm (内存盘) 而非缓存挂载 — 每单元挂载 IO 从
+# 22.5 GB 降到 7.5 GB (块写入本身)。缺内存盘时自动退化 本地 /tmp →
+# 缓存目录。1.5T RAM 机器上全量合并实测口径: ~40-70 min。
 #
 #  复用语义: cache-key 只含 池分片清单+模型+截断长度 — K/prune/lr/迭代数
 #  等下游旋钮全部不影响 key, 所有 ClimbMix 实验共享同一个嵌入池 (Step 1
 #  命中后从聚类继续)。池追加新分片 → 重跑 embed_wave (旧单元 resume-skip,
 #  只嵌新数据) + 重跑本脚本 (新 key), 增量成本 = 嵌新数据 + 一次合并。
 #
-#  磁盘: 缓存所在文件系统 ≈ 池字节 (~475 GB) + 一个在飞单元 (~7.5 GB);
-#  本地盘放不下时 EMBEDDING_CACHE_DIR 可指 OBS 挂载路径 (如 <挂载根>/...)
-#  — 分块经挂载写 (~7.5 GB/块, 无单文件 EFBIG 风险), Step-1 经挂载 mmap。
+#  磁盘: 缓存所在文件系统 ≈ 池字节 (~475 GB) + 在飞 tmp 块 (workers ×
+# ~7.5 GB, 落定即改名并入); 本地盘放不下时 EMBEDDING_CACHE_DIR 可指 OBS
+#  挂载路径 (如 <挂载根>/...) — 分块经挂载写 (~7.5 GB/块, 无单文件 EFBIG
+#  风险), Step-1 经挂载 mmap。npz 暂存默认在内存盘, 不占挂载。
 #
 #  注意:
 #    - 语义旋钮 (EMBEDDING_MODEL/TRUNCATE_LEN/EMB_DIM/UNIT_SHARDS) 必须与
@@ -58,6 +65,10 @@ SKIP_UNITS="${SKIP_UNITS:-}"
 KEEP_DOWNLOADS="${KEEP_DOWNLOADS:-0}"
 UPLOAD_BACKUP="${UPLOAD_BACKUP:-}"
 FORCE="${FORCE:-0}"
+# 并行度 (进程数): 下载/写块/验证并发; 每进程峰值内存 ~15 GB (npz+数组)
+MERGE_WORKERS="${MERGE_WORKERS:-8}"
+# npz 暂存位置: auto = /dev/shm > 本地 /tmp > 缓存目录; 显式路径原样使用
+MERGE_TMP_DIR="${MERGE_TMP_DIR:-auto}"
 
 if [[ -z "$REMOTE_CONFIG" ]]; then
   echo "[embed_merge] FATAL: REMOTE_CONFIG 未设置 (后端 RemoteConfig JSON 路径)" >&2
@@ -73,6 +84,8 @@ ARGS=(
   --truncate-len "$TRUNCATE_LEN"
   --emb-dim "$EMB_DIM"
   --unit-shards "$UNIT_SHARDS"
+  --workers "$MERGE_WORKERS"
+  --tmp-dir "$MERGE_TMP_DIR"
 )
 if [[ -n "$SKIP_UNITS" ]]; then
   ARGS+=(--skip-units "$SKIP_UNITS")

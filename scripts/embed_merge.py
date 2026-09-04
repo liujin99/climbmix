@@ -64,6 +64,25 @@ Semantics:
     40h re-embed). --upload-backup optionally copies the manifest +
     blocks to OBS as redundancy.
 
+Parallelism & staging (the merge is IO-bound, not compute):
+  - --workers N fetches/validates units concurrently. Blocks are
+    independent files written tmp+fsync+rename with per-block sidecar
+    accounting, so parallelism needs no coordination: a banked block
+    is sidecar-complete or it does not count. A failing unit cancels
+    the pending queue, in-flight units finish (their blocks bank),
+    and the run exits loudly.
+  - The per-unit npz download is pure scratch (deleted after the
+    block write), so it stages OUTSIDE the cache mount when possible:
+    /dev/shm (RAM) > local /tmp > the cache dir itself. This keeps the
+    FUSE mount at 7.5 GB of traffic per unit (the block write) instead
+    of 22.5 GB (download + npz read-back + block write) — on the
+    2026-09-04 merge that alone is a ~3x mount-IO cut. --tmp-dir
+    overrides the auto-pick; explicit dirs are left in place after
+    the run (auto-picked ones are removed).
+  - Each worker process builds its OWN obs client from the same
+    remote config (connection pools must not cross fork boundaries);
+    the parent's client is never used by children.
+
 Re-use semantics (why this cache is a one-time investment):
   - The cache key ignores every downstream knob (K_enhanced/K_max/
     merge_distance/prune_threshold/lr/iterations): all ClimbMix
@@ -96,6 +115,7 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 import time
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -185,6 +205,102 @@ def cache_shape(path):
                 return tuple(int(s) for s in shape)
     except Exception:
         return None
+
+
+def pick_tmp_dir(key_dir, workers, unit_bytes):
+    """npz staging preference: RAM (/dev/shm) > local /tmp > the cache
+    dir itself. The npz round-trip is pure scratch — keeping it off the
+    (often FUSE-mounted) cache dir cuts per-unit mount IO 22.5 -> 7.5 GB.
+    Returns (path, kind) with kind in {"ram", "local", "cache-dir"}."""
+    need = unit_bytes * max(1, workers) + (1 << 30)
+    for cand, kind in (("/dev/shm", "ram"),
+                       (tempfile.gettempdir(), "local")):
+        if not cand or not os.path.isdir(cand) or not os.access(cand, os.W_OK):
+            continue
+        try:
+            st = os.statvfs(cand)
+            if st.f_bavail * st.f_frsize >= need:
+                return os.path.join(cand, "climbmix_merge_tmp"), kind
+        except OSError:
+            continue
+    return os.path.join(key_dir, "merge_downloads"), "cache-dir"
+
+
+# ── worker-process side (parallel fetch + validate) ────────────────────────
+# Module-level state built by the pool initializer; each child builds its
+# OWN obs client from the remote config (forked connection pools must
+# never be shared).
+
+_W = {}
+
+
+def _merge_worker_init(cfg):
+    from climbmix.remote.remote_executor import RemoteConfig
+    from climbmix.remote.backends import resolve_backend
+    rc = RemoteConfig.from_json_file(cfg["remote_config"])
+    bundle = resolve_backend(rc)
+    _W["obs"] = bundle.make_obs_storage(rc)
+    _W["cfg"] = cfg
+
+
+def _fetch_unit(unit_id, man):
+    """One unit: download the npz to the staging dir, verify its shape
+    against the unit manifest, write the block + sidecar. The sidecar
+    is written ONLY after the block is complete, so a crash window
+    leaves an orphan .npy that the resume scan re-downloads. Returns
+    (unit_id, rows, seconds)."""
+    import numpy as np
+    from climbmix.utils.io_utils import atomic_save_npy
+    cfg = _W["cfg"]
+    obs = _W["obs"]
+    t0 = time.time()
+    npz_path_u = os.path.join(cfg["tmp_dir"], f"{unit_id}.npz")
+    try:
+        obs.download_file(
+            f"{cfg['obs_prefix'].rstrip('/')}/embed_units/{unit_id}"
+            f"/result/partial_block.npz", npz_path_u)
+        arr = np.load(npz_path_u)["embeddings"]
+    except Exception as e:
+        # name the unit — in a 63-unit parallel run a bare "File is not
+        # a zip file" is unactionable
+        raise RuntimeError(
+            f"[merge] FATAL: {unit_id} partial download/read failed: "
+            f"{e}") from None
+    rows = int(man["total_rows"])
+    if arr.shape != (rows, cfg["emb_dim"]):
+        raise RuntimeError(
+            f"[merge] FATAL: {unit_id} partial shape {arr.shape} != "
+            f"manifest ({rows}, {cfg['emb_dim']})")
+    atomic_save_npy(
+        os.path.join(cfg["key_dir"], f"block_{unit_id}.npy"), arr)
+    write_block_sidecar(
+        os.path.join(cfg["key_dir"], f"block_{unit_id}.json"),
+        unit_id, rows, cfg["emb_dim"],
+        [s["path"] for s in man["shards"]])
+    del arr
+    if not cfg["keep_downloads"]:
+        try:
+            os.remove(npz_path_u)
+        except OSError:
+            pass
+    return unit_id, rows, time.time() - t0
+
+
+def _validate_block(task):
+    """One block: mmap + full finite/shape scan (chunked views inside
+    _validate_embeddings). task = (key_dir, block_meta, ranges, emb_dim)."""
+    import numpy as np
+    from climbmix.core.embedding_cluster import _validate_embeddings
+    key_dir, b, ranges, emb_dim = task
+    block_path = os.path.join(key_dir, b["file"])
+    block = np.load(block_path, mmap_mode="r")
+    if tuple(block.shape) != (b["rows"], emb_dim):
+        raise RuntimeError(
+            f"[merge] FATAL: {block_path} shape {tuple(block.shape)} "
+            f"!= ({b['rows']}, {emb_dim})")
+    _validate_embeddings(block, f"[Embed-Merge {b['unit_id']}]",
+                         ranges=ranges)
+    return b["unit_id"]
 
 
 def load_and_check_units(ed, obs, shard_infos, args, done_units):
@@ -325,6 +441,16 @@ def main() -> int:
     p.add_argument("--skip-units", default="",
                    help="comma-separated unit ids/globs to ignore (e.g. "
                         "stale mixed-layout units)")
+    p.add_argument("--workers", type=int, default=4,
+                   help="parallel unit fetches + block validations "
+                        "(the merge is IO-bound; blocks are independent "
+                        "tmp+rename files, so this is coordination-free)")
+    p.add_argument("--tmp-dir", default="auto",
+                   help="where per-unit npz downloads stage: 'auto' "
+                        "picks /dev/shm (RAM) > local /tmp > the cache "
+                        "dir — keeping the scratch round-trip off the "
+                        "FUSE mount cuts its IO ~3x. An explicit dir is "
+                        "left in place after the run")
     p.add_argument("--keep-downloads", action="store_true",
                    help="keep the per-unit npz files after copying "
                         "(default: deleted to save ~7.5 GB per unit)")
@@ -445,6 +571,12 @@ def main() -> int:
             os.remove(junk)
             print(f"[merge] removed stale single-body artifact "
                   f"{os.path.basename(junk)}")
+    # orphaned block tmp writes (killed mid-save): a banked block never
+    # carries this suffix, so these are always crash residue
+    for stale in glob.glob(os.path.join(key_dir, "block_*.npy.tmp.npy")):
+        os.remove(stale)
+        print(f"[merge] removed stale block tmp "
+              f"{os.path.basename(stale)}")
     if os.path.isdir(dl_dir) and not args.keep_downloads:
         shutil.rmtree(dl_dir, ignore_errors=True)
 
@@ -465,40 +597,66 @@ def main() -> int:
     print(f"[merge] {len(unit_list)} unit partial(s) to fetch, "
           f"{len(done)} block(s) already banked, coverage complete")
 
-    import numpy as np
-    from climbmix.utils.io_utils import atomic_save_npy
     row_bytes = args.emb_dim * 4
+
+    # staging dir for the scratch npz round-trips (RAM when available —
+    # see the module docstring's parallelism notes)
+    if args.tmp_dir and args.tmp_dir != "auto":
+        tmp_dir, tmp_kind = os.path.abspath(args.tmp_dir), "explicit"
+    else:
+        unit_bytes = (total_docs * row_bytes) // max(1, len(all_units)) + 1
+        tmp_dir, tmp_kind = pick_tmp_dir(
+            key_dir, args.workers, unit_bytes)
+    os.makedirs(tmp_dir, exist_ok=True)
+    n_fetch = len(unit_list)
+    workers = max(1, min(args.workers, n_fetch or 1))
+    if n_fetch:
+        print(f"[merge] staging npz in {tmp_dir} ({tmp_kind}), "
+              f"{workers} worker(s) fetching in parallel", flush=True)
+    else:
+        print(f"[merge] staging: {tmp_dir} ({tmp_kind}) — all blocks "
+              "already banked, nothing to fetch", flush=True)
+
+    from concurrent.futures import (
+        ProcessPoolExecutor, as_completed)
+    cfg = {"remote_config": args.remote_config,
+           "obs_prefix": args.obs_prefix,
+           "key_dir": key_dir,
+           "emb_dim": args.emb_dim,
+           "keep_downloads": args.keep_downloads,
+           "tmp_dir": tmp_dir}
     t0 = time.time()
-    for i, (unit_id, man) in enumerate(unit_list):
-        npz_path_u = os.path.join(dl_dir, f"{unit_id}.npz")
-        os.makedirs(dl_dir, exist_ok=True)
-        tu = time.time()
-        obs.download_file(
-            f"{args.obs_prefix.rstrip('/')}/embed_units/{unit_id}"
-            f"/result/partial_block.npz", npz_path_u)
-        arr = np.load(npz_path_u)["embeddings"]
-        rows = int(man["total_rows"])
-        if arr.shape != (rows, args.emb_dim):
-            raise SystemExit(
-                f"[merge] FATAL: {unit_id} partial shape {arr.shape} != "
-                f"manifest ({rows}, {args.emb_dim})")
-        block_path = os.path.join(key_dir, f"block_{unit_id}.npy")
-        atomic_save_npy(block_path, arr)
-        write_block_sidecar(
-            os.path.join(key_dir, f"block_{unit_id}.json"),
-            unit_id, rows, args.emb_dim,
-            [s["path"] for s in man["shards"]])
-        del arr
-        if not args.keep_downloads:
-            os.remove(npz_path_u)
-        rate = (i + 1) / (time.time() - t0)
-        eta = (len(unit_list) - i - 1) / rate if rate > 0 else 0
-        print(f"[merge] {unit_id} banked ({i + 1}/{len(unit_list)}, "
-              f"{rows:,} rows, {(time.time() - tu):.0f}s, "
-              f"ETA {eta/60:.0f}m)", flush=True)
+    ex = ProcessPoolExecutor(max_workers=workers,
+                             initializer=_merge_worker_init,
+                             initargs=(cfg,))
+    futs = {}
+    try:
+        for unit_id, man in unit_list:
+            futs[ex.submit(_fetch_unit, unit_id, man)] = unit_id
+        banked_ct = 0
+        for fut in as_completed(futs):
+            unit_id, rows, secs = fut.result()
+            banked_ct += 1
+            rate = banked_ct / (time.time() - t0)
+            eta = (n_fetch - banked_ct) / rate if rate > 0 else 0
+            print(f"[merge] {unit_id} banked ({banked_ct}/{n_fetch}, "
+                  f"{rows:,} rows, {secs:.0f}s, "
+                  f"ETA {eta/60:.0f}m)", flush=True)
+    except BaseException as e:
+        # a failing unit fails the run loudly; in-flight units finish
+        # (their banked blocks keep resume value), pending ones cancel
+        for f in futs:
+            f.cancel()
+        ex.shutdown(wait=True)
+        if isinstance(e, KeyboardInterrupt):
+            print("[merge] interrupted — banked blocks are kept "
+                  "(re-run resumes per block)", file=sys.stderr)
+            return 130
+        print(f"{e}", file=sys.stderr)
+        return 1
+    ex.shutdown(wait=True)
 
     # ── validate every block, then publish the manifest ──────────────
-    from climbmix.core.embedding_cluster import _validate_embeddings
     blocks_meta = []
     for unit_id, shards in all_units:
         blocks_meta.append({
@@ -508,25 +666,43 @@ def main() -> int:
             "global_start": int(shards[0]["start_idx"]),
             "shards": [os.path.basename(s["path"]) for s in shards],
         })
+    vtasks = []
     for b in blocks_meta:
         block_path = os.path.join(key_dir, b["file"])
         if not os.path.isfile(block_path):
             raise SystemExit(
                 f"[merge] FATAL: block missing after assembly: "
                 f"{block_path}")
-        block = np.load(block_path, mmap_mode="r")
-        if tuple(block.shape) != (b["rows"], args.emb_dim):
-            raise SystemExit(
-                f"[merge] FATAL: {block_path} shape {tuple(block.shape)}"
-                f" != ({b['rows']}, {args.emb_dim})")
         ranges = [(int(s["start_idx"]), int(s["start_idx"])
                    + int(s["num_docs"]), os.path.basename(s["path"]))
                   for s in shard_infos
                   if s["start_idx"] >= b["global_start"]
                   and s["start_idx"] < b["global_start"] + b["rows"]]
-        _validate_embeddings(block, f"[Embed-Merge {b['unit_id']}]",
-                             ranges=ranges)
-        del block
+        vtasks.append((key_dir, b, ranges, args.emb_dim))
+    vworkers = max(1, min(args.workers, len(vtasks) or 1))
+    ex = ProcessPoolExecutor(max_workers=vworkers,
+                             initializer=_merge_worker_init,
+                             initargs=(cfg,))
+    vfuts = {}
+    try:
+        for t in vtasks:
+            vfuts[ex.submit(_validate_block, t)] = t[1]["unit_id"]
+        vdone = 0
+        for fut in as_completed(vfuts):
+            print(f"[merge] {fut.result()} validated "
+                  f"({vdone + 1}/{len(vfuts)})", flush=True)
+            vdone += 1
+    except BaseException as e:
+        for f in vfuts:
+            f.cancel()
+        ex.shutdown(wait=True)
+        if isinstance(e, KeyboardInterrupt):
+            print("[merge] interrupted — banked blocks are kept "
+                  "(re-run resumes per block)", file=sys.stderr)
+            return 130
+        print(f"{e}", file=sys.stderr)
+        return 1
+    ex.shutdown(wait=True)
 
     manifest = {
         "format": "sharded-v1",
@@ -547,6 +723,12 @@ def main() -> int:
     # cleanup partial-state files (the published cache is the product)
     for side in glob.glob(os.path.join(key_dir, "block_*.json")):
         os.remove(side)
+    if not args.keep_downloads:
+        if tmp_kind == "explicit":
+            print(f"[merge] note: --tmp-dir {tmp_dir} left in place "
+                  "(explicit dirs are the caller's to manage)")
+        elif os.path.isdir(tmp_dir):
+            shutil.rmtree(tmp_dir, ignore_errors=True)
     if os.path.isdir(dl_dir) and not args.keep_downloads:
         shutil.rmtree(dl_dir, ignore_errors=True)
 

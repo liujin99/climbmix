@@ -290,17 +290,28 @@ global offsets against metadata_shard_info.json, validates every
 block, publishes the SHARDED cache — `manifest.json` + per-unit
 `block_*.npy` — at the Step-1 key, resumes per-block from sidecars on
 a crash, is idempotent on re-run; `--model`/`--truncate-len` MUST
-equal the run config's discovery values — the key depends on them):
+equal the run config's discovery values — the key depends on them).
+The merge is IO-bound, so it runs PARALLEL: `MERGE_WORKERS` processes
+(default 8) fetch/validate units concurrently (blocks are independent
+tmp+fsync+rename files — no coordination), and the scratch npz
+round-trips stage OUTSIDE the cache mount when possible (`/dev/shm`
+RAM > local /tmp > the cache dir), cutting per-unit mount IO from
+22.5 GB to the 7.5 GB block write. Expected wall clock on a big submit host
+(2026-09-05 sizing for the 63-unit pool: serial was ~135s/unit ⇒
+~3.5h; parallel + RAM staging is mount-bandwidth bound, estimate
+~40-70 min — the log's per-unit ETA lines calibrate it live):
 
 ```
 bash runs/embed_merge.sh
+MERGE_WORKERS=4 bash runs/embed_merge.sh     # 挂载并发不扩展时降档
 # wrapper 默认: --data-dir = run_climbmix.sh 的 DATA_DIR,
 #   --cache-dir = 同名 EMBEDDING_CACHE_DIR 旋钮 (指向生产树即落生产缓存)
+#   npz 暂存: MERGE_TMP_DIR=auto (/dev/shm > /tmp > cache 目录)
 # 产物: <EMBEDDING_CACHE_DIR>/<key>/{manifest.json, block_<unit>.npy × 63}
 #   (~7.5 GB/块, 远低于任何单文件上限; 全池 ~443 GB)
-# 磁盘需求 (cache 所在文件系统): 池字节 (~475 GB) + ~7.5 GB/在飞单元;
-#   放不下可把 EMBEDDING_CACHE_DIR 指向 OBS 挂载路径 (分块写入, 无单文件
-#   EFBIG 风险)
+# 磁盘需求 (cache 所在文件系统): 池字节 (~475 GB) + 在飞 tmp 块
+#   (workers × ~7.5 GB, 落定即并入); 放不下可把 EMBEDDING_CACHE_DIR 指向
+#   OBS 挂载路径 (分块写入, 无单文件 EFBIG 风险)
 ```
 
 After it exits green, the next pipeline run cache-hits Step 1 and
