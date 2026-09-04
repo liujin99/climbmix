@@ -12,6 +12,8 @@
 #      搜索结果保留, Steps 4-8 重跑
 #  恢复粒度: 步骤级(.done) / 迭代级(search_state.json) / 实验级(exp_*/meta.json)
 #            / embedding 分片级(进度账本) / 训练内部不支持(整次重跑)
+#  停止: pkill -f run_climbmix.sh —— 后台启动(自有进程组, 建议配 setsid)时
+#        TERM 连带全部子进程; 前台直接 Ctrl-C
 #  生命周期: 活跃 = result/${EXP_NAME}_current; 正常跑完自动改名 result/${EXP_NAME}_<ts>
 #    (重跑同命令 → 自动恢复已完成 run, 全程跳过); 每个归档目录带 archive_meta.json。
 #  旧版单一 .fingerprint 目录: MIGRATE_LEGACY_FINGERPRINT=1 采纳(不校验)。
@@ -23,6 +25,20 @@
 source /usr/local/Ascend/ascend-toolkit/set_env.sh 2>/dev/null || true
 
 set -euo pipefail
+
+# ── Orphan-safe teardown ──
+# Background launches (nohup ... &: interactive job control gives this script
+# its own process group — setsid in the launch command makes it airtight)
+# install a group-kill trap: TERM/INT/exit takes every descendant
+# (python/torchrun/dataloader workers) down with us, so
+# `pkill -f run_climbmix.sh` cannot strand NPU-holding grandchildren (the
+# 2026-09-04 prod1 stop left ~a dozen orphans to clean by hand). Foreground
+# runs share the caller's process group: skip there — kill 0 would TERM the
+# interactive shell itself, and the terminal already delivers Ctrl-C to all.
+_pgid="$(ps -o pgid= -p $$ 2>/dev/null | tr -d '[:space:]')"
+if [ -n "$_pgid" ] && [ "$$" = "$_pgid" ]; then
+    trap 'trap - TERM INT EXIT; kill 0' TERM INT EXIT
+fi
 
 # ── Configuration ──
 CLIMBMIX_DIR="$(cd "$(dirname "$0")/.." && pwd)"
