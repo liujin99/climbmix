@@ -50,7 +50,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -59,6 +59,14 @@ from climbmix.pipeline.proxy_runner import ProxyRunner
 from climbmix.remote.exp_spec import ExpSpec, SPEC_VERSION
 from climbmix.remote.backends import resolve_backend
 from climbmix.remote.job_api import JobStatus, TransientSubmitError
+
+
+class QueueTimeoutError(RuntimeError):
+    """Job sat in the platform queue past queue_timeout_s and never
+    started. Retrying is legitimate (infra event, not a property of the
+    mixture): burning the config as a failed experiment would feed the
+    predictor a fabricated inf/0.0 score for a mixture that was never
+    trained."""
 
 
 @dataclass
@@ -151,6 +159,11 @@ class RemoteConfig:
     # eaten by the queue is pure waste. This knob bounds the PENDING phase
     # alone (lost/zombie queue entries).
     queue_timeout_s: float = 24 * 3600.0
+    # After a queue timeout: resubmit (fresh queue clock, job name -rN
+    # suffix) up to this many times before giving up and burning the
+    # config as a failed experiment. Total queue patience =
+    # queue_timeout_s × (1 + attempts). 0 = old burn-immediately behavior.
+    queue_resubmit_attempts: int = 2
 
     # Job-level env (HF_ENDPOINT=hf-mirror.com, ...). Passed to the job
     # process AND baked into the spec for the train/eval subprocesses.
@@ -670,6 +683,38 @@ class RemoteExecutor(ProxyRunner):
             argv += ["--storage-root", self.remote.storage_root]
         return argv
 
+    def _submit_and_wait(self, experiment_id: int,
+                         spec_uri: str) -> Tuple[str, JobStatus]:
+        """Submit the worker job and wait for a terminal status. A QUEUE
+        timeout (never started) resubmits with a fresh queue clock up to
+        queue_resubmit_attempts times — the mixture was never trained, so
+        the config must not be burned for an infra event. Runtime
+        timeouts and other failures propagate immediately.
+        Returns (final job_id, terminal status)."""
+        attempts = max(0, self.remote.queue_resubmit_attempts)
+        for attempt in range(attempts + 1):
+            name = self._job_name(experiment_id)
+            if attempt > 0:
+                name = f"{name[:59]}-r{attempt}"
+            job_id = self._submit_with_retry(
+                name=name,
+                command=self._worker_argv(spec_uri),
+                env=dict(self.remote.job_env),
+                experiment_id=experiment_id,
+            )
+            print(f"  [Exp {experiment_id}] submitted job {job_id} "
+                  f"(spec: {spec_uri})")
+
+            try:
+                return job_id, self._wait_job(job_id, experiment_id)
+            except QueueTimeoutError as e:
+                if attempt >= attempts:
+                    raise
+                print(f"  [Exp {experiment_id}] {e}\n"
+                      f"  [Exp {experiment_id}] resubmitting "
+                      f"(try {attempt + 2}/{attempts + 1}, fresh queue clock)")
+        raise AssertionError("unreachable")  # pragma: no cover
+
     def _wait_job(self, job_id: str, experiment_id: int,
                   timeout: Optional[float] = None) -> JobStatus:
         """Poll until the job reaches a terminal state; RETURNS the status
@@ -699,7 +744,7 @@ class RemoteExecutor(ProxyRunner):
                 # queue phase (PENDING/UNKNOWN): submission → start clock
                 if now - submitted_at > queue_timeout:
                     self.job_api.cancel(job_id)
-                    raise RuntimeError(
+                    raise QueueTimeoutError(
                         f"remote job {job_id} (exp {experiment_id}) never "
                         f"started — queued {(now - submitted_at)/60:.0f}m "
                         f"(limit {queue_timeout/60:.0f}m); cancelled. "
@@ -836,16 +881,7 @@ class RemoteExecutor(ProxyRunner):
         spec_uri = f"{exp_obs}/spec.json"
         self.obs.upload_bytes(spec.to_json().encode("utf-8"), spec_uri)
 
-        job_id = self._submit_with_retry(
-            name=self._job_name(experiment_id),
-            command=self._worker_argv(spec_uri),
-            env=dict(self.remote.job_env),
-            experiment_id=experiment_id,
-        )
-        print(f"  [Exp {experiment_id}] submitted job {job_id} "
-              f"(spec: {spec_uri})")
-
-        job_status = self._wait_job(job_id, experiment_id)
+        job_id, job_status = self._submit_and_wait(experiment_id, spec_uri)
 
         # ── materialize the result into exp_dir ──
         # The worker uploads result.json even for KNOWN-stage failures
