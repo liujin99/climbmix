@@ -16,7 +16,7 @@
 | D2 | 引导采样 | "从预测排序 top-N 中随机采 M 个"(M/N 未给值) | 一致:top-N(N=3×sample_from_top_m=96)中无放回**原样**抽 M 个(N=96 的具体化是我们的选择;2026-08-28 回归论文字面语义,此前为 Dir(5·w) 扰动) | 扰动被数值实验证伪,见细节节 D2 |
 | D3 | 最终选择 | 最终 predictor 在设计空间 A 上取 argmax(A 的枚举方式未说明) | 4 个浓度级(1/5/10/50)× 25K Dirichlet 候选 + argmax 附近 5K 精搜 | 同为 predictor argmax,我们把 A 的枚举具体化 |
 | D4 | LightGBM 超参 | max_depth=4,min_samples_leaf≥5,L1+L2,early stopping(20 轮无提升)+ 独立验证集 | max_depth=3,min_samples_leaf=3,L1=L2=1.0,early_stopping=20(带验证集切分),n_estimators=500,lr=0.02,auto_adjust 公式 | N=27~35 小样本下更强的容量限制;结构(L1/L2+早停)与论文一致 |
-| D5 | 聚类数 K | 固定 K:主实验 21 个超簇(1000→剪枝 240→合并);消融 15/30 | 带宽 `K_final = clamp(natural_K(τ), 3, 15)` 池自适应 | 我们的池(580K docs)结构与 800B-token 池不同;带宽避免距离守卫强并语义不同的簇 |
+| D5 | 聚类数 K | 固定 K:主实验 21 个超簇(1000→剪枝 240→合并);消融 15/30 | **elbow 定 K_ENHANCED=14**(2026-09-04;带宽 clamp 机制保留为池自适应默认) | 我们的池(116M docs,方向盆地极偏斜)上 natural_K(τ) 不稳(0.7→49/0.8→4/0.9→≤3)且 floor=3 退化(C0 独占 99.86% docs);14 = merge-distance elbow(最大跳变 0.0816),在论文粒度带 15-30 下沿(我们的搜索预算 35 vs 论文 112) |
 | D6 | 合并阈值 | 欧氏距离阈值 1.5(§3.1,v2 明文) | τ=0.9 欧氏距离,作用在 **L2 归一化后**的 stella 向量(≈cos 0.60) | 论文的 1.5 所在空间(是否归一化)未说明,数值不可直接换算;0.9 是我们按 cos≈0.6 语义校准的守卫 |
 | D7 | Random 基线小簇策略 | 未记载(其规模天然不会遇到:800B/21 簇/40B 预算 → 每簇配额 ~1.9B) | 簇配额不足 → 全取、不复制、不重分配(与 CLIMB 臂同一函数同一策略,两臂对称退化) | App. C.1 只定义等权 1/K;小池必须补一个策略且两臂一致 |
 | D8 | 优化目标 | 下游任务验证集 accuracy(PIQA/ARC_E/HellaSwag) | SNR 加权 acc+NLL z-score(6 个 STEM benchmark) | 难 benchmark 上 accuracy 是二项噪声;见 scoring_metric_design.md |
@@ -84,6 +84,13 @@ guided 采样的候选又全部落在 top-N 带内、特征向量高度相似,�
 我们:同一嵌入与 K-means 与剪枝阈值;合并改为带宽制(见 TODO "Cluster-count
 band"),τ=0.9 作用在归一化向量上。**勘误**:早前审计记录"1.5/3.0 不在论文
 正文"是基于 v1 的结论;v2 §3.1 两者均有明文。
+**2026-09-04 生产修订(D5)**:prod1 全池(116M docs / ~92B tokens)实测带宽
+退化——natural_K(τ) 在 τ=0.7/0.8/0.9 下为 49/4/≤3,floor-stop 得 K=3 且 C0
+独占 99.86% docs(搜索退化为单参数 f(w_C0),random 臂 383M vs CLIMB 臂 ~1B
+tokens 不可比)。改用 merge-distance elbow 定 K_ENHANCED=14(最大跳变
+0.0816;12 宏簇 ~7.6B tokens/簇 + 2 尘埃簇 0.07% docs)——即论文"固定 K"
+语义落在我们的池上,仍在带宽 cap 15 内。kmeans 缓存不受影响(键 = K_init=1000
++ pool,K_ENHANCED 只作用于其后的 prune+merge)。
 
 ### D7 Random 基线
 论文 App. C.1:"each cluster is assigned an equal and uniform weight"。我们的
