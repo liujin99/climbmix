@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Any, Tuple
 import glob
 import json
 import os
+import re
 import numpy as np
 import numpy.typing as npt
 
@@ -168,6 +169,18 @@ class ClusterInfo:
         return self.num_tokens / max(1, self.num_docs)
 
 
+def _cluster_label_sort_key(label: str) -> Tuple[int, int, str]:
+    """Sort key putting C1 < C2 < ... < C10 (numeric suffix order).
+
+    Non-Cn labels sort after all Cn labels, lexicographically among
+    themselves.
+    """
+    m = re.match(r"^C(\d+)$", str(label))
+    if m:
+        return (0, int(m.group(1)), str(label))
+    return (1, 0, str(label))
+
+
 @dataclass
 class MixtureWeights:
     weights: npt.NDArray[np.float64]
@@ -189,7 +202,12 @@ class MixtureWeights:
     @classmethod
     def from_dict(cls, d: Dict[str, float], cluster_labels: Optional[List[str]] = None) -> "MixtureWeights":
         if cluster_labels is None:
-            cluster_labels = sorted(d.keys())
+            # Natural cluster order (C1, C2, ..., C10): a plain
+            # lexicographic sort interleaves C10/C11 between C1 and C2 and
+            # silently permutes the weight vector against the cluster order
+            # it was written for. Never hit in the prod1 pipeline (weights
+            # travel in-memory); fixed before prod2.
+            cluster_labels = sorted(d.keys(), key=_cluster_label_sort_key)
         weights = np.array([d[label] for label in cluster_labels], dtype=np.float64)
         return cls(weights=weights)
 
@@ -288,6 +306,16 @@ class ClusterDiscoveryConfig:
     # (paper merges to fixed K_enhanced regardless of distance) — deliberate
     # deviation to prevent forced merges of semantically distinct clusters.
     merge_distance: float = 0.9
+    # Macro-cluster construction strategy. "distance" = historical
+    # closest-pair agglomerative merge inside the [K_enhanced, K_max] band.
+    # "balanced" = capacity-constrained balanced partition to EXACTLY
+    # K_enhanced macro clusters (merge_distance/K_max ignored). Added for
+    # prod2: this pool's embedding space is a single dense continuum (99%
+    # of tokens), where distance merging chains into one giant cluster at
+    # every (K, tau) — measured on the prod1 pool: K=14/21/24/32 leave a
+    # 99.0/98.5/98.3/97.5% top cluster. See balanced_macro_clusters and
+    # docs/paper_deviations.md D14.
+    merge_strategy: str = "distance"
 
     VALID_METHODS = ("embedding_cluster", "quality_cluster")
 
