@@ -123,6 +123,17 @@ Wall = T(k) × N / C        （零空转，C = ⌊A/k⌋ 按节点装箱）
 - **一次全绿后放宽：λ_max ≈ 10h → k=2**（省闲置省税）
 - target 阶段不参与本文档决策（固定 ws=8，1000 步 ≈ 5-6.5h）
 
+### 5.2 prod2 决策（2026-09-07，B++ 全量版）
+
+prod1 实测复盘（40h：搜索 ~28h + 两臂串行 ~20h 主节点瓶颈）后的舰队升级，全部为执行形态（不进搜索指纹），语义仍锁定 §5.1 的 k 一致性原则：
+
+- **k=8 全舰队**：单实验 2.8h（含 eval）、无跨节点 collectives、远端节点同型。d28 目标臂本就固定 ws=8 —— 搜索与交付同形状。
+- **本地 k=8 整槽入队**（`REMOTE_LOCAL_PARALLEL=1`，默认 0 显式开启）：`npu_per_exp == npu_devices` 时本地 8 卡是 1 个"整槽"（ProxyRunner 串行全卡路径），与远端 10 作业组成 C=11。波次边界不受影响（⌈20/11⌉ = ⌈20/10⌉ = 2），本地卡不再闲置。
+- **两臂远端执行**（`TARGET_ARM_MODE=remote` 默认）：random 臂由 `dispatch_target_arm.py --arm random` 在搜索期间提前发射（h≈2→12.3），climb 臂在搜索后发射（h≈13→23.7）；与搜索舰队同池/同镜像/同 argv 构建器（`nanochat_cmds.build_target_*`，与 `runs/lib/target_arm.sh` 逐 token 对齐，测试保证），唯一差异 = 数据。失败三层兜底：远端 → 本地 torchrun；训成评败的作业抢救 checkpoint 落 `.done_mid_train` 后 eval 走本地。总墙钟 ~40h → **~24h**。
+- **期望列表 + 三机制自适应**（`ADAPTIVE_CONFIGS=1` 显式开启，默认 0 字面语义）：`CONFIGS_PER_ITER="20,10,10"` 解释为"期望每轮实验数" → 波预算 `w_i = round(e_i/S0)`；实测并发 `C_eff`（远端 RUNNING 中位数 + 本地槽）在探窗（首 RUNNING+30min / 批起点+40min）测得后截断未提交尾部（guided 轮队列按预测器排名头排，截尾=丢最差）；滞留驱逐（已提交 PENDING > `REMOTE_PENDING_GRACE_MIN`=30min 且同批在跑 → cancel + 永久移出本轮，pending 原子重写、resume 不重跑）；滚动定尺寸（iter≥2 直接 `w_i × C_eff_prev`）。护栏：C_eff<2 禁用截断、池 < min_configs=4 不截断、admitted ≥ 4。prod2 预期 ~44 configs、4 波 ≈ 11.2h。
+- **发射参数**：`K_ENHANCED=15 NPU_PER_EXP=8 REMOTE_MAX_JOBS=10 CONFIGS_PER_ITER="20,10,10" ADAPTIVE_CONFIGS=1 REMOTE_LOCAL_PARALLEL=1`（池子当前 98 卡空闲；MAX_JOBS=10 留 ~18 给他人）。检查点仪表盘：`scripts/diagnostics/prod2_watch.sh`（CP0 聚类结构 / CP1 SNR+acc-only / CP2 online ρ / CP3 Selection mode / CP4 两臂+base 锚点）。
+- 监控/熔断细节与发射后 30 分钟检查点见 `.opencode/plans/prod2-bplus-implementation.md`（工作区文档库）与 `scripts/dispatch_target_arm.py` 头注。
+
 ## 6. 二阶效应（了解即可，不改结论）
 
 - **迭代间开销非零**：LightGBM 拟合秒级，但每轮之间有 nᵢ 次数据 mix（select + 写 parquet，分钟级/次）。k=2 可忽略；k=8（波长 2.8h）约占 3-5%。缓解：队列派发 + 下一轮 mix 与当前波流水线重叠（RemoteExecutor 实现项）

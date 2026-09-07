@@ -25,7 +25,7 @@
 | D11 | token 计量 | 精确 tokenize(池统计) | chars/4 估算(元数据预计算列) | 池扫描免 tokenize;配比/配额的近似 |
 | D12 | 评测子采样 | 全量 | speedrun 100 题/任务(fixed shuffle seed 1337,跨实验可比较);生产 -1 全量 | speedrun 时间预算;生产无偏差 |
 | D13 | 剪枝规则 | 簇平均质量 < 3.0 即剪(fasttext,§2.1/§3.1) | 平均阈值 + **单列下限** hybrid:任一质量列的簇均值 < `PRUNE_COLUMN_FLOOR`(生产默认 2.0,0=关)即剪 | 平均线漏检"格式干净但知识贫瘠"的簇(2026-08-31 20-分片画像:69/1000 簇过均线但 knowledge_value 1.8-2.0;6.6% docs / 仅 1.5% tokens);标签未校验故取保守档 2.0,见细节 D13 |
-| D14 | 宏簇构造 | 距离合并到固定 K_enhanced(主实验 21 超簇;D.4:K_final 15/21/30 不敏感,15 最优) | **prod2 起可选 `MERGE_STRATEGY=balanced`:容量约束平衡划分到恰好 K_ENHANCED 个宏簇**(默认仍 distance) | 本池嵌入空间 = 单一致密连续流形(99% tokens)+ 13 格式孤岛:距离合并在任何 (K,τ) 下都链式塌成巨簇(K=14/21/24/32 实测留 99.0/98.5/98.3/97.5%,去掉 floor 塌到 K=3/99.9%,912/912 次合并全部合法)——搜索空间退化为 ~1 个旋钮(prod1 根因#1);balanced 用 K1000 层已验证的 k-means 机制,构造性保证 max token share ≤ (1+slack)/K;代价:宏簇是连续体的容量切片而非纯主题(语义由 balanced_profile.json 的 fine→anchor cosine 审计)。prod2 = balanced + K=15(对齐 D.4 最优) |
+| D14 | 宏簇构造 | 距离合并到固定 K_enhanced(主实验 21 超簇;D.4:K_final 15/21/30 不敏感,15 最优) | **prod2 起默认 `MERGE_STRATEGY=balanced`:容量约束平衡划分到恰好 K_ENHANCED 个宏簇**(distance 仍可选对照) | 本池嵌入空间 = 单一致密连续流形(99% tokens)+ 13 格式孤岛:距离合并在任何 (K,τ) 下都链式塌成巨簇(K=14/21/24/32 实测留 99.0/98.5/98.3/97.5%,去掉 floor 塌到 K=3/99.9%,912/912 次合并全部合法)——搜索空间退化为 ~1 个旋钮(prod1 根因#1);balanced 用 K1000 层已验证的 k-means 机制,构造性保证 max token share ≤ (1+slack)/K;代价:宏簇是连续体的容量切片而非纯主题(语义由 balanced_profile.json 的 fine→anchor cosine 审计)。prod2 = balanced + K=15(对齐 D.4 最优) |
 
 ## 细节与出处
 
@@ -34,6 +34,11 @@
 evaluated in iterations 1, 2, and 3, respectively, giving a total of 112
 searches"(4:2:1 分配)。我们的 `CONFIGS_PER_ITER=20,10,5` 共 35。论文 Table 3
 显示预算升到 150%/200% 仍有增益——若生产预算允许,升 D1 是第一个该动的旋钮。
+prod2(2026-09-07)起为期望列表 `"20,10,10"`(~40-44 实测,自适应语义):
+iter3 维持满波(而非论文的 4:2:1 衰减)——远端舰队的波次经济性使第 3 轮满波
+几乎免费(与第 2 轮同波长),且 prod1 的 f<0 教训表明浅末轮贡献的样本最稀缺。
+实算数量随实测并发浮动(ADAPTIVE_CONFIGS=1,见 parallel_k_selection.md §5.2),
+字面预算是上界口径。
 
 ### D2 引导采样
 论文 §2.2 子程序 1:"sort all configurations in the weight space A … randomly
