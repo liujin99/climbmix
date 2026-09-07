@@ -527,27 +527,33 @@ def main() -> int:
     mixture_uri = f"{arm_root}/mixture_data"
     result_uri = f"{arm_root}/result"
 
-    # ── d28 asset: ensure on OBS (one-time bootstrap) ──
+    # ── d28 asset: ensure on OBS (one-time bootstrap; flock-serialized —
+    # the random arm and the base anchor may bootstrap concurrently) ──
     d28_uri = (args.d28_asset_uri
                or os.environ.get("REMOTE_D28_ASSET_URI")
                or launch_env.get("REMOTE_D28_ASSET_URI")
                or f"{prefix}/assets_big/d{target_depth}")
     local_d28 = os.path.join(nanochat_base_dir, "base_checkpoints",
                              f"d{target_depth}")
-    have_asset = bool(obs.list_objects(d28_uri))
-    if not have_asset:
-        if args.no_d28_upload:
-            raise SystemExit(f"✗ d28 asset missing on OBS ({d28_uri}) and "
-                             f"--no-d28-upload given")
-        if not glob.glob(os.path.join(local_d28, "model_*.pt")):
-            raise SystemExit(
-                f"✗ d28 asset missing on OBS ({d28_uri}) and no local ckpt at "
-                f"{local_d28} — upload it or pass --d28-asset-uri")
-        print(f"  [{arm}] one-time bootstrap: uploading d28 ckpt "
-              f"{local_d28} -> {d28_uri} (several GB, patience)", flush=True)
-        upload_dir_if_missing(obs, local_d28, d28_uri, "d28-asset")
-    else:
-        print(f"  [{arm}] d28 asset present at {d28_uri}")
+    d28_lock = open(os.path.join(output_dir, ".d28_asset.lock"), "w")
+    fcntl.flock(d28_lock, fcntl.LOCK_EX)
+    try:
+        have_asset = bool(obs.list_objects(d28_uri))
+        if not have_asset:
+            if args.no_d28_upload:
+                raise SystemExit(f"✗ d28 asset missing on OBS ({d28_uri}) and "
+                                 f"--no-d28-upload given")
+            if not glob.glob(os.path.join(local_d28, "model_*.pt")):
+                raise SystemExit(
+                    f"✗ d28 asset missing on OBS ({d28_uri}) and no local ckpt at "
+                    f"{local_d28} — upload it or pass --d28-asset-uri")
+            print(f"  [{arm}] one-time bootstrap: uploading d28 ckpt "
+                  f"{local_d28} -> {d28_uri} (several GB, patience)", flush=True)
+            upload_dir_if_missing(obs, local_d28, d28_uri, "d28-asset")
+        else:
+            print(f"  [{arm}] d28 asset present at {d28_uri}")
+    finally:
+        fcntl.flock(d28_lock, fcntl.LOCK_UN)
 
     # ── per-launch asset mounts: d28 + tokenizer + eval_stem (REPLACES the
     # backend's global set — arm jobs must not stage the pool/stella) ──
