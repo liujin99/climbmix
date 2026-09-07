@@ -11,8 +11,8 @@ launching the proxy fleet (see paper_deviations.md D14):
   - fine->anchor cosine mean >= ~0.5 (slices are tight)
   - per-macro sample rows readable/distinguishable by eye
 
-Usage (server):
-  python3 scripts/diagnostics/balanced_preview.py \
+Usage (server; -u keeps prints unbuffered under tee/nohup):
+  python3 -u scripts/diagnostics/balanced_preview.py \
       --data-dir /home/ma-user/work/100B_stem_parquet_filtered \
       --kmeans /l00916525/prod/climbmix/cache/embeddings/*/kmeans_K1000.npz \
       --K 15 --samples 4
@@ -20,7 +20,9 @@ Usage (server):
 
 import argparse
 import glob
+import os
 import re
+import subprocess
 import sys
 
 import numpy as np
@@ -43,6 +45,12 @@ PATTERNS = {
 }
 
 
+def _log(msg: str) -> None:
+    """Stage marker — flushed, so progress is visible under tee/nohup and
+    a hang is attributable to the LAST printed stage."""
+    print(msg, flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--data-dir", required=True, help="pool parquet dir")
@@ -58,21 +66,38 @@ def main():
                     help="skip reading texts (shares/cos only, no parquet IO)")
     args = ap.parse_args()
 
+    # FUSE/OBS mounts go stale: a hung mount blocks glob/np.load forever at
+    # 0% CPU with zero output. Bounded pre-check on the static prefix.
+    prefix = args.kmeans.split("*")[0].rstrip("/")
+    _log(f"[1/6] mount pre-check (60s timeout): ls {prefix}")
+    try:
+        subprocess.run(["ls", prefix], capture_output=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        sys.exit(f"mount unresponsive: {prefix} did not answer ls within "
+                 f"60s — stale FUSE/OBS mount. Fix the mount, or copy the "
+                 f"npz to local disk first (bounded: "
+                 f"timeout 300 cp <npz> /tmp/) and pass --kmeans /tmp/...")
+
+    _log(f"[2/6] globbing kmeans cache: {args.kmeans}")
     matches = sorted(glob.glob(args.kmeans))
     if not matches:
         sys.exit(f"no kmeans cache matches {args.kmeans}")
     kmeans_path = matches[-1]
 
+    _log(f"[3/6] loading pool metadata cache (~116M docs — the "
+         f"minutes-long step, then prints '[ShardMetadataManager] Loaded ...')")
     from climbmix.data.metadata_manager import ShardMetadataManager
     mm = ShardMetadataManager(args.data_dir, cache_dir=args.data_dir)
 
+    _log(f"[4/6] reading kmeans npz (FUSE read, ~1 GB): {kmeans_path}")
     z = np.load(kmeans_path)
     lab, cen = z["labels"], z["centroids"]
     if len(lab) != mm.num_docs:
         sys.exit(f"kmeans cache holds {len(lab):,} labels but pool has "
                  f"{mm.num_docs:,} docs — stale cache, aborting")
-    print(f"kmeans: {kmeans_path} (labels={len(lab):,}, K_init={len(cen)})")
+    _log(f"kmeans loaded: labels={len(lab):,}, K_init={len(cen)}")
 
+    _log("[5/6] tokens + quality + prune + balanced partition")
     tok = mm.estimate_token_counts()
     q = mm.quality_scores
 
@@ -87,8 +112,9 @@ def main():
         plab, pcen, token_counts=tok, K=args.K, slack=args.slack)
 
     total = tok[macro_labels >= 0].sum()
-    print()
-    print("per-macro semantic probe (first sample truncated):")
+    _log("")
+    _log(f"[6/6] per-macro semantic probe ({args.samples} texts each, "
+         f"first sample truncated):")
     rng = np.random.default_rng(0)
     for k in range(len(macro_centroids)):
         idx = np.flatnonzero(macro_labels == k)
@@ -104,12 +130,12 @@ def main():
               for name, p in PATTERNS.items()}
         tag = " ".join(f"{n}:{fr[n]:>3}%" for n in PATTERNS)
         print(f"M{k:02d} {n_tok/1e9:6.2f}B docs={len(idx):>11,} | {tag} "
-              f"| {texts[0][:80]!r}")
+              f"| {texts[0][:80]!r}", flush=True)
 
-    print()
-    print(f"pool kept by prune: {total/1e9:.2f}B tokens; "
-          f"accept if max share <= ~{100*(1+args.slack)/args.K:.1f}% "
-          f"and cosine mean >= ~0.5 (see balanced_profile block above)")
+    _log("")
+    _log(f"pool kept by prune: {total/1e9:.2f}B tokens; "
+         f"accept if max share <= ~{100*(1+args.slack)/args.K:.1f}% "
+         f"and cosine mean >= ~0.5 (see balanced_profile block above)")
 
 
 if __name__ == "__main__":
