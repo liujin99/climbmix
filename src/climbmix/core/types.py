@@ -338,6 +338,13 @@ class QualityFilterConfig:
 class SearchConfig:
     num_iterations: int = 3
     configs_per_iter: List[int] = field(default_factory=lambda: [15, 8, 4])
+    # prod2 B++: True = configs_per_iter is an EXPECTED list — the
+    # bootstrapper converts e_i to wave budgets (w_i = round(e_i / S0)) and
+    # the RemoteExecutor floats the realized count with the measured pool
+    # concurrency (probe-truncate / straggler eviction / rolling C_eff,
+    # docs/parallel_k_selection.md §5.2). False (default) = literal counts.
+    # Semantic knob: enters the search fingerprint.
+    adaptive_configs: bool = False
     dirichlet_alpha: Optional[float] = None
     predict_top_n_ratio: float = 0.5
     sample_from_top_m: int = 32

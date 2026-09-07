@@ -86,6 +86,15 @@ class IterativeBootstrapper:
         # BEFORE the experiments run so a mid-iteration crash restores the
         # exact same configs instead of re-sampling different ones).
         self._pending: Optional[Dict[str, Any]] = None
+        # ── adaptive sizing state (prod2 B++, search.adaptive_configs) ──
+        # Last measured fleet concurrency (remote RUNNING median + local
+        # slots), read off the proxy runner after each run_batch; sizes
+        # iter>=2 directly. Persisted for resume.
+        self._last_c_eff: Optional[int] = None
+        # Actually-admitted config counts per completed iteration —
+        # adaptive runs admit w_i * C_eff, not the literal e_i, so
+        # _reconstruct_iteration_results must split by these. Persisted.
+        self._realized_configs: List[int] = []
 
     def _is_better(self, score_a: float, score_b: float) -> bool:
         if self.metric_direction == "maximize":
@@ -128,6 +137,8 @@ class IterativeBootstrapper:
             "online_eval": self._online_eval,
             "pruning_history": self._pruning_history,
             "pending": self._pending,
+            "realized_configs_per_iter": self._realized_configs,
+            "last_c_eff": self._last_c_eff,
         }
         atomic_write_json(self.state_path, state)
         pend = ""
@@ -210,6 +221,10 @@ class IterativeBootstrapper:
             self._predictor_eval = state.get("predictor_eval") or []
             self._online_eval = state.get("online_eval") or []
             self._pruning_history = state.get("pruning_history") or []
+            self._realized_configs = [
+                int(n) for n in state.get("realized_configs_per_iter") or []]
+            c_eff = state.get("last_c_eff")
+            self._last_c_eff = int(c_eff) if c_eff else None
             self._last_completed_iter = state["last_completed_iter"]
             self._pending = state.get("pending")
         except (KeyError, TypeError, ValueError):
@@ -386,7 +401,14 @@ class IterativeBootstrapper:
         online_by_iter = {e.get("iteration"): e.get("spearman")
                           for e in self._online_eval}
         pruning_by_iter = {e.get("iteration"): e for e in self._pruning_history}
-        for k, n in enumerate(self.config.search.configs_per_iter):
+        # Split by the REALIZED per-iteration counts when present
+        # (adaptive runs admit w_i * C_eff, not the literal e_i — a literal
+        # split would misattribute iteration boundaries on resume).
+        per_iter = self._realized_configs or list(
+            self.config.search.configs_per_iter)
+        for k, n in enumerate(per_iter):
+            if k >= self.config.search.num_iterations:
+                break
             if offset + n > len(self._accumulated_configs):
                 break
             chunk_configs = self._accumulated_configs[offset:offset + n]
@@ -472,6 +494,22 @@ class IterativeBootstrapper:
                 chosen.add(idx)
         return new_configs
 
+    @staticmethod
+    def _expected_fleet_slots(proxy_runner: Any) -> Optional[int]:
+        """S0 for adaptive wave budgets: remote max jobs + local slots, or
+        None when the runner is not a hybrid RemoteExecutor (local-only
+        runners have fixed slots — adaptive is a no-op there and the
+        bootstrapper falls back to literal counts)."""
+        remote = getattr(proxy_runner, "remote", None)
+        if remote is None:
+            return None
+        slots = int(getattr(remote, "max_concurrent_jobs", 0) or 0)
+        if getattr(remote, "local_parallel", False):
+            local_fn = getattr(proxy_runner, "_local_slots", None)
+            if callable(local_fn):
+                slots += int(local_fn())
+        return slots or None
+
     def run_iteration(
         self,
         iteration: int,
@@ -489,15 +527,63 @@ class IterativeBootstrapper:
         sampled_predictions: Optional[List[Optional[float]]] = None
         pruning_info: Optional[Dict[str, Any]] = None
 
+        # ── adaptive sizing (prod2 B++, search.adaptive_configs) ──
+        # e_i (expected count) -> w_i = round(e_i / S0) wave budgets. The
+        # iteration samples a POOL sized to the upper bound (iter 1) or the
+        # last realized concurrency (iter >= 2); the executor's probe
+        # right-sizes what actually runs to w_i * C_eff.
+        e_i = int(n_configs)
+        w_i = 1
+        n_sample = n_configs
+        adm_kwargs: Optional[Dict[str, object]] = None
+        # Defensive read: lightweight configs (test stubs) may lack .search
+        adaptive = False
+        try:
+            adaptive = bool(getattr(self.config.search, "adaptive_configs",
+                                    False))
+        except AttributeError:
+            adaptive = False
+        if adaptive and proxy_runner is not None:
+            s0 = self._expected_fleet_slots(proxy_runner)
+            if s0 is not None:
+                w_i = max(1, int(np.floor(e_i / s0 + 0.5)))
+                if preset_configs is None:
+                    if (iteration == 1 or self._predictor is None
+                            or self._last_c_eff is None):
+                        # Upper bound pool: w_i * S0 + reserve. The probe
+                        # (~30-40min in) truncates the never-submitted tail
+                        # to w_i * C_eff — unsubmitted = zero cost.
+                        n_sample = w_i * s0 + 4
+                    else:
+                        # iter >= 2: size directly from the last realized
+                        # concurrency; admission stays active for eviction
+                        # and mid-iteration truncation if the pool shrinks.
+                        n_sample = max(4, w_i * int(self._last_c_eff))
+                adm_kwargs = {
+                    "wave_budget": w_i,
+                    "expected_slots": s0,
+                    "min_configs": 4,
+                    "allow_truncate": (self._last_c_eff is None
+                                       or self._last_c_eff >= 2),
+                }
+                if preset_configs is None:
+                    print(f"[Iter {iteration}] adaptive: expected {e_i} @ "
+                          f"~{s0} slots -> budget {w_i} wave(s), sampling "
+                          f"{n_sample} (C_eff_prev={self._last_c_eff})")
+                else:
+                    print(f"[Iter {iteration}] adaptive: resumed pool of "
+                          f"{len(preset_configs)} configs, budget {w_i} "
+                          f"wave(s) (re-probe)")
+
         if preset_configs is not None:
             new_configs = list(preset_configs)
             print(f"[Iter {iteration}] Restored {len(new_configs)} pending configs from saved state")
         elif iteration == 1 or self._predictor is None:
-            print(f"[Iter {iteration}] Sampling {n_configs} configs from Dirichlet")
-            new_configs = self._sampler.sample_batch(n_configs)
+            print(f"[Iter {iteration}] Sampling {n_sample} configs from Dirichlet")
+            new_configs = self._sampler.sample_batch(n_sample)
         else:
             print(f"[Iter {iteration}] Predictor-guided sampling")
-            pool_size = max(n_configs * 20, 500)
+            pool_size = max(n_sample * 20, 500)
             pool_configs = self._sampler.sample_batch(pool_size)
 
             existing_flats = set()
@@ -519,7 +605,7 @@ class IterativeBootstrapper:
             top_configs = [novel_configs[i] for i in ranked_indices[:top_n]]
 
             new_configs = self._sample_verbatim_from_top(
-                top_configs, ranked_indices, novel_configs, n_configs, iteration,
+                top_configs, ranked_indices, novel_configs, n_sample, iteration,
             )
 
             # Pruning record + display: paper §2.2's pruning is
@@ -556,6 +642,18 @@ class IterativeBootstrapper:
             }
             sampled_predictions = [pred_by_obj.get(id(c)) for c in new_configs]
 
+        if adm_kwargs is not None and sampled_predictions is not None:
+            # Rank-head preservation (adaptive): queue best-predicted first
+            # so the executor's tail-drop discards the predictor's WORST
+            # configs. Stable for ties; lower prediction = better (the
+            # ranked_indices convention).
+            order = sorted(
+                range(len(new_configs)),
+                key=lambda i: (np.inf if sampled_predictions[i] is None
+                               else float(sampled_predictions[i])))
+            new_configs = [new_configs[i] for i in order]
+            sampled_predictions = [sampled_predictions[i] for i in order]
+
         for i, c in enumerate(new_configs):
             c.config_id = len(self._accumulated_configs) + i
 
@@ -573,7 +671,8 @@ class IterativeBootstrapper:
         trained_configs: List[MixtureConfig] = []
 
         if proxy_runner is not None:
-            print(f"[Iter {iteration}] Training {len(new_configs)} proxy models")
+            n_pool = len(new_configs)
+            print(f"[Iter {iteration}] Training {n_pool} proxy models")
             # Global experiment ids (== config ids) so exp dirs never collide
             # across iterations and meta.json reuse can match them.
             run_kwargs = {}
@@ -581,9 +680,45 @@ class IterativeBootstrapper:
                 sig = inspect.signature(proxy_runner.run_batch)
                 if "experiment_id_base" in sig.parameters:
                     run_kwargs["experiment_id_base"] = len(self._accumulated_configs)
+                if adm_kwargs is not None and "admission" in sig.parameters:
+                    run_kwargs["admission"] = adm_kwargs
             except (ValueError, TypeError):
                 pass
-            results = proxy_runner.run_batch(new_configs, **run_kwargs)
+            raw_results = proxy_runner.run_batch(new_configs, **run_kwargs)
+            # Adaptive contract: dropped configs (truncated/evicted — never
+            # trained, never re-run) come back as None. Filter, then rewrite
+            # the pending list to the ADMITTED set and persist IMMEDIATELY
+            # (atomic): a crash after this point resumes exactly the
+            # admitted configs; a crash before it restores the full pool
+            # and re-probes (meta.json reuse covers the trained ones).
+            dropped_idx: List[int] = []
+            if adm_kwargs is not None:
+                dropped_idx = [i for i, r in enumerate(raw_results)
+                               if r is None]
+                if dropped_idx:
+                    dropped_set = set(dropped_idx)
+                    keep = [i for i in range(len(new_configs))
+                            if i not in dropped_set]
+                    new_configs = [new_configs[i] for i in keep]
+                    raw_results = [raw_results[i] for i in keep]
+                    self._pending = {
+                        "iteration": iteration,
+                        "configs": [c.mixture_weights.weights.tolist()
+                                    for c in new_configs],
+                    }
+                    self._save_state()
+                stats = getattr(proxy_runner, "last_admission_stats",
+                                None) or {}
+                n_trunc = len(stats.get("truncated") or [])
+                n_evict = len(stats.get("evicted") or [])
+                c_eff = stats.get("c_eff") or self._last_c_eff
+                print(f"[Iter {iteration}] adaptive: expected {e_i} -> "
+                      f"budget {w_i} wave(s); pool C_eff={c_eff} -> admitted "
+                      f"{len(new_configs)}/{n_pool} "
+                      f"(truncated {n_trunc}, evicted {n_evict})")
+            results = raw_results
+            self._last_c_eff = getattr(
+                proxy_runner, "last_effective_concurrency", None)
             self._raise_if_all_failed(results, iteration)
             n_err = sum(1 for r in results if r.metadata.get("error"))
             if n_err:
@@ -606,6 +741,14 @@ class IterativeBootstrapper:
                 fake_acc = {b: float(rng.uniform(0.0, 0.1)) for b in self.config.val_tasks}
                 fake_nll = {b: float(rng.uniform(2.0, 4.0)) for b in self.config.val_tasks}
                 self._accumulated_per_benchmark.append((fake_acc, fake_nll))
+
+        # Realized count for this iteration (adaptive runs differ from the
+        # literal e_i; _reconstruct_iteration_results splits by these).
+        # getattr guard: __init__ always sets it; object.__new__ test stubs
+        # may not (see test_p0's make_bootstrapper).
+        if getattr(self, "_realized_configs", None) is None:
+            self._realized_configs = []
+        self._realized_configs.append(len(trained_configs))
 
         all_scores, val_configs_split, val_targets_split = self._refit_predictor()
 
@@ -714,6 +857,12 @@ class IterativeBootstrapper:
             })
 
         self._iteration_results.append(iter_result)
+        # Persist immediately: the realized count + measured C_eff must be
+        # durable before the next iteration sizes itself (a crash here
+        # resumes with correct adaptive state; pending is still the
+        # admitted set until search_optimal clears it).
+        if self.state_path:
+            self._save_state()
 
         elapsed = time.time() - t0
         print(f"\n[Iter {iteration}] Complete in {elapsed:.1f}s")
@@ -741,6 +890,15 @@ class IterativeBootstrapper:
         print("  CLIMB Iterative Bootstrapping Search")
         print(f"  Iterations: {self.config.search.num_iterations}")
         print(f"  Configs per iteration: {self.config.search.configs_per_iter}")
+        if getattr(self.config.search, "adaptive_configs", False) \
+                and proxy_runner is not None:
+            s0 = self._expected_fleet_slots(proxy_runner)
+            if s0 is not None:
+                wsum = sum(max(1, int(np.floor(e / s0 + 0.5)))
+                           for e in self.config.search.configs_per_iter)
+                print(f"  Adaptive: expected {self.config.search.configs_per_iter} "
+                      f"@ ~{s0} slots -> {wsum} wave(s) ≈ {wsum * s0} configs "
+                      f"(floats with the realized pool)")
         print(f"  Metric direction: {self.metric_direction}")
         print("=" * 70)
 

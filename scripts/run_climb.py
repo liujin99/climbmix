@@ -121,6 +121,12 @@ def main():
     parser.add_argument("--num-iterations", type=int, default=None,
                         help="Search iterations (default: derived from len(configs_per_iter))")
     parser.add_argument("--configs-per-iter", type=str, default="15,8,4")
+    parser.add_argument("--adaptive-configs", action="store_true",
+                        help="configs_per_iter as EXPECTED counts (prod2 B++): the realized "
+                             "count floats with the measured pool concurrency — wave budgets "
+                             "w_i = round(e_i / S0), probe-truncate + straggler eviction + "
+                             "rolling C_eff (RemoteExecutor; no-op on local runners). "
+                             "Semantic: enters the search fingerprint.")
     parser.add_argument("--dirichlet-alpha", type=float, default=None)
 
     # ── Predictor ──
@@ -234,6 +240,7 @@ def main():
         search=SearchConfig(
             num_iterations=args.num_iterations,
             configs_per_iter=configs_per_iter,
+            adaptive_configs=args.adaptive_configs,
             dirichlet_alpha=args.dirichlet_alpha,
         ),
         proxy=proxy_config,
@@ -269,7 +276,8 @@ def main():
           f"(strategy={config.discovery.merge_strategy}, "
           f"K band [{config.discovery.K_enhanced}, {config.discovery.K_max}], "
           f"tau={config.discovery.merge_distance})")
-    print(f"  Search:     {config.search.num_iterations} iterations, {configs_per_iter} = {sum(configs_per_iter)} configs")
+    print(f"  Search:     {config.search.num_iterations} iterations, {configs_per_iter} = {sum(configs_per_iter)} configs"
+          + (" (adaptive: expected counts, floats with realized pool)" if config.search.adaptive_configs else ""))
     print(f"  Metric:     {config.val_tasks} ({config.metric_direction})")
     print(f"  Eval:       benchmarks={config.eval_benchmarks}, max_per_task="
           f"{config.eval_max_per_task if config.eval_max_per_task > 0 else 'full'}")

@@ -44,6 +44,7 @@ import os
 import queue
 import re
 import shutil
+import statistics
 import subprocess
 import tempfile
 import threading
@@ -67,6 +68,113 @@ class QueueTimeoutError(RuntimeError):
     mixture): burning the config as a failed experiment would feed the
     predictor a fabricated inf/0.0 score for a mixture that was never
     trained."""
+
+
+class ConfigEvictedError(RuntimeError):
+    """Admission-mode eviction (ADAPTIVE_CONFIGS=1): this config's job sat
+    PENDING past pending_grace_min while sibling jobs of the same batch
+    were RUNNING — the realized pool is smaller than the probe admitted,
+    so the wave is over-subscribed. The job is cancelled and the config is
+    DROPPED from the iteration (the bootstrapper rewrites its pending list
+    without it; a resume never re-runs it). Distinct from a failure: the
+    mixture was never trained and never will be, so it must not surface as
+    an inf/0.0 score either."""
+
+
+class AdmissionController:
+    """Per-batch adaptive admission state machine (prod2 B++).
+
+    The bootstrapper sizes iterations in WAVES: expected configs e_i over
+    an expected slot count S0 (remote max jobs + local slots) gives a wave
+    budget w_i = max(1, round(e_i / S0)). The bootstrapper then samples a
+    POOL sized to the upper bound (iter 1: w_i * S0 + reserve) or the last
+    realized concurrency (iter >= 2), and this controller right-sizes what
+    actually runs:
+
+      - probe-truncate: once the first job has RUN for probe_delay_s (or
+        probe_deadline_s elapsed since batch start), measure C_eff =
+        remote RUNNING median + local slots; admit w_i * C_eff configs by
+        dropping the never-submitted tail of the queue (guided iterations
+        queue best-predicted first, so the tail is the worst — rank-head
+        preservation).
+      - straggler eviction: handled in _wait_job (needs per-job PENDING
+        clocks); records evicted indices here.
+      - rolling C_eff: run_batch exposes the measured concurrency so the
+        NEXT iteration sizes directly from it.
+
+    Pure decisions only — run_batch's monitor thread applies them, which
+    makes the whole state machine unit-testable without any jobs. The
+    drop-set is race-free by reconciliation: a marked index that was
+    already picked by a worker simply runs and is excluded from the final
+    dropped list (results non-None wins).
+    """
+
+    def __init__(self, wave_budget: int, expected_slots: int,
+                 min_configs: int = 4,
+                 allow_truncate: bool = True,
+                 probe_delay_s: float = 1800.0,
+                 probe_deadline_s: float = 2400.0,
+                 pending_grace_s: float = 1800.0):
+        self.wave_budget = max(1, int(wave_budget))
+        self.expected_slots = max(1, int(expected_slots))
+        self.min_configs = max(1, int(min_configs))
+        self.allow_truncate = bool(allow_truncate)
+        self.probe_delay_s = float(probe_delay_s)
+        self.probe_deadline_s = float(probe_deadline_s)
+        self.pending_grace_s = float(pending_grace_s)
+        self.first_running_at: Optional[float] = None
+        self.decided = False
+        self.c_eff: Optional[int] = None
+        self.drop_set: set = set()      # global indices dropped (truncate + evict)
+        self.truncated: List[int] = []  # dropped before pickup (queue tail)
+        self.evicted: List[int] = []    # submitted, cancelled while PENDING
+
+    def note_running(self, now: float) -> None:
+        if self.first_running_at is None:
+            self.first_running_at = now
+
+    def probe_ready(self, now: float, batch_started_at: float) -> bool:
+        if self.decided:
+            return False
+        if self.first_running_at is not None:
+            return now - self.first_running_at >= self.probe_delay_s
+        return now - batch_started_at >= self.probe_deadline_s
+
+    def decide(self, total_configs: int, n_local: int, running_now: int,
+               local_slots: int, in_queue: int = 0) -> List[int]:
+        """Probe-point truncation decision. Marks (and returns) the global
+        indices to drop from the queue TAIL so the admitted count lands at
+        wave_budget * C_eff. Empty list = admit everything (no truncation).
+
+        Guardrails (docs/parallel_k_selection.md §5.2): C_eff < 2 disables
+        truncation entirely (no usable pool signal — literal behavior, the
+        queue's own 24h patience handles it); a pool smaller than
+        min_configs is never truncated; the admitted count never drops
+        below min_configs.
+        """
+        self.decided = True
+        self.c_eff = int(running_now) + int(local_slots)
+        if not self.allow_truncate:
+            return []
+        if self.c_eff < 2:
+            return []
+        total = int(total_configs)
+        if total < self.min_configs:
+            return []
+        n_target = max(self.min_configs,
+                       min(self.wave_budget * self.c_eff, total))
+        need_drop = total - n_target - len(self.drop_set)
+        if need_drop <= 0:
+            return []
+        # Highest unpicked-first: local slice ([0, n_local)) is always
+        # admitted; remote picks are FIFO from the queue head, so the
+        # highest indices are the ones still sitting in the queue.
+        candidates = [g for g in range(n_local, total)
+                      if g not in self.drop_set]
+        drops = candidates[-need_drop:]
+        self.drop_set.update(drops)
+        self.truncated.extend(drops)
+        return drops
 
 
 @dataclass
@@ -140,8 +248,10 @@ class RemoteConfig:
     # the prepped specs. (Local-slice prep is bounded by its own NPU slots.)
     max_prep_parallel: int = 4
     # Hybrid fleet: also run experiments on the LOCAL NPUs via the parent
-    # ProxyRunner parallel path (requires npu_per_exp in [1, npu_devices)).
-    # Configs[:n_local] run locally, the rest remotely.
+    # ProxyRunner parallel path (npu_per_exp in [1, npu_devices], a divisor;
+    # npu_per_exp == npu_devices = ONE whole-node slot, the parent's serial
+    # full-card path — prod2 k=8 form). Configs[:n_local] run locally, the
+    # rest remotely.
     local_parallel: bool = False
 
     # ── artifacts ──
@@ -164,6 +274,14 @@ class RemoteConfig:
     # config as a failed experiment. Total queue patience =
     # queue_timeout_s × (1 + attempts). 0 = old burn-immediately behavior.
     queue_resubmit_attempts: int = 2
+    # Adaptive admission (ADAPTIVE_CONFIGS=1, prod2 B++): a SUBMITTED job
+    # still PENDING after this many minutes while sibling jobs of the same
+    # batch are RUNNING signals over-admission (pool shrank after the
+    # probe) — the executor cancels it and the config is dropped from the
+    # iteration permanently (the bootstrapper rewrites its pending list).
+    # Only consulted in admission mode; arm jobs (dispatch_target_arm.py)
+    # never enable it — must-deliver, queue patience applies instead.
+    pending_grace_min: float = 30.0
 
     # Job-level env (HF_ENDPOINT=hf-mirror.com, ...). Passed to the job
     # process AND baked into the spec for the train/eval subprocesses.
@@ -240,6 +358,8 @@ class RemoteConfig:
                              "submit_retry_initial_s")
         if self.max_prep_parallel < 1:
             raise ValueError("RemoteConfig.max_prep_parallel must be >= 1")
+        if self.pending_grace_min <= 0:
+            raise ValueError("RemoteConfig.pending_grace_min must be > 0")
         if self.asset_mounts is not None:
             for m_name, m_uri in self.asset_mounts.items():
                 if (not m_name or not isinstance(m_uri, str)
@@ -286,6 +406,21 @@ class RemoteExecutor(ProxyRunner):
         self._cap_cond = threading.Condition()
         self._cap_limit = remote_config.max_concurrent_jobs
         self._cap_inflight = 0
+        # Running-job registry (adaptive C_eff measurement): a shared
+        # RUNNING counter + periodic samples, maintained by every _wait_job
+        # poll (first RUNNING +1, terminal -1). Reset per batch.
+        self._run_lock = threading.Lock()
+        self._running_now = 0
+        self._run_samples: List[int] = []
+        # Per-batch adaptive admission state (None = literal behavior).
+        self._admission: Optional["AdmissionController"] = None
+        # Post-batch adaptive accounting — the bootstrapper reads these via
+        # getattr() (last_effective_concurrency sizes the next iteration;
+        # last_dropped_configs drive the pending rewrite; stats feed the
+        # [Iter i] adaptive log line and the watch dashboard).
+        self.last_effective_concurrency: Optional[int] = None
+        self.last_dropped_configs: List[MixtureConfig] = []
+        self.last_admission_stats: Dict[str, object] = {}
 
         # Backend bundle: resolves the job API + obs storage when they are
         # not injected. Kept None when both are injected (tests) — the
@@ -328,7 +463,7 @@ class RemoteExecutor(ProxyRunner):
                 print(f"  [RemoteExecutor] WARNING: local_parallel=1 but the "
                       f"LOCAL NPUs will IDLE (npu_per_exp={self.npu_per_exp}, "
                       f"npu_devices={self.npu_devices}); set npu_per_exp to a "
-                      f"proper divisor of npu_devices (< npu_devices) so the "
+                      f"divisor of npu_devices (<= npu_devices) so the "
                       f"master node joins the fleet")
             elif remote_config.npu_per_job != self.npu_per_exp:
                 print(f"  [RemoteExecutor] WARNING: local slice runs "
@@ -336,6 +471,10 @@ class RemoteExecutor(ProxyRunner):
                       f"but remote jobs run npu_per_job="
                       f"{remote_config.npu_per_job}; k should stay fleet-wide "
                       f"fixed for score comparability")
+            elif self.npu_per_exp == self.npu_devices:
+                print(f"  [RemoteExecutor] local whole-node slot: 1 x "
+                      f"{self.npu_per_exp} NPU (serial full-card path) joins "
+                      f"the fleet alongside remote jobs")
 
     # ── assets bundle (worker + shared cmds module) ──
 
@@ -727,19 +866,43 @@ class RemoteExecutor(ProxyRunner):
         terminal — platform queue time does not burn it; shared pools can
         hold a job PENDING for hours, 2026-09-04 prod pool had 0 idle
         cards at launch), queue_timeout_s bounds the PENDING phase alone
-        (lost/zombie queue entries)."""
+        (lost/zombie queue entries).
+
+        Adaptive mode adds: (a) fleet RUNNING accounting — first RUNNING
+        increments the shared counter (and feeds the admission probe's
+        C_eff), terminal decrements it, every poll appends a sample; (b)
+        straggler eviction — a job still PENDING past pending_grace_min
+        while siblings RUN is over-admission: cancel + ConfigEvictedError
+        (the config is dropped from the iteration, never re-run)."""
         timeout = timeout if timeout is not None else self.remote.job_timeout_s
         queue_timeout = self.remote.queue_timeout_s
         submitted_at = time.time()
         first_running_at: Optional[float] = None
+        counted_running = False
         last_print = 0.0
         while True:
             st = self.job_api.status(job_id)
-            if st.is_terminal:
-                return st
             now = time.time()
+            if st.is_terminal:
+                if counted_running:
+                    with self._run_lock:
+                        self._running_now -= 1
+                return st
             if first_running_at is None and st == JobStatus.RUNNING:
                 first_running_at = now
+                counted_running = True
+                with self._run_lock:
+                    self._running_now += 1
+                adm = self._admission
+                if adm is not None:
+                    adm.note_running(now)
+            if counted_running:
+                # Sample the fleet's concurrent RUNNING count for C_eff
+                # (median over the steady-state window at batch end).
+                with self._run_lock:
+                    self._run_samples.append(self._running_now)
+                    if len(self._run_samples) > 2400:
+                        del self._run_samples[:1200]
             if first_running_at is None:
                 # queue phase (PENDING/UNKNOWN): submission → start clock
                 if now - submitted_at > queue_timeout:
@@ -749,6 +912,22 @@ class RemoteExecutor(ProxyRunner):
                         f"started — queued {(now - submitted_at)/60:.0f}m "
                         f"(limit {queue_timeout/60:.0f}m); cancelled. "
                         f"logs (tail):\n{self.job_api.logs(job_id, 20)}")
+                # Straggler eviction (adaptive only): PENDING past grace
+                # while siblings run = over-admission (the realized pool
+                # is smaller than the probe admitted).
+                adm = self._admission
+                if (adm is not None and adm.pending_grace_s > 0
+                        and now - submitted_at > adm.pending_grace_s):
+                    with self._run_lock:
+                        fleet_running = self._running_now
+                    if fleet_running > 0:
+                        self.job_api.cancel(job_id)
+                        raise ConfigEvictedError(
+                            f"remote job {job_id} (exp {experiment_id}) sat "
+                            f"PENDING {(now - submitted_at)/60:.0f}m > grace "
+                            f"{adm.pending_grace_s/60:.0f}m while siblings "
+                            f"ran — over-admission; config dropped from the "
+                            f"iteration (never re-run)")
             elif now - first_running_at > timeout:
                 self.job_api.cancel(job_id)
                 raise RuntimeError(
@@ -948,7 +1127,11 @@ class RemoteExecutor(ProxyRunner):
     # ── batch orchestration ──
 
     def _local_slots(self) -> int:
-        if (self.npu_per_exp and self.npu_per_exp < self.npu_devices
+        # npu_per_exp == npu_devices = ONE whole-node slot: the parent's
+        # run_batch takes the serial full-card path (one experiment on all
+        # cards at a time) — prod2's k=8 form. Proper divisors slice as
+        # before; anything else idles.
+        if (self.npu_per_exp and self.npu_per_exp <= self.npu_devices
                 and self.npu_devices % self.npu_per_exp == 0):
             return self.npu_devices // self.npu_per_exp
         return 0
@@ -977,6 +1160,12 @@ class RemoteExecutor(ProxyRunner):
                 gidx = q.get_nowait()
             except queue.Empty:
                 return
+            adm = self._admission
+            if adm is not None and gidx in adm.drop_set:
+                # Adaptive truncation dropped this config before pickup —
+                # zero cost, results slot stays None (the bootstrapper's
+                # dropped-configs handling filters it out).
+                continue
             exp_id = experiment_id_base + gidx
             try:
                 self._acquire_slot()
@@ -985,6 +1174,15 @@ class RemoteExecutor(ProxyRunner):
                         remote_configs[gidx - offset], exp_id, output_dir)
                 finally:
                     self._release_slot()
+            except ConfigEvictedError as e:
+                # Over-admission eviction (never trained, never re-run):
+                # NOT a failure — results slot stays None and the config is
+                # recorded as evicted for the admission stats.
+                print(f"  [Exp {exp_id}] EVICTED: {e}")
+                results[gidx] = None
+                if self._admission is not None:
+                    self._admission.evicted.append(gidx)
+                    self._admission.drop_set.add(gidx)
             except Exception as e:
                 print(f"  [Exp {exp_id}] FAILED: {e}")
                 results[gidx] = ProxyResult(
@@ -997,13 +1195,64 @@ class RemoteExecutor(ProxyRunner):
                     metadata={"experiment_id": exp_id, "error": str(e)},
                 )
 
+    def _admission_monitor(
+        self,
+        stop: threading.Event,
+        adm: "AdmissionController",
+        batch_started_at: float,
+        remote_q: "queue.Queue[int]",
+        n_total: int,
+        n_local: int,
+    ) -> None:
+        """Applies the AdmissionController's probe decision once the probe
+        window closes (first RUNNING + probe_delay_s, or probe_deadline_s
+        after batch start). Drops are marked in the shared drop_set —
+        workers skip marked indices at pickup, and the end-of-batch
+        reconciliation excludes any marked index that ran anyway."""
+        while not stop.is_set() and not adm.decided:
+            if stop.wait(self.remote.poll_interval_s):
+                break
+            now = time.time()
+            if not adm.probe_ready(now, batch_started_at):
+                continue
+            with self._run_lock:
+                running = self._running_now
+            local_slots = self._local_slots() if n_local > 0 else 0
+            drops = adm.decide(n_total, n_local, running, local_slots,
+                               remote_q.qsize())
+            if drops:
+                print(f"  [Adaptive] probe: C_eff={adm.c_eff} "
+                      f"(remote RUNNING={running} + local={local_slots}) x "
+                      f"budget {adm.wave_budget} wave(s) -> admit "
+                      f"{n_total - len(adm.drop_set)}/{n_total}; dropped "
+                      f"{len(drops)} queued config(s) from the tail")
+            else:
+                reason = ("truncation disabled" if not adm.allow_truncate
+                          else f"C_eff={adm.c_eff} < 2")
+                print(f"  [Adaptive] probe: {reason} -> admit all "
+                      f"{n_total} (literal behavior, queue patience applies)")
+
+    def _compute_effective_concurrency(self, has_local: bool) -> Optional[int]:
+        """Median remote RUNNING over the steady-state window + local
+        slots. None when no job ever ran (no usable measurement)."""
+        with self._run_lock:
+            samples = list(self._run_samples)
+        if not samples:
+            return None
+        window = samples[-120:]
+        if len(window) >= 8:
+            window = window[len(window) // 2:]  # drop the startup ramp
+        med = int(round(statistics.median(window)))
+        return med + (self._local_slots() if has_local else 0)
+
     def run_batch(
         self,
         configs: List[MixtureConfig],
         data_dir: Optional[str] = None,
         output_dir: Optional[str] = None,
         experiment_id_base: int = 0,
-    ) -> List[ProxyResult]:
+        admission: Optional[Dict[str, object]] = None,
+    ) -> List[Optional[ProxyResult]]:
         """Same contract as ProxyRunner.run_batch (probed by the bootstrapper
         for experiment_id_base). Mixed fleet when local_parallel: the first
         _local_slots() configs run via the parent's local parallel path, the
@@ -1018,7 +1267,15 @@ class RemoteExecutor(ProxyRunner):
         grows, across as many submission rounds as the pool dictates).
         Without capacity queries (free_job_slots -> None) the limit simply
         stays at max_concurrent_jobs and submit-rejected backoff handles
-        over-admission."""
+        over-admission.
+
+        admission (prod2 B++, optional dict): {wave_budget, expected_slots,
+        min_configs, allow_truncate} — activates the AdmissionController
+        (probe-truncate + straggler eviction). CONTRACT CHANGE in that
+        mode: dropped configs come back as None entries in the results
+        list (never trained, never re-run — the bootstrapper rewrites its
+        pending list from last_dropped_configs); without admission the
+        return value is exactly the old list-of-ProxyResult."""
         if self.remote.local_parallel and self._local_slots() > 0:
             n_local = self._local_slots()
             local_configs = configs[:n_local]
@@ -1030,12 +1287,41 @@ class RemoteExecutor(ProxyRunner):
 
         results: List[Optional[ProxyResult]] = [None] * len(configs)
 
-        # (re)set per-batch dynamic capacity; synchronous initial probe
+        # Per-batch state resets: dynamic capacity, running registry,
+        # adaptive accounting.
         with self._cap_cond:
             self._cap_limit = self.remote.max_concurrent_jobs
             self._cap_inflight = 0
+        with self._run_lock:
+            self._running_now = 0
+            self._run_samples = []
+        self._admission = None
+        self.last_dropped_configs = []
+        self.last_admission_stats = {}
+        adm: Optional[AdmissionController] = None
+        if admission:
+            adm = AdmissionController(
+                wave_budget=int(admission.get("wave_budget", 1)),
+                expected_slots=int(admission.get("expected_slots", 1)),
+                min_configs=int(admission.get("min_configs", 4)),
+                allow_truncate=bool(admission.get("allow_truncate", True)),
+                # probe windows are overridable purely for fast tests
+                probe_delay_s=float(admission.get("probe_delay_s", 1800.0)),
+                probe_deadline_s=float(
+                    admission.get("probe_deadline_s", 2400.0)),
+                pending_grace_s=self.remote.pending_grace_min * 60.0,
+            )
+            self._admission = adm
+            print(f"  [Adaptive] wave budget {adm.wave_budget} "
+                  f"(expected {adm.expected_slots} slots, pool "
+                  f"{len(configs)} configs, grace "
+                  f"{self.remote.pending_grace_min:.0f}m)")
+
         initial_slots = self._probe_slots()
         self._adjust_capacity_limit(initial_slots)
+        remote_q: "queue.Queue[int]" = queue.Queue()
+        for i in range(len(remote_configs)):
+            remote_q.put(offset + i)  # GLOBAL results index
         stop = threading.Event()
         monitor = None
         if initial_slots is not None:
@@ -1043,10 +1329,14 @@ class RemoteExecutor(ProxyRunner):
                 target=self._capacity_monitor, args=(stop,),
                 name="remote-capacity-monitor", daemon=True)
             monitor.start()
-
-        remote_q: "queue.Queue[int]" = queue.Queue()
-        for i in range(len(remote_configs)):
-            remote_q.put(offset + i)  # GLOBAL results index
+        adm_monitor = None
+        if adm is not None:
+            adm_monitor = threading.Thread(
+                target=self._admission_monitor,
+                args=(stop, adm, time.time(), remote_q, len(configs),
+                      len(local_configs)),
+                name="remote-admission-monitor", daemon=True)
+            adm_monitor.start()
 
         # Worker threads at the UPPER bound: when the pool grows mid-batch
         # the monitor raises the limit and parked workers wake up to pick
@@ -1073,5 +1363,33 @@ class RemoteExecutor(ProxyRunner):
             stop.set()
             if monitor is not None:
                 monitor.join(timeout=self.remote.poll_interval_s * 3)
+            if adm_monitor is not None:
+                adm_monitor.join(timeout=self.remote.poll_interval_s * 3)
+
+        # ── post-batch adaptive accounting (bootstrapper reads these) ──
+        self.last_effective_concurrency = self._compute_effective_concurrency(
+            bool(local_configs))
+        if self._admission is not None:
+            adm = self._admission
+            # Reconciliation: only indices whose results are None count as
+            # dropped — a marked index a worker had already picked simply
+            # ran and is excluded (over-admission self-corrects to the
+            # realized set, never silently discards a trained result).
+            dropped = sorted(g for g in adm.drop_set
+                             if g < len(results) and results[g] is None)
+            self.last_dropped_configs = [configs[g] for g in dropped]
+            self.last_admission_stats = {
+                "c_eff": adm.c_eff,
+                "wave_budget": adm.wave_budget,
+                "expected_slots": adm.expected_slots,
+                "truncated": [g for g in adm.truncated
+                              if g < len(results) and results[g] is None],
+                "evicted": [g for g in adm.evicted
+                            if g < len(results) and results[g] is None],
+                "ran_despite_mark": [g for g in sorted(adm.drop_set)
+                                     if g < len(results)
+                                     and results[g] is not None],
+            }
+            self._admission = None
 
         return results
