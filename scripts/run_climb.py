@@ -75,6 +75,15 @@ def main():
     parser.add_argument("--merge-distance", type=float, default=0.9,
                         help="Merge legality threshold (tau) on centroid L2 distance "
                              "(unit-normalized embeddings: d^2=2(1-cos), 0.9 ~ cos 0.6)")
+    parser.add_argument("--merge-strategy", type=str, default="distance",
+                        choices=["distance", "balanced"],
+                        help="'distance': closest-pair agglomerative merge inside the "
+                             "[K-enhanced, K-max] tau band (historical). 'balanced': "
+                             "capacity-constrained balanced partition to EXACTLY "
+                             "K-enhanced macro clusters (merge-distance/K-max ignored) "
+                             "— for pools whose embedding space is a single dense "
+                             "continuum where distance merging collapses to one giant "
+                             "cluster (prod1 lesson, see paper_deviations.md D14)")
 
     # ── Filter ──
     parser.add_argument("--filter-method", type=str, default="none",
@@ -219,6 +228,7 @@ def main():
             prune_threshold=args.prune_threshold,
             prune_column_floor=args.prune_column_floor,
             merge_distance=args.merge_distance,
+            merge_strategy=args.merge_strategy,
         ),
         filtering=QualityFilterConfig(method=args.filter_method),
         search=SearchConfig(
@@ -256,7 +266,8 @@ def main():
     print(f"              phase1={config.proxy.phase1_checkpoint_path or 'none'}")
     print(f"  Target:     {config.target.model_tag}")
     print(f"  Discovery:  {config.discovery.method} "
-          f"(K band [{config.discovery.K_enhanced}, {config.discovery.K_max}], "
+          f"(strategy={config.discovery.merge_strategy}, "
+          f"K band [{config.discovery.K_enhanced}, {config.discovery.K_max}], "
           f"tau={config.discovery.merge_distance})")
     print(f"  Search:     {config.search.num_iterations} iterations, {configs_per_iter} = {sum(configs_per_iter)} configs")
     print(f"  Metric:     {config.val_tasks} ({config.metric_direction})")

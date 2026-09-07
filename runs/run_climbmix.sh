@@ -78,6 +78,9 @@ PRUNE_THRESHOLD="${PRUNE_THRESHOLD:-3.0}"
 # noise; raise after eyeballing pruned samples (0 = off).
 PRUNE_COLUMN_FLOOR="${PRUNE_COLUMN_FLOOR:-2.0}"
 MERGE_DISTANCE="${MERGE_DISTANCE:-0.9}"
+# prod2: balanced = 容量约束平衡划分到恰好 K_ENHANCED 个宏簇(本池嵌入空间为单一
+# 连续流形,距离合并在任何 (K,tau) 下都塌成 ~99% 巨簇 — 见 paper_deviations.md D14)
+MERGE_STRATEGY="${MERGE_STRATEGY:-distance}"
 EMBEDDING_MODEL="${EMBEDDING_MODEL:-NovaSearch/stella_en_400M_v5}"
 # Stable pool-keyed cache for embeddings + K-means (survives fingerprint
 # resets; K/merge knob changes reuse embeddings instead of re-embedding)
@@ -237,6 +240,7 @@ FP_SEARCH_PARAMS=(
     "prune_threshold=$PRUNE_THRESHOLD"
     "prune_column_floor=$PRUNE_COLUMN_FLOOR"
     "merge_distance=$MERGE_DISTANCE"
+    "merge_strategy=$MERGE_STRATEGY"
     "embedding_model=$EMBEDDING_MODEL"
     "discovery_method=$DISCOVERY_METHOD"
     "embedding_device=$EMBEDDING_DEVICE"
@@ -408,6 +412,7 @@ else
         --prune-threshold "$PRUNE_THRESHOLD" \
         --prune-column-floor "$PRUNE_COLUMN_FLOOR" \
         --merge-distance "$MERGE_DISTANCE" \
+        --merge-strategy "$MERGE_STRATEGY" \
         --embedding-model "$EMBEDDING_MODEL" \
         --num-iterations "$SEARCH_NUM_ITERATIONS" \
         --discovery-method "$DISCOVERY_METHOD" \

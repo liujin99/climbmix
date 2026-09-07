@@ -25,6 +25,7 @@
 | D11 | token 计量 | 精确 tokenize(池统计) | chars/4 估算(元数据预计算列) | 池扫描免 tokenize;配比/配额的近似 |
 | D12 | 评测子采样 | 全量 | speedrun 100 题/任务(fixed shuffle seed 1337,跨实验可比较);生产 -1 全量 | speedrun 时间预算;生产无偏差 |
 | D13 | 剪枝规则 | 簇平均质量 < 3.0 即剪(fasttext,§2.1/§3.1) | 平均阈值 + **单列下限** hybrid:任一质量列的簇均值 < `PRUNE_COLUMN_FLOOR`(生产默认 2.0,0=关)即剪 | 平均线漏检"格式干净但知识贫瘠"的簇(2026-08-31 20-分片画像:69/1000 簇过均线但 knowledge_value 1.8-2.0;6.6% docs / 仅 1.5% tokens);标签未校验故取保守档 2.0,见细节 D13 |
+| D14 | 宏簇构造 | 距离合并到固定 K_enhanced(主实验 21 超簇;D.4:K_final 15/21/30 不敏感,15 最优) | **prod2 起可选 `MERGE_STRATEGY=balanced`:容量约束平衡划分到恰好 K_ENHANCED 个宏簇**(默认仍 distance) | 本池嵌入空间 = 单一致密连续流形(99% tokens)+ 13 格式孤岛:距离合并在任何 (K,τ) 下都链式塌成巨簇(K=14/21/24/32 实测留 99.0/98.5/98.3/97.5%,去掉 floor 塌到 K=3/99.9%,912/912 次合并全部合法)——搜索空间退化为 ~1 个旋钮(prod1 根因#1);balanced 用 K1000 层已验证的 k-means 机制,构造性保证 max token share ≤ (1+slack)/K;代价:宏簇是连续体的容量切片而非纯主题(语义由 balanced_profile.json 的 fine→anchor cosine 审计)。prod2 = balanced + K=15(对齐 D.4 最优) |
 
 ## 细节与出处
 
@@ -123,6 +124,47 @@ fingerprint(语义变更 → Steps 1-3 重跑,embedding pool 缓存不受影响)
 (69 过均线但 floor 不及)、157,917 docs(6.81%)/ 1.51% tokens 移除——
 与 prune_rule_analysis.py 预测逐位吻合;merge 树随 K_init=929 微移
 (natural_K(0.7) 45→39, elbow 6→31),K_final 仍钉 floor=3 无影响。
+
+### D14 宏簇构造:balanced 平衡划分(2026-09-07,prod2)
+论文的距离合并在**论文自己的池**(800B 通用语料,240 细簇→21 超簇)上是
+合理默认;我们的池(stella 嵌入后的 100B STEM 过滤语料)嵌入几何为
+**单一致密连续流形 + 格式孤岛**,距离合并结构性失效——prod1 事后诊断
+(A6/A7,全部基于池级缓存离线复算,无 NPU 成本):
+
+- K1000 层健康:top1=0.8% docs / top100=19.9%(k-means 在流形上产出
+  近均衡 Voronoi 胞)——坍塌发生在 prune→merge 层,不在嵌入层;
+- 912/912 次合并全部合法(dendrogram 最近对距离 0.13→0.68 平滑无间隙,
+  全程 < τ=0.9),stop_reason=floor;去掉 floor(target=3)一路吞到
+  K=3(C0=99.9%);
+- fixed-K 扫描(K=14/21/24/32)全部留下 99.0/98.5/98.3/97.5% 巨簇——
+  调 K/τ 无解,是机制问题(closest-pair 链式吸收 + doc 加权质心漂移的
+  正反馈);
+- 13 个幸存微簇全是格式/来源孤岛(SMILES 化学问答、材料学论文、西语
+  教材、K-12 教案等,合计 0.875B tokens = 0.95%)。
+
+后果链(prod1 三大根因之 #1、#2):巨簇 99.05% tokens → Dirichlet
+α=K×token 份额把全部 35 个 config 钉在 C0≈0.92、只在尾部洗牌 →
+predictor 无信号(R²≤0)→ argmin 挑中未实测角点。
+
+balanced 机制(`cluster_merge.balanced_macro_clusters`,作用在 prune 后
+的 926 个细簇上,不切文档):细簇质心 L2 归一 → k-means++ 锚点
+(K=K_ENHANCED)→ 容量约束分配(细簇按 token 降序 → 有余量的最近锚点,
+cap = total/K×(1+slack),孤岛作 filler 自动吸收)→ token 加权锚点迭代
+(≤10 轮)。构造性保证 max share ≤ (1+slack)/K ≈ 8.8% @K=15(前提:
+无单个细簇超 cap;池实测最大细簇 0.8% ≪ 6.6%)。均衡同时使 α=K×份额
+→ Dirichlet(1,…,1)(单纯形均匀),搜索空间自动解锁;随机臂 uniform
+1/15 配额 133M ≪ 每簇 ~6.1B → 两臂同 epoch 语义,预算混淆消失。
+
+明确接受的 trade-off:宏簇是连续体的**容量切片**而非纯主题——每簇混合
+多个细簇主题,旋钮效应被稀释但方向性差异存在(fine→anchor cosine 审计
+写入 balanced_profile.json)。搜索需要的是可区分,不是纯净;替代方案
+(1 巨簇)旋钮数=1,prod1 实测信号精确为零。
+
+配套:结构闸门 `validate_cluster_structure`(max token share > 50% →
+pipeline abort,新旧两路与 cache 命中路径都过闸);`MERGE_STRATEGY` 进
+search-stage fingerprint(与 K/τ 同待遇);`balanced_profile.json` 为
+run 级审计文件(份额/cosine/overflow/advice)。默认仍为 distance,
+speedrun 不变。
 
 ## 已核对一致(正向审计)
 

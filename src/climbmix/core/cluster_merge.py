@@ -21,6 +21,7 @@ This produces the final cluster set D = {D_1, ..., D_K_enhanced}
 that defines the data mixture search space.
 """
 
+import os
 import time
 import numpy as np
 import numpy.typing as npt
@@ -913,6 +914,252 @@ def merge_clusters_by_distance(
     return merged_labels, merged_centroids, {old: final_to_consecutive[final] for old, final in current_to_final.items()}
 
 
+def balanced_macro_clusters(
+    pruned_labels: npt.NDArray[np.int64],
+    pruned_centroids: npt.NDArray[np.float32],
+    token_counts: Optional[npt.NDArray[np.int64]] = None,
+    K: int = 15,
+    slack: float = 0.15,
+    max_iter: int = 10,
+    seed: int = 42,
+    profile_path: Optional[str] = None,
+) -> Tuple[npt.NDArray[np.int64], npt.NDArray[np.float32], Dict[int, int]]:
+    """Partition the pruned fine clusters into K capacity-balanced macro clusters.
+
+    prod2 replacement for distance-based merging on THIS pool. The STEM
+    pool's embedding space is a single dense continuum (~99% of tokens)
+    plus a few format islands, so closest-pair agglomerative merging chains
+    the continuum into one giant cluster at every (K, tau) — measured
+    2026-09-07 on the prod1 pool: K=14/21/24/32 all leave a 99.0/98.5/
+    98.3/97.5% top cluster, and removing the floor collapses to K=3 at
+    99.9% (all 912 merges legal below tau=0.9, dendrogram flat 0.13->0.68).
+    The mixture search then has ~1 effective knob (prod1 root cause #1;
+    see docs/paper_deviations.md D14).
+
+    Mechanism instead: k-means anchors on the L2-normalized fine centroids
+    (the K_init=1000 k-means output is already near-balanced — top1 0.8%
+    of docs), then capacity-constrained assignment: fine clusters, taken
+    token-descending, go to the NEAREST anchor that still has capacity
+    (cap = total/K * (1 + slack)). Format islands are absorbed as filler
+    into the nearest anchor with room. Macro centroids are token-weighted
+    means of their fine centroids.
+
+    Deliberate trade-off: macro clusters are capacity slices of a
+    continuum, not pure topics — each slice mixes several fine topics.
+    The search needs DIRECTIONALLY different slices (K real knobs), not
+    purity; the distance alternative has 1 knob by construction. Semantic
+    coherence is audited via fine->anchor cosine stats (printed below,
+    stored in balanced_profile.json).
+
+    Deterministic: seeded k-means++ init + stable argsort tie-breaking.
+
+    Args:
+        pruned_labels: Per-doc fine cluster labels (0..F-1 consecutive;
+            -1 docs stay -1, exactly as in the distance path).
+        pruned_centroids: Fine cluster centroids (F, dim), pruned order.
+        token_counts: Per-doc token counts aligned with pruned_labels;
+            None -> document counts are used as weights.
+        K: Target number of macro clusters (= K_enhanced). Reduced to the
+            number of non-empty macros if an anchor ends up unassigned.
+        slack: Capacity slack over the even share.
+        max_iter: Max anchor-update iterations.
+        seed: RNG seed for k-means++ initialization.
+        profile_path: Optional path for balanced_profile.json (audit).
+
+    Returns:
+        Tuple of (macro_labels, macro_centroids, fine_to_macro_map) — the
+        same shape contract as merge_clusters_by_distance.
+    """
+    valid = pruned_labels >= 0
+    F = pruned_centroids.shape[0]
+    if F == 0 or not valid.any():
+        return pruned_labels, pruned_centroids, {}
+
+    if token_counts is not None:
+        weights = token_counts[valid].astype(np.float64)
+    else:
+        weights = np.ones(int(valid.sum()), dtype=np.float64)
+    fine_tok = np.bincount(pruned_labels[valid], weights=weights, minlength=F)
+
+    K_eff = min(K, F)
+    cap = fine_tok.sum() / K_eff * (1.0 + slack)
+
+    nrm = pruned_centroids.astype(np.float64)
+    norms = np.linalg.norm(nrm, axis=1, keepdims=True)
+    norms[norms == 0.0] = 1.0
+    nrm = nrm / norms
+
+    print(f"[Balanced] {F} fine clusters -> target K={K_eff} "
+          f"(slack={slack:.2f}, cap={cap:,.0f} tokens of "
+          f"{fine_tok.sum():,.0f})")
+
+    # k-means++ initialization on the normalized fine centroids
+    rng = np.random.default_rng(seed)
+    anchors = np.empty((K_eff, nrm.shape[1]), dtype=np.float64)
+    anchors[0] = nrm[int(rng.integers(F))]
+    d2 = ((nrm - anchors[0]) ** 2).sum(1)
+    for k in range(1, K_eff):
+        total = float(d2.sum())
+        if total <= 0.0:
+            idx = int(rng.integers(F))
+        else:
+            idx = int(rng.choice(F, p=d2 / total))
+        anchors[k] = nrm[idx]
+        d2 = np.minimum(d2, ((nrm - anchors[k]) ** 2).sum(1))
+
+    # Capacity-constrained Lloyd: fine clusters claim anchors in
+    # token-descending order so the big ones are never the ones squeezed
+    # into overflow; anchor update is the token-weighted mean, renormalized.
+    order = np.argsort(-fine_tok, kind="stable")
+    prev = -np.ones(F, dtype=int)
+    assign = prev
+    iterations = 0
+    stable = False
+    n_overflow = 0
+    for it in range(max_iter):
+        used = np.zeros(K_eff, dtype=np.float64)
+        new = -np.ones(F, dtype=int)
+        overflow_this = 0
+        for i in order:
+            d = ((anchors - nrm[i]) ** 2).sum(1)
+            ranked = np.argsort(d, kind="stable")
+            placed = False
+            for j in ranked:
+                if used[j] + fine_tok[i] <= cap:
+                    new[i] = int(j)
+                    used[j] += fine_tok[i]
+                    placed = True
+                    break
+            if not placed:
+                # Single fine cluster larger than the cap (or all bins
+                # full): nearest anchor anyway, loudly counted.
+                j = int(ranked[0])
+                new[i] = j
+                used[j] += fine_tok[i]
+                overflow_this += 1
+        n_overflow = overflow_this
+        same = bool((new == prev).all())
+        prev = new
+        for j in range(K_eff):
+            m = new == j
+            if m.any():
+                a = (nrm[m] * fine_tok[m, None]).sum(0)
+                n = float(np.linalg.norm(a))
+                if n > 0.0:
+                    anchors[j] = a / n
+        iterations = it + 1
+        if same:
+            stable = True
+            break
+    assign = prev
+
+    # Consecutive macro ids over the non-empty anchors
+    used_macros = np.unique(assign)
+    macro_of = -np.ones(F, dtype=int)
+    for new_id, j in enumerate(used_macros):
+        macro_of[assign == j] = new_id
+    K_final = len(used_macros)
+
+    macro_labels = np.full(len(pruned_labels), -1, dtype=np.int64)
+    macro_labels[valid] = macro_of[pruned_labels[valid]]
+
+    macro_centroids = np.zeros((K_final, pruned_centroids.shape[1]), dtype=np.float32)
+    for new_id in range(K_final):
+        m = macro_of == new_id
+        w = fine_tok[m]
+        macro_centroids[new_id] = (pruned_centroids[m] * w[:, None]).sum(0) / w.sum()
+
+    macro_tok = np.array([fine_tok[macro_of == new_id].sum()
+                          for new_id in range(K_final)])
+    shares = np.sort(macro_tok / macro_tok.sum())[::-1]
+    cos = np.array([float(np.dot(nrm[i], anchors[assign[i]])) for i in range(F)])
+
+    print(f"[Balanced] K_final={K_final} from {F} fine clusters "
+          f"(iters={iterations}{', stable' if stable else ', max_iter reached'}, "
+          f"overflow={n_overflow})")
+    print(f"[Balanced] token shares: max={shares[0]:.1%} min={shares[-1]:.1%} "
+          f"cap={cap / fine_tok.sum():.1%} | "
+          + " ".join(f"{s:.1%}" for s in shares))
+    print(f"[Balanced] fine->anchor cosine: mean={cos.mean():.3f} "
+          f"p10={np.percentile(cos, 10):.3f} min={cos.min():.3f}")
+
+    advice = []
+    if shares[0] > (1.0 + slack) / K_eff + 1e-9:
+        advice.append(f"! top macro holds {shares[0]:.1%} > cap "
+                      f"{(1.0 + slack) / K_eff:.1%} — a single fine cluster "
+                      f"({n_overflow} overflow assignment(s)) dominates; "
+                      f"raise K or investigate the fine level")
+    if float(cos.mean()) < 0.5:
+        advice.append(f"· fine->anchor cosine mean={cos.mean():.3f} — slices "
+                      f"are loose; inspect per-macro samples before trusting "
+                      f"the search space")
+    if not advice:
+        advice.append("✓ capacity respected and slices are tight")
+
+    if profile_path:
+        import json
+        profile_data = {
+            "strategy": "balanced",
+            "K_target": K,
+            "K_final": K_final,
+            "F_fine": F,
+            "slack": slack,
+            "iterations": iterations,
+            "stable": stable,
+            "overflow_assignments": n_overflow,
+            "cap_tokens": float(cap),
+            "total_tokens": float(fine_tok.sum()),
+            "token_shares_sorted": [round(float(s), 6) for s in shares],
+            "max_share": float(shares[0]),
+            "min_share": float(shares[-1]),
+            "fine_anchor_cosine": {
+                "mean": round(float(cos.mean()), 6),
+                "p10": round(float(np.percentile(cos, 10)), 6),
+                "min": round(float(cos.min()), 6),
+            },
+            "advice": advice,
+        }
+        os.makedirs(os.path.dirname(profile_path) or ".", exist_ok=True)
+        with open(profile_path, "w") as f:
+            json.dump(profile_data, f, indent=2)
+        print(f"[Balanced] Profile written → {profile_path}")
+
+    return macro_labels, macro_centroids, {int(i): int(macro_of[i]) for i in range(F)}
+
+
+def validate_cluster_structure(
+    cluster_info: List[ClusterInfo],
+    max_share_threshold: float = 0.5,
+) -> None:
+    """Structure gate (prod1 lesson): abort when one cluster dominates the pool.
+
+    prod1 shipped a search space where C0 held 99.05% of pool tokens — the
+    Dirichlet sampler (alpha = K * token share) then pinned every sampled
+    config to the same corner and the search had zero effective knobs,
+    visible only in the postmortem. This gate makes that failure loud at
+    pipeline time. 50% threshold: balanced partitions sit at ~1/K, healthy
+    topic structures rarely exceed a third of the pool; only genuinely
+    degenerate geometry trips it. Applies on BOTH cluster-stage paths
+    (fresh discovery and cluster_cache hit).
+    """
+    total = sum(c.num_tokens for c in cluster_info)
+    if total <= 0 or not cluster_info:
+        return
+    ranked = sorted(cluster_info, key=lambda c: -c.num_tokens)
+    top_share = ranked[0].num_tokens / total
+    if top_share > max_share_threshold:
+        detail = ", ".join(f"{c.label}={c.num_tokens / total:.1%}" for c in ranked[:3])
+        raise ValueError(
+            f"[StructureGate] largest cluster holds {top_share:.1%} of pool "
+            f"tokens (> {max_share_threshold:.0%} threshold; top-3: {detail}). "
+            f"The mixture search space is degenerate — one cluster dominates "
+            f"every feasible mixture and the Dirichlet sampler collapses onto "
+            f"it. Fix the clustering before running the search (e.g. "
+            f"MERGE_STRATEGY=balanced with K_ENHANCED=15) — see "
+            f"docs/paper_deviations.md D14 and the prod1 postmortem."
+        )
+
+
 def build_cluster_info(
     merged_labels: npt.NDArray[np.int64],
     merged_centroids: npt.NDArray[np.float32],
@@ -956,6 +1203,7 @@ def preprocess_pipeline(
     K_max: Optional[int] = None,
     prune_threshold: float = 3.0,
     merge_distance: float = 0.9,
+    merge_strategy: str = "distance",
     embedding_cache: Optional[str] = None,
     kmeans_cache: Optional[str] = None,
     profile_path: Optional[str] = None,
@@ -983,6 +1231,11 @@ def preprocess_pipeline(
         K_max: Cap on the final cluster count (search-budget bound).
         prune_threshold: Quality threshold for cluster pruning.
         merge_distance: Merge legality threshold (tau) on centroid distance.
+        merge_strategy: "distance" (historical closest-pair merge, tau
+            band) or "balanced" (capacity-constrained balanced partition to
+            exactly K_enhanced macro clusters — prod2 default for pools
+            whose embedding space is a single dense continuum; see
+            balanced_macro_clusters).
         embedding_cache: Cache path for embeddings (stable, pool-keyed).
         kmeans_cache: Cache path for K-means labels+centroids (stable,
             pool-keyed; survives K_enhanced/merge_distance changes).
@@ -1055,6 +1308,17 @@ def preprocess_pipeline(
         print("[Preprocess] WARNING: All clusters pruned, using original labels")
         merged_labels = cluster_labels
         merged_centroids = centroids
+    elif merge_strategy == "balanced":
+        balanced_profile_path = None
+        if profile_path:
+            balanced_profile_path = os.path.join(
+                os.path.dirname(profile_path), "balanced_profile.json")
+        merged_labels, merged_centroids, _ = balanced_macro_clusters(
+            pruned_labels, pruned_centroids,
+            token_counts=token_counts,
+            K=K_enhanced,
+            profile_path=balanced_profile_path,
+        )
     else:
         merged_labels, merged_centroids, _ = merge_clusters_by_distance(
             pruned_labels, pruned_centroids,

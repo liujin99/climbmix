@@ -29,6 +29,7 @@ from climbmix.core.types import (
     ClusterInfo,
     ProxyResult,
 )
+from climbmix.core.cluster_merge import validate_cluster_structure
 from climbmix.core.discovery import get_discovery
 from climbmix.core.quality_filter import get_filter
 from climbmix.core.iterative_bootstrapper import IterativeBootstrapper
@@ -157,6 +158,12 @@ class CLIMBPipeline:
             self._save_cluster_cache(cluster_cache_npz, cluster_cache_json, final_labels, cluster_info)
             print(f"[Stage 1] Cached → {cluster_cache_npz}")
 
+        # Structure gate (prod1 lesson): a pool dominated by one cluster
+        # makes the mixture search degenerate (prod1: C0 = 99.05% of
+        # tokens, search had ~1 effective knob). Loud abort on BOTH paths
+        # — fresh discovery and cluster_cache hit.
+        validate_cluster_structure(cluster_info)
+
         # Stage 2: Quality filtering (after clusters are known)
         _t = time.time()
         quality_filter = get_filter(self.config.filtering.method)
@@ -212,6 +219,10 @@ class CLIMBPipeline:
             "predictor_eval": bootstrapper.predictor_eval,
             "online_eval": bootstrapper.online_eval,
             "pruning_history": bootstrapper.pruning_history,
+            "selection": {
+                "mode": bootstrapper.selection_mode,
+                "guard_reasons": bootstrapper.selection_guard_reasons,
+            },
         }
         self._save_outputs(
             output_dir, optimal_weights, iter_results,
