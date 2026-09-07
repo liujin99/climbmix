@@ -65,9 +65,17 @@ TARGET_STEPS="${TARGET_STEPS:-1000}"
 PROXY_TARGET_TOKENS="${PROXY_TARGET_TOKENS:-400M}"
 TARGET_TOKENS="${TARGET_TOKENS:-1B}"
 CONFIGS_PER_ITER="${CONFIGS_PER_ITER:-20,10,5}"
+# prod2 B++: 期望列表语义 — ADAPTIVE_CONFIGS=1 时 configs_per_iter 视为
+# "期望每轮实验数", 由实测并发 (RemoteExecutor 探测) 浮动到
+# w_i = round(e_i / S0) 个满波 (probe-truncate / straggler-eviction /
+# rolling C_eff 三机制, 见 docs/parallel_k_selection.md §5.2)。
+# 默认 0 = 字面语义 (每轮恰好 n 个, 老行为)。
+ADAPTIVE_CONFIGS="${ADAPTIVE_CONFIGS:-0}"
 SEARCH_NUM_ITERATIONS="${SEARCH_NUM_ITERATIONS:-3}"
 K_ENHANCED="${K_ENHANCED:-3}"
-K_CLUSTER_MAX="${K_CLUSTER_MAX:-15}"
+# balanced 模式下 K_max 语义等同 K_ENHANCED (容量约束划分恰好到 K);
+# distance 模式仍可显式覆盖。默认跟随 K_ENHANCED。
+K_CLUSTER_MAX="${K_CLUSTER_MAX:-$K_ENHANCED}"
 K_INIT="${K_INIT:-1000}"
 FILTER_METHOD="${FILTER_METHOD:-none}"
 PRUNE_THRESHOLD="${PRUNE_THRESHOLD:-3.0}"
@@ -79,8 +87,9 @@ PRUNE_THRESHOLD="${PRUNE_THRESHOLD:-3.0}"
 PRUNE_COLUMN_FLOOR="${PRUNE_COLUMN_FLOOR:-2.0}"
 MERGE_DISTANCE="${MERGE_DISTANCE:-0.9}"
 # prod2: balanced = 容量约束平衡划分到恰好 K_ENHANCED 个宏簇(本池嵌入空间为单一
-# 连续流形,距离合并在任何 (K,tau) 下都塌成 ~99% 巨簇 — 见 paper_deviations.md D14)
-MERGE_STRATEGY="${MERGE_STRATEGY:-distance}"
+# 连续流形,距离合并在任何 (K,tau) 下都塌成 ~99% 巨簇 — 见 paper_deviations.md
+# D14;2026-09-07 起为默认)。distance 仍可用(本池已死,仅作对照)。
+MERGE_STRATEGY="${MERGE_STRATEGY:-balanced}"
 EMBEDDING_MODEL="${EMBEDDING_MODEL:-NovaSearch/stella_en_400M_v5}"
 # Stable pool-keyed cache for embeddings + K-means (survives fingerprint
 # resets; K/merge knob changes reuse embeddings instead of re-embedding)
@@ -146,10 +155,12 @@ COMPLETION_MARKERS=(".done_eval_climb" ".done_eval_random")
 # REMOTE_ENABLED=1 时 Step 1-3 的 search 用 RemoteExecutor:
 #   - 本地: 混数据 + 上传分片到 OBS + 提交作业 + 回收结果为本地 exp_XXXX
 #   - 远端作业: 下载分片 -> torchrun mid_train -> base_eval -> 结果上 OBS
-#   - REMOTE_LOCAL_PARALLEL=1 (默认): 主节点本地卡也加入舰队 — 前
-#     NUM_NPU/NPU_PER_EXP 个配置走本地并行, 其余远端作业, 全程并发
+#   - REMOTE_LOCAL_PARALLEL=1: 主节点本地卡也加入舰队 — 前
+#     NUM_NPU/NPU_PER_EXP 个配置走本地并行, 其余远端作业, 全程并发。
+#     NPU_PER_EXP == NUM_NPU 时本地是 1 个 k 卡"整槽"(ProxyRunner 串行
+#     全卡路径, prod2 的 k=8 形态); 默认 0 = 本地卡空闲(保守, 老语义)
 #   - REMOTE_NPU_PER_JOB 默认 = NPU_PER_EXP (k 全舰队一致, 分数可比性,
-#     docs/parallel_k_selection.md); 想让本地卡出力需 NPU_PER_EXP < NUM_NPU
+#     docs/parallel_k_selection.md); 想让本地卡出力需 NPU_PER_EXP <= NUM_NPU
 #   - 动态提交 (池容量波动): 提交被配额/频控拒绝时指数退避重试,
 #     配置不因瞬时拒绝烧毁; 一个迭代的作业随配额释放分多轮落地。
 #     在飞上限 = REMOTE_MAX_JOBS, 池变大时调高即可; 本地混料/上传并发
@@ -161,7 +172,7 @@ COMPLETION_MARKERS=(".done_eval_climb" ".done_eval_random")
 # 验证 (M3): 后端仓的 hello-world 校准脚本打通网关 → dispatch_remote.py
 #   单发 exp + Δstem_metric < 0.002 → 并发波。
 REMOTE_ENABLED="${REMOTE_ENABLED:-0}"
-REMOTE_LOCAL_PARALLEL="${REMOTE_LOCAL_PARALLEL:-1}"
+REMOTE_LOCAL_PARALLEL="${REMOTE_LOCAL_PARALLEL:-0}"
 REMOTE_OBS_PREFIX="${REMOTE_OBS_PREFIX:-}"
 REMOTE_BACKEND="${REMOTE_BACKEND:-mock}"           # mock (本地仿真) | 平台后端名
 REMOTE_BACKEND_MODULE="${REMOTE_BACKEND_MODULE:-}" # 后端工厂 "pkg:attr" (见后端仓 README); pip 安装的后端可留空走 entry point
@@ -178,11 +189,26 @@ REMOTE_STORAGE_ROOT="${REMOTE_STORAGE_ROOT:-}"    # mock 后端专用: 假 OBS �
 REMOTE_JOB_TIMEOUT_H="${REMOTE_JOB_TIMEOUT_H:-6}" # 单作业 RUNTIME 超时 (小时, 排队时间不计 — 首个 RUNNING 起算)
 REMOTE_QUEUE_TIMEOUT_H="${REMOTE_QUEUE_TIMEOUT_H:-24}" # 排队超时 (提交→起跑, 小时; 池满时作业可在平台队列里等卡)
 REMOTE_QUEUE_RETRY="${REMOTE_QUEUE_RETRY:-2}" # 排队超时后重提次数 (新排队时钟; 总排队耐心 = 超时 × (1+次数))
+# 自适应驱逐的 PENDING 宽限 (分钟, 仅 ADAPTIVE_CONFIGS=1 生效): 已提交作业
+# 排队超过该时长且同批已有作业在跑 = 舰队超额信号 → cancel + 该配置从本轮
+# 永久移除 (pending 重写, resume 不重跑)。臂作业不受影响 (必做交付, 24h 耐心)。
+REMOTE_PENDING_GRACE_MIN="${REMOTE_PENDING_GRACE_MIN:-30}"
 REMOTE_CODE_WHEELS="${REMOTE_CODE_WHEELS:-}"  # 离线 wheel 本地路径 (逗号分隔, executor 自动补传)
 # per-launch 直挂资产 (JSON 对象 {"name":"obs://..."}), 替换平台配置的全局
 # asset_mounts — search 舰队只挂自己要的 (d20/tokenizer/eval_*), 不带 embed
 # 专属的 stella/pool/d28。空 = 继承全局 (兼容旧行为)。
 REMOTE_ASSET_MOUNTS="${REMOTE_ASSET_MOUNTS:-}"
+
+# ── Target-arm execution (Step 6+7 的执行形态, 刻意不进指纹) ──
+# remote (默认): scripts/dispatch_target_arm.py 把臂作为远端 8 卡作业提交
+#   (与搜索舰队同池/同镜像/同 argv 构建器, 与本地唯一差异 = 在哪跑);
+#   random 臂可由该脚本单独提前发射(搜索期间并行), climb 臂在搜索结束后
+#   由 Step 6 发出。远端失败 → 自动回退本地 torchrun (三层兜底)。
+# local: 永远本地跑 (prod1 行为)。
+TARGET_ARM_MODE="${TARGET_ARM_MODE:-remote}"
+# 远端 d28 基座资产 (obs:// 目录): dispatch 首次引导时把本地
+# base_checkpoints/d28 上传到该 URI (一次性); 缺省 {prefix}/assets_big/d28。
+REMOTE_D28_ASSET_URI="${REMOTE_D28_ASSET_URI:-}"
 
 # ── HF download endpoint ──
 # The managed runtime's egress proxy selectively rejects Python's bare
@@ -232,6 +258,9 @@ FP_SEARCH_PARAMS=(
     "proxy_num_iterations=$PROXY_NUM_ITERATIONS"
     "proxy_target_tokens=$PROXY_TARGET_TOKENS"
     "configs_per_iter=$CONFIGS_PER_ITER"
+    # 期望列表语义开关是搜索语义的一部分 (进指纹); TARGET_ARM_MODE /
+    # REMOTE_* 是执行形态, 刻意不进 (num_npu 先例)。
+    "adaptive_configs=$ADAPTIVE_CONFIGS"
     "search_num_iterations=$SEARCH_NUM_ITERATIONS"
     "K_enhanced=$K_ENHANCED"
     "K_cluster_max=$K_CLUSTER_MAX"
@@ -279,6 +308,37 @@ FP_TARGET_PARAMS=(
 source "$CLIMBMIX_DIR/runs/lib/stage_gate.sh"
 run_stage_gate
 
+# ── Target-arm shared lib + launch env snapshot ──
+# target_arm.sh 是本地臂路径 (Step 6+7 / 远端兜底) 的唯一 argv 来源,
+# 与 dispatch_target_arm.py 的 python 构建器逐 token 对齐 (测试保证)。
+source "$CLIMBMIX_DIR/runs/lib/target_arm.sh"
+export TARGET_BASE_CKPT="$NANOCHAT_BASE_DIR/base_checkpoints/d${TARGET_DEPTH}"
+# launch_env.json: 独立发射的 dispatch 进程 (nohup ... --arm random) 读它
+# 获得全部所需变量 — 不依赖启动 shell 的环境传递。每次发射刷新。
+export EXP_NAME DATA_DIR CLIMBMIX_DIR NANOCHAT_DIR NANOCHAT_BASE_DIR \
+       GENERAL_DATA_DIR PROXY_DEPTH TARGET_DEPTH TARGET_STEPS TARGET_TOKENS \
+       TARGET_LR_SCALE TARGET_WARMUP TARGET_WARMDOWN CORE_METRIC_EVERY \
+       MID_DEVICE_BATCH_SIZE MID_TRAIN_LOADER EVAL_BENCHMARKS \
+       EVAL_MAX_PER_TASK EVAL_DEVICE_BATCH_SIZE EVAL_CORE_BATCH_SIZE \
+       STEM_RATIO NUM_NPU NPU_PER_EXP K_ENHANCED HF_ENDPOINT \
+       REMOTE_D28_ASSET_URI NANOCHAT_DTYPE OUTPUT_DIR
+python3 - "$OUTPUT_DIR/launch_env.json" "$TARGET_BASE_CKPT" <<'PYEOF'
+import json, os, sys
+out, target_base_ckpt = sys.argv[1], sys.argv[2]
+keys = ["EXP_NAME", "DATA_DIR", "CLIMBMIX_DIR", "NANOCHAT_DIR",
+        "NANOCHAT_BASE_DIR", "GENERAL_DATA_DIR", "PROXY_DEPTH", "TARGET_DEPTH",
+        "TARGET_STEPS", "TARGET_TOKENS", "TARGET_LR_SCALE", "TARGET_WARMUP",
+        "TARGET_WARMDOWN", "CORE_METRIC_EVERY", "MID_DEVICE_BATCH_SIZE",
+        "MID_TRAIN_LOADER", "EVAL_BENCHMARKS", "EVAL_MAX_PER_TASK",
+        "EVAL_DEVICE_BATCH_SIZE", "EVAL_CORE_BATCH_SIZE", "STEM_RATIO",
+        "NUM_NPU", "NPU_PER_EXP", "K_ENHANCED", "HF_ENDPOINT",
+        "REMOTE_D28_ASSET_URI", "NANOCHAT_DTYPE", "OUTPUT_DIR"]
+env = {k: os.environ.get(k, "") for k in keys}
+env["TARGET_BASE_CKPT"] = target_base_ckpt
+with open(out, "w") as f:
+    json.dump(env, f, indent=2)
+PYEOF
+
 # ── Pre-flight ──
 # Remote fleet config generation (REMOTE_* -> RemoteConfig JSON). Execution-
 # shape only; deliberately absent from FP_SEARCH_PARAMS (num_npu precedent).
@@ -298,7 +358,7 @@ if [ "$REMOTE_ENABLED" = "1" ]; then
            REMOTE_POOL_NAME REMOTE_NPU_PER_JOB REMOTE_MAX_JOBS \
            REMOTE_SUBMIT_RETRY_H REMOTE_MAX_PREP REMOTE_LOCAL_PARALLEL \
            REMOTE_STORAGE_KIND REMOTE_STORAGE_ROOT REMOTE_JOB_TIMEOUT_H \
-           REMOTE_QUEUE_TIMEOUT_H REMOTE_QUEUE_RETRY \
+           REMOTE_QUEUE_TIMEOUT_H REMOTE_QUEUE_RETRY REMOTE_PENDING_GRACE_MIN \
            REMOTE_CODE_WHEELS REMOTE_ASSET_MOUNTS
     python3 - "$REMOTE_CONFIG_PATH" "$REMOTE_PLATFORM_CONFIG" "$REMOTE_IMAGE" "$REMOTE_FLAVOR" <<'PYEOF'
 import json, sys, os
@@ -321,6 +381,7 @@ cfg = {
     "job_timeout_s": float(os.environ["REMOTE_JOB_TIMEOUT_H"]) * 3600.0,
     "queue_timeout_s": float(os.environ["REMOTE_QUEUE_TIMEOUT_H"]) * 3600.0,
     "queue_resubmit_attempts": int(os.environ["REMOTE_QUEUE_RETRY"]),
+    "pending_grace_min": float(os.environ["REMOTE_PENDING_GRACE_MIN"]),
     "job_env": {"HF_ENDPOINT": os.environ["HF_ENDPOINT"]},
 }
 wheels = [w for w in (os.environ.get("REMOTE_CODE_WHEELS") or "").split(",") if w]
@@ -354,10 +415,12 @@ with open(cfg_path, "w") as f:
 PYEOF
     echo "  Remote fleet: ${REMOTE_MAX_JOBS} jobs x ${REMOTE_NPU_PER_JOB} NPU (backend=${REMOTE_BACKEND}, prefix=${REMOTE_OBS_PREFIX})"
     if [ "$REMOTE_LOCAL_PARALLEL" = "1" ]; then
-        if [ "$NPU_PER_EXP" -lt 1 ] || [ "$NPU_PER_EXP" -ge "$NUM_NPU" ] || [ $((NUM_NPU % NPU_PER_EXP)) -ne 0 ]; then
-            echo "  ⚠ REMOTE_LOCAL_PARALLEL=1 but NPU_PER_EXP=${NPU_PER_EXP} does not slice NUM_NPU=${NUM_NPU}: master-node NPUs will IDLE (need a proper divisor < NUM_NPU)"
+        if [ "$NPU_PER_EXP" -lt 1 ] || [ "$NPU_PER_EXP" -gt "$NUM_NPU" ] || [ $((NUM_NPU % NPU_PER_EXP)) -ne 0 ]; then
+            echo "  ⚠ REMOTE_LOCAL_PARALLEL=1 but NPU_PER_EXP=${NPU_PER_EXP} does not slice NUM_NPU=${NUM_NPU}: master-node NPUs will IDLE (need a divisor of NUM_NPU, <= NUM_NPU)"
         elif [ "$REMOTE_NPU_PER_JOB" != "$NPU_PER_EXP" ]; then
             echo "  ⚠ remote k (REMOTE_NPU_PER_JOB=$REMOTE_NPU_PER_JOB) != local k (NPU_PER_EXP=$NPU_PER_EXP): k should stay fleet-wide fixed for score comparability"
+        elif [ "$NPU_PER_EXP" -eq "$NUM_NPU" ]; then
+            echo "  Hybrid fleet: local 1 x ${NPU_PER_EXP}-NPU whole-node slot (serial full-card path) + ${REMOTE_MAX_JOBS} remote jobs x ${REMOTE_NPU_PER_JOB} NPU"
         else
             echo "  Hybrid fleet: local $((NUM_NPU / NPU_PER_EXP)) x ${NPU_PER_EXP} NPU + ${REMOTE_MAX_JOBS} remote jobs x ${REMOTE_NPU_PER_JOB} NPU"
         fi
@@ -389,6 +452,8 @@ if [ -f "$OUTPUT_DIR/sampled_dataset.parquet" ]; then
 else
     echo -e "\n===== Step 1-3: Proxy Search (d${PROXY_DEPTH}) =====\n"
 
+    ADAPTIVE_ARGS=()
+    [ "$ADAPTIVE_CONFIGS" = "1" ] && ADAPTIVE_ARGS+=(--adaptive-configs)
     python3 "$CLIMBMIX_DIR/scripts/run_climb.py" \
         --data-dir "$DATA_DIR" \
         --nanochat-dir "$NANOCHAT_DIR" \
@@ -419,6 +484,7 @@ else
         --embedding-device "$EMBEDDING_DEVICE" \
         --embedding-sample-size "$EMBEDDING_SAMPLE_SIZE" \
         --configs-per-iter "$CONFIGS_PER_ITER" \
+        ${ADAPTIVE_ARGS[@]+"${ADAPTIVE_ARGS[@]}"} \
         --device-type npu --npu-devices "$NUM_NPU" --npu-per-exp "$NPU_PER_EXP" \
         --output-dir "$OUTPUT_DIR" \
         --exp-name "$EXP_NAME" \
@@ -440,13 +506,23 @@ echo -e "\n===== Step 4: Prepare Target Data =====\n"
 CLIMB_SHARDS="$OUTPUT_DIR/climb_shards"
 RANDOM_SHARDS="$OUTPUT_DIR/random_shards"
 
-python3 "$CLIMBMIX_DIR/scripts/prepare_shards.py" \
-    --input "$OUTPUT_DIR/sampled_dataset.parquet" \
-    --output-dir "$CLIMB_SHARDS" --num-npu "$NUM_NPU"
+# Random 臂的数据准备 (random baseline + mix) 与独立发射的 dispatch 进程
+# (scripts/dispatch_target_arm.py --arm random, 搜索期间提前并行) 共享同一
+# 组 .done 产物 — flock 串行化, 双方都做 .done 双检, 后到者秒过。
+random_arm_lock() {
+    if command -v flock >/dev/null 2>&1; then
+        ( flock -x 9; "$@" ) 9>"$OUTPUT_DIR/.random_arm.lock"
+    else
+        echo "  (flock unavailable — random-arm prep not serialized with dispatch)"
+        "$@"
+    fi
+}
 
-if [ -f "$RANDOM_SHARDS/.done" ]; then
-    echo "  Random baseline: already complete (.done), skip"
-else
+prep_random_baseline() {
+    if [ -f "$RANDOM_SHARDS/.done" ]; then
+        echo "  Random baseline: already complete (.done), skip"
+        return
+    fi
     # Paper App. C.1: equal uniform cluster weights (1/K), same token cap as
     # the CLIMB arm — NOT a doc-uniform draw (that would weight clusters by
     # their natural size). Shortfall policy mirrors the CLIMB arm's selector.
@@ -456,7 +532,13 @@ else
         --schema "$CLIMBMIX_DIR/config/schema_stem.yaml" \
         --target-tokens "$TARGET_TOKENS" \
         --seed 42 --num-npu "$NUM_NPU"
-fi
+}
+
+python3 "$CLIMBMIX_DIR/scripts/prepare_shards.py" \
+    --input "$OUTPUT_DIR/sampled_dataset.parquet" \
+    --output-dir "$CLIMB_SHARDS" --num-npu "$NUM_NPU"
+
+random_arm_lock prep_random_baseline
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Step 5: Mix STEM + General Data (anti-forgetting)
@@ -475,110 +557,56 @@ mix_one() {
 }
 
 mix_one "$CLIMB_SHARDS" "$OUTPUT_DIR/climb_mixed" "CLIMB"
-mix_one "$RANDOM_SHARDS" "$OUTPUT_DIR/random_mixed" "Random"
+random_arm_lock mix_one "$RANDOM_SHARDS" "$OUTPUT_DIR/random_mixed" "Random"
 CLIMB_DATA="$OUTPUT_DIR/climb_mixed"
 RANDOM_DATA="$OUTPUT_DIR/random_mixed"
 
 # ═══════════════════════════════════════════════════════════════════════
-#  Step 6: Target Training (d28 mid_train) — climb/random 独立 .done 标记
+#  Step 6+7: Target Arms — train + eval, per arm, interleaved (S1)
+#
+#  每臂三层执行: .done 标记 → 远端 dispatch (TARGET_ARM_MODE=remote 且
+#  REMOTE_ENABLED=1 时, scripts/dispatch_target_arm.py; 远端作业内完成
+#  训练+评测并落标记) → 本地 torchrun 兜底 (runs/lib/target_arm.sh)。
+#  训完立刻评 (S1 交错: eval 结果提前 ~10h 可见); eval 也标记级幂等 —
+#  远端已评过的臂直接跳过。random 在前: 独立发射的 dispatch
+#  (--arm random) 通常已在搜索期间完成它, 双臂均秒过或各走各的路径。
 # ═══════════════════════════════════════════════════════════════════════
-echo -e "\n===== Step 6: Target Training (d${TARGET_DEPTH}) =====\n"
+echo -e "\n===== Step 6+7: Target Arms (d${TARGET_DEPTH}) =====\n"
 
 CLIMB_TAG="d${TARGET_DEPTH}_climb_${EXP_NAME}"
 RANDOM_TAG="d${TARGET_DEPTH}_random_${EXP_NAME}"
 
-run_mid_train() {
+run_arm() {
     local data_dir="$1" tag="$2" name="$3"
-    local link_dir="$NANOCHAT_BASE_DIR/base_checkpoints/$tag"
-    # Clean a stale/broken symlink from a previous crashed attempt BEFORE the
-    # `[ -e ] || ln -s`: a broken link fails `[ -e ]` yet still blocks ln -s
-    # (EEXIST), which kills the script under set -e.
-    if [ -L "$link_dir" ] && [ ! -e "$link_dir" ]; then rm -f "$link_dir"; fi
-    [ -e "$link_dir" ] || ln -s "$NANOCHAT_BASE_DIR/base_checkpoints/d${TARGET_DEPTH}" "$link_dir"
-    # Clear partial checkpoints from a crashed attempt (nanochat may otherwise
-    # try to auto-resume from inconsistent state; whole-run atomicity instead)
-    rm -rf "$NANOCHAT_BASE_DIR/mid_checkpoints/$tag"
-    # Step 6 = 单 8-rank torchrun (quadmix 验证过 env 块安全的唯一形态);
-    # 并行搜索阶段绝不 source (2026-08-26 事故, 见 speedrun 头部注释).
-    (
-        # shellcheck source=/dev/null
-        source "$CLIMBMIX_DIR/runs/lib/npu_env.sh"
-        cd "$NANOCHAT_DIR" && torchrun --standalone --nproc_per_node="$NUM_NPU" -m scripts.mid_train -- \
-        --num-iterations="$TARGET_STEPS" \
-        --lr-scale="$TARGET_LR_SCALE" --warmup-ratio="$TARGET_WARMUP" --warmdown-ratio="$TARGET_WARMDOWN" \
-        --core-metric-every="$CORE_METRIC_EVERY" \
-        --device-batch-size="$MID_DEVICE_BATCH_SIZE" \
-        --loader="$MID_TRAIN_LOADER" \
-        --sample-every=-1 \
-        --eval-every=-1 \
-        --run="${name}_mid" --model-tag="$tag" \
-        --data-dir="$data_dir" 2>&1 | tee "$OUTPUT_DIR/mid_train_${name}.log"
-    )
-    # NOT `[ -L ] && rm` as the last statement: when link_dir is absent or not
-    # a symlink the function would return 1, and under set -e the script dies
-    # AFTER successful training with .done unwritten → retrain on every resume.
-    if [ -L "$link_dir" ]; then rm -f "$link_dir"; fi
-}
-
-if [ -f "$OUTPUT_DIR/.done_mid_train_climb" ]; then
-    echo "  mid_train climb: already done, skip"
-else
-    run_mid_train "$CLIMB_DATA" "$CLIMB_TAG" "climb"
-    touch "$OUTPUT_DIR/.done_mid_train_climb"
-fi
-
-if [ -f "$OUTPUT_DIR/.done_mid_train_random" ]; then
-    echo "  mid_train random: already done, skip"
-else
-    run_mid_train "$RANDOM_DATA" "$RANDOM_TAG" "random"
-    touch "$OUTPUT_DIR/.done_mid_train_random"
-fi
-
-# ═══════════════════════════════════════════════════════════════════════
-#  Step 7: Evaluation
-# ═══════════════════════════════════════════════════════════════════════
-echo -e "\n===== Step 7: Evaluation =====\n"
-
-run_eval() {
-    local tag="$1" name="$2"
-    (
-        # shellcheck source=/dev/null
-        source "$CLIMBMIX_DIR/runs/lib/npu_env.sh"
-        cd "$NANOCHAT_DIR" && torchrun --standalone --nproc_per_node="$NUM_NPU" -m scripts.base_eval -- \
-        --eval=core --eval-benchmarks="$EVAL_BENCHMARKS" \
-        --max-per-task="$EVAL_MAX_PER_TASK" \
-        --device-batch-size="$EVAL_DEVICE_BATCH_SIZE" \
-        --core-eval-batch-size="$EVAL_CORE_BATCH_SIZE" \
-        --model-tag="$tag" --model-type=mid 2>&1 | tee "$OUTPUT_DIR/eval_${name}.log"
-    )
-    # base_eval writes a step-only CSV name (mid_model_{step}.csv) into the
-    # shared base dir; both arms train the same step count, so the second
-    # eval would overwrite the first. Evals are sequential here — archive
-    # the newest CSV per arm right after its eval (Step 8 reads the LOGS,
-    # this preserves the raw 4-column CSVs for the final analysis).
-    local newest
-    newest=$(ls -t "$NANOCHAT_BASE_DIR"/base_eval/mid_model_*.csv 2>/dev/null | head -1)
-    if [ -n "$newest" ]; then
-        cp -f "$newest" "$OUTPUT_DIR/eval_${name}.csv"
-        echo "  Archived $(basename "$newest") -> eval_${name}.csv"
+    if [ -f "$OUTPUT_DIR/.done_mid_train_$name" ]; then
+        echo "  mid_train $name: already done, skip"
     else
-        echo "  WARNING: no mid_model_*.csv found after eval ${name}"
+        if [ "$TARGET_ARM_MODE" = "remote" ] && [ "$REMOTE_ENABLED" = "1" ]; then
+            echo "  [$name] remote target-arm dispatch (waits for the job)..."
+            if python3 "$CLIMBMIX_DIR/scripts/dispatch_target_arm.py" \
+                --arm "$name" --data-dir "$data_dir" --tag "$tag"; then
+                touch "$OUTPUT_DIR/.done_mid_train_$name"
+            else
+                echo "  [$name] remote dispatch did not complete -> local fallback"
+            fi
+        fi
+        if [ ! -f "$OUTPUT_DIR/.done_mid_train_$name" ]; then
+            target_arm_train "$data_dir" "$tag" "$name"
+            touch "$OUTPUT_DIR/.done_mid_train_$name"
+        fi
+    fi
+    # S1 interleaved eval: right after THIS arm's train. 远端作业内已完成
+    # 评测的臂 (dispatch 落了 .done_eval_<name>) 直接跳过。
+    if [ -f "$OUTPUT_DIR/.done_eval_$name" ]; then
+        echo "  eval $name: already done, skip"
+    else
+        target_arm_eval "$tag" "$name"
+        touch "$OUTPUT_DIR/.done_eval_$name"
     fi
 }
 
-if [ -f "$OUTPUT_DIR/.done_eval_climb" ]; then
-    echo "  eval climb: already done, skip"
-else
-    run_eval "$CLIMB_TAG" "climb"
-    touch "$OUTPUT_DIR/.done_eval_climb"
-fi
-
-if [ -f "$OUTPUT_DIR/.done_eval_random" ]; then
-    echo "  eval random: already done, skip"
-else
-    run_eval "$RANDOM_TAG" "random"
-    touch "$OUTPUT_DIR/.done_eval_random"
-fi
+run_arm "$RANDOM_DATA" "$RANDOM_TAG" "random"
+run_arm "$CLIMB_DATA" "$CLIMB_TAG" "climb"
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Step 8: Report (幂等, 总是重新生成)

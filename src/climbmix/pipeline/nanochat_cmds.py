@@ -13,6 +13,10 @@ remote+local execution identically (and enters the stage fingerprints).
 
 Contents:
   - build_mid_train_cmd / build_eval_cmd: exact torchrun argv
+  - build_target_mid_train_cmd / build_target_eval_cmd: the d28 target-arm
+    argv (shell-Step-6/7 form; parity with runs/lib/target_arm.sh is
+    test-asserted — dispatch_target_arm.py builds the REMOTE arm jobs
+    with these so remote and local arms run the same tokens)
   - make_eval_base_dir: the private-base-dir symlink farm that makes parallel
     eval CSVs collision-free (base_eval writes step-only CSV names)
   - claim_eval_csv: move THIS experiment's CSV out of the private dir
@@ -127,6 +131,105 @@ def build_eval_cmd(
     return cmd
 
 
+def build_target_mid_train_cmd(
+    run_name: str,
+    model_tag: str,
+    data_dir: str,
+    num_iterations,
+    lr_scale,
+    warmup,
+    warmdown,
+    core_metric_every,
+    device_batch_size,
+    loader,
+    nproc_per_node: Optional[int] = None,
+    master_port: Optional[int] = None,
+    npu_devices: int = 8,
+) -> List[str]:
+    """torchrun mid_train argv for the TARGET arms (d28 climb/random).
+
+    Token-for-token identical to runs/lib/target_arm.sh (the local
+    fallback path) — parity is asserted by
+    scripts/diagnostics/test_prod2_runtime.py. Differences vs the proxy
+    build_mid_train_cmd are deliberate and match the shell Step-6 form
+    proven in prod1:
+      - `--key=value` token style (the shell's form)
+      - no --load-optimizer: default 1 loads the d28 optimizer shards —
+        the arm job runs the SAME 8-rank world size as the pretrain, so
+        the shard shapes match (the proxy path must NOT load them: its
+        world size varies)
+      - no --device-type (the proven target argv does not pass it)
+      - --eval-every=-1 explicit (val bpb eval off; the external
+        base_eval after training is the scorer)
+    Values are stringified verbatim (callers pass the launch env's raw
+    strings so "1.0" never becomes "1.0" vs "1" drift between arms).
+    """
+    nproc = nproc_per_node or npu_devices
+    cmd = [
+        "torchrun", "--standalone",
+        f"--nproc_per_node={nproc}",
+    ]
+    if master_port is not None:
+        cmd += ["--master_port", str(master_port)]
+    cmd += [
+        "-m", "scripts.mid_train", "--",
+        f"--num-iterations={num_iterations}",
+        f"--lr-scale={lr_scale}",
+        f"--warmup-ratio={warmup}",
+        f"--warmdown-ratio={warmdown}",
+        f"--core-metric-every={core_metric_every}",
+        f"--device-batch-size={device_batch_size}",
+        f"--loader={loader}",
+        "--sample-every=-1",
+        "--eval-every=-1",
+        f"--run={run_name}",
+        f"--model-tag={model_tag}",
+        f"--data-dir={data_dir}",
+    ]
+    return cmd
+
+
+def build_target_eval_cmd(
+    model_tag: str,
+    eval_benchmarks: str,
+    eval_max_per_task,
+    device_batch_size,
+    core_batch_size,
+    model_type: str = "mid",
+    nproc_per_node: Optional[int] = None,
+    master_port: Optional[int] = None,
+    npu_devices: int = 8,
+) -> List[str]:
+    """torchrun base_eval argv for the target arms (--eval core).
+
+    Parity target: runs/lib/target_arm.sh target_arm_eval. model_type
+    stays parameterized so the remote base anchor can evaluate the raw
+    d28 base checkpoint with the argv form prod1 used locally
+    (--model-type=base; the worker points mid_checkpoints/{tag} and
+    base_checkpoints/{tag} at the d28 asset mount via spec.ckpt_src).
+    --max-per-task is ALWAYS emitted (including -1 = full sets) to match
+    the shell form.
+    """
+    nproc = nproc_per_node or npu_devices
+    cmd = [
+        "torchrun", "--standalone",
+        f"--nproc_per_node={nproc}",
+    ]
+    if master_port is not None:
+        cmd += ["--master_port", str(master_port)]
+    cmd += [
+        "-m", "scripts.base_eval", "--",
+        "--eval=core",
+        f"--eval-benchmarks={eval_benchmarks}",
+        f"--max-per-task={eval_max_per_task}",
+        f"--device-batch-size={device_batch_size}",
+        f"--core-eval-batch-size={core_batch_size}",
+        f"--model-tag={model_tag}",
+        f"--model-type={model_type}",
+    ]
+    return cmd
+
+
 def build_subprocess_env(
     nanochat_dir: str,
     nanochat_base_dir: str,
@@ -229,12 +332,14 @@ def claim_eval_csv(
     exp_dir. The private dir was rebuilt empty immediately before the eval
     subprocess started, so any mid_model_*.csv in it is unambiguously ours —
     no lock and no mtime heuristics needed. Also gives resume/debug a
-    per-experiment record at eval_{model_tag}.csv.
+    per-experiment record at eval_{model_tag}.csv. base_model_*.csv
+    (base-model evals, e.g. the remote d28 anchor) is claimed the same way.
     """
     csv_dir = os.path.join(eval_base, "base_eval")
     try:
         names = [f for f in os.listdir(csv_dir)
-                 if f.startswith("mid_model_") and f.endswith(".csv")]
+                 if ((f.startswith("mid_model_") or f.startswith("base_model_"))
+                     and f.endswith(".csv"))]
     except OSError:
         names = []
     if not names:
