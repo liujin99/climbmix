@@ -17,13 +17,16 @@ import json
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-SPEC_VERSION = 1
+SPEC_VERSION = 2
 
 
 @dataclass
 class ExpSpec:
     # Contract version. The worker refuses other versions (fail-fast instead
-    # of silently misinterpreting fields).
+    # of silently misinterpreting fields). v2 adds ckpt_src (eval an existing
+    # container checkpoint, e.g. the d28 base anchor) — v1 specs are not
+    # accepted by v2 workers; both sides always ship together (the executor
+    # re-stages the assets bundle on every init).
     spec_version: int = SPEC_VERSION
     experiment_id: int = 0
     experiment_name: str = "main"
@@ -36,9 +39,15 @@ class ExpSpec:
     nanochat_dir: str = "/home/ma-user/work/nanochat-npu"
     base_dir: str = "/home/ma-user/work/nanochat_base"
     work_dir: str = "/home/ma-user/work/climbmix_exp"
-    # Container path of the d20 base checkpoint (symlink source for
+    # Container path of the base checkpoint (symlink source for
     # base_checkpoints/{model_tag}).
     base_ckpt_src: str = ""
+    # Container path of an EXISTING checkpoint to symlink as
+    # mid_checkpoints/{model_tag} instead of downloading
+    # {result_uri}/mid_checkpoint (eval_only only). Used by the remote base
+    # anchor (dispatch_target_arm.py --arm base_eval_check: point it at the
+    # d28 asset mount). Empty = the default download path.
+    ckpt_src: str = ""
 
     # ── OBS references ──
     mixture_data_uri: str = ""   # obs://.../exps/exp_XXXX/mixture_data
@@ -89,6 +98,7 @@ class ExpSpec:
             "base_dir": self.base_dir,
             "work_dir": self.work_dir,
             "base_ckpt_src": self.base_ckpt_src,
+            "ckpt_src": self.ckpt_src,
             "mixture_data_uri": self.mixture_data_uri,
             "result_uri": self.result_uri,
             "mid_train_cmd": list(self.mid_train_cmd),
@@ -125,6 +135,7 @@ class ExpSpec:
             base_dir=str(d["base_dir"]),
             work_dir=str(d["work_dir"]),
             base_ckpt_src=str(d.get("base_ckpt_src", "")),
+            ckpt_src=str(d.get("ckpt_src", "")),
             mixture_data_uri=str(d["mixture_data_uri"]),
             result_uri=str(d["result_uri"]),
             mid_train_cmd=[str(x) for x in d.get("mid_train_cmd", [])],

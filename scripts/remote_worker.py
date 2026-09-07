@@ -55,7 +55,7 @@ import traceback
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import nanochat_cmds  # noqa: E402
 
-SPEC_VERSION = 1
+SPEC_VERSION = 2  # exp_spec.SPEC_VERSION (v2: +ckpt_src — keep in lockstep)
 HEARTBEAT_S = 300  # print progress to the job console every 5 minutes
 LOG_STREAM_S = 30  # default in-progress log upload period (spec-tunable)
 
@@ -339,9 +339,26 @@ def main() -> int:
 
         if eval_only:
             ckpt_dir = os.path.join(base, "mid_checkpoints", tag)
-            print(f"[worker] eval-only: downloading mid checkpoint -> {ckpt_dir}",
-                  flush=True)
-            storage.download_dir(f"{result_uri}/mid_checkpoint", ckpt_dir)
+            ckpt_src = s.get("ckpt_src") or ""
+            if ckpt_src:
+                # Evaluate an EXISTING container checkpoint (the d28 base
+                # anchor): symlink it as mid_checkpoints/{tag} instead of
+                # downloading. Fail fast with the path if the mount did not
+                # land — a dangling symlink would surface as a confusing
+                # mid-training loader error minutes later.
+                if not os.path.exists(ckpt_src):
+                    raise RuntimeError(
+                        f"ckpt_src missing in container: {ckpt_src} — "
+                        f"check asset_mounts and the backend's boot mapping")
+                os.makedirs(os.path.dirname(ckpt_dir), exist_ok=True)
+                if not os.path.lexists(ckpt_dir):
+                    os.symlink(ckpt_src, ckpt_dir)
+                print(f"[worker] eval-only: ckpt_src symlink {ckpt_dir} "
+                      f"-> {ckpt_src}", flush=True)
+            else:
+                print(f"[worker] eval-only: downloading mid checkpoint -> {ckpt_dir}",
+                      flush=True)
+                storage.download_dir(f"{result_uri}/mid_checkpoint", ckpt_dir)
         else:
             mix_dir = os.path.join(work, "mixture_data")
             print(f"[worker] downloading mixture data -> {mix_dir}", flush=True)
@@ -349,6 +366,15 @@ def main() -> int:
 
             # Base checkpoint symlink (same semantics as the local executor's
             # _symlink_base_checkpoint: base_checkpoints/{tag} -> d{depth}).
+            # Fail fast when the asset mount did not land — a dangling
+            # symlink would die minutes later inside mid_train's loader
+            # with an opaque checkpoint error.
+            if not os.path.exists(s["base_ckpt_src"]):
+                raise RuntimeError(
+                    f"base ckpt asset missing in container: "
+                    f"{s['base_ckpt_src']} — check asset_mounts "
+                    f"(name 'd<N>' -> {{BASE}}/base_checkpoints/d<N>) and "
+                    f"the backend's boot mapping")
             base_dst = os.path.join(base, "base_checkpoints", tag)
             if not os.path.exists(base_dst):
                 os.makedirs(os.path.dirname(base_dst), exist_ok=True)

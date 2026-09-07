@@ -199,7 +199,10 @@ def build_spec(unit_id, shards, args, pool_uri, model_dir):
         })
         unit_start += int(s["num_docs"])
     return {
-        "spec_version": 1,
+        # Keep in lockstep with exp_spec.SPEC_VERSION / remote_worker's
+        # SPEC_VERSION (the worker refuses mismatches; all spec kinds
+        # share the version counter).
+        "spec_version": 2,
         "kind": "embed",
         "unit_id": unit_id,
         "model": getattr(args, "model", DEFAULT_MODEL),
