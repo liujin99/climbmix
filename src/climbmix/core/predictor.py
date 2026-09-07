@@ -24,6 +24,9 @@ class LightGBMPredictor:
         # held-out Spearman; set by fit() when a validation set is given).
         self.val_r2_: Optional[float] = None
         self.val_spearman_: Optional[float] = None
+        # Train-set R2 (optimistic on <=35 points; the no-signal guard's
+        # fallback when no val split exists).
+        self.train_r2_: Optional[float] = None
 
     @staticmethod
     def _rankdata(x: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
@@ -151,6 +154,7 @@ class LightGBMPredictor:
 
         self._is_fitted = True
         train_r2 = float(self._model.score(X, y))
+        self.train_r2_ = train_r2
         print(f"[Predictor] Trained on {len(X)} configs, train R\u00b2={train_r2:.4f}")
         if val_configs is not None and val_losses is not None:
             # Held-out metrics on the early-stopping split. The train R²

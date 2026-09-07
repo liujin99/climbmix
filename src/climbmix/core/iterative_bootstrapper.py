@@ -70,6 +70,15 @@ class IterativeBootstrapper:
         self._online_eval: List[Dict[str, Any]] = []
         # Guided-round narrowing records (pool -> novel -> top-N -> sampled).
         self._pruning_history: List[Dict[str, Any]] = []
+        # Per-benchmark SNR factor f = 1 - noise/between from the last
+        # _compute_scores call — the no-signal guard's "every benchmark is
+        # pure noise" evidence (prod1: f < 0 on all six).
+        self._task_f: Dict[str, float] = {}
+        # Final-selection audit (surfaced in pipeline_summary via search_extras):
+        # "predictor_design_space" | "no_signal_best_measured" |
+        # "no_predictor_best_measured" + the guard reasons that fired.
+        self._selection_mode: str = "predictor_design_space"
+        self._selection_guard_reasons: List[str] = []
         self.w_floor = config.search.w_floor
         self.state_path = state_path
         self._last_completed_iter = 0
@@ -226,6 +235,11 @@ class IterativeBootstrapper:
         benchmarks it was actually measured on; NaN if it was measured on
         none. NaN scores are dropped by predictor training (isfinite) and
         skipped by best-config selection.
+
+        Accuracy-primary fallback (prod2): a benchmark whose NLL is
+        unavailable (e.g. nanochat 0-shot mmlu_stem, nll=nan on every
+        config) is scored on accuracy alone instead of being dropped —
+        prod1 lost mmlu_stem from the search objective this way.
         """
         N = len(self._accumulated_per_benchmark)
         if N == 0:
@@ -243,25 +257,45 @@ class IterativeBootstrapper:
                 (d[1] or {}).get(b, np.nan) for d in self._accumulated_per_benchmark
             ], dtype=np.float64)
 
-            valid = np.isfinite(accs) & np.isfinite(nlls)
+            # Acc-primary (scoring_metric_design.md): accuracy is the primary
+            # signal, NLL a supplementary view for hard tasks. When the
+            # harness cannot produce a gold-span NLL for a benchmark
+            # (nanochat 0-shot mmlu_stem: nll=nan on EVERY config, both arms
+            # and the base model), the old AND-gate silently dropped the
+            # benchmark from the search objective (prod1: mmlu_stem excluded,
+            # 5/6 benchmarks scored). Now it is scored on accuracy alone —
+            # the blend collapses to acc_z wherever NLL is unavailable.
+            valid = np.isfinite(accs)
             n_valid = int(valid.sum())
             if n_valid == 0:
                 print(f"    {b}: no valid measurements, skipping")
                 continue
+            n_acc_only = int((valid & ~np.isfinite(nlls)).sum())
 
             acc_z = (accs - np.nanmean(accs)) / (np.nanstd(accs) + 1e-12)
-            nll_z = -(nlls - np.nanmean(nlls)) / (np.nanstd(nlls) + 1e-12)
+            if np.isfinite(nlls).any():
+                nll_z = -(nlls - np.nanmean(nlls)) / (np.nanstd(nlls) + 1e-12)
+            else:
+                nll_z = np.full(len(nlls), np.nan)
 
             K = BENCHMARK_SIZES.get(b, 1000)
             sigma2_noise = 0.25 / K
             sigma2_between = float(accs[valid].var()) + 1e-12
             f = 1.0 - sigma2_noise / sigma2_between
             w = max(self.w_floor, min(1.0, max(0.0, (1.0 + f) / 2.0)))
+            self._task_f[b] = float(f)
 
-            score_sum += np.where(valid, w * acc_z + (1.0 - w) * nll_z, 0.0)
+            # NLL unavailable (benchmark-wide or per-config) -> accuracy-only.
+            nll_eff = np.where(np.isfinite(nll_z), nll_z, acc_z)
+            score_sum += np.where(valid, w * acc_z + (1.0 - w) * nll_eff, 0.0)
             score_cnt += valid
 
-            extra = f", {N - n_valid} unmeasured" if n_valid < N else ""
+            extra_parts = []
+            if n_acc_only:
+                extra_parts.append(f"{n_acc_only} acc-only (NLL unavailable)")
+            if n_valid < N:
+                extra_parts.append(f"{N - n_valid} unmeasured")
+            extra = (", " + ", ".join(extra_parts)) if extra_parts else ""
             print(f"    {b}: w={w:.3f} (f={f:.3f}, noise={sigma2_noise:.6f}, "
                   f"between={sigma2_between:.6f}{extra})")
 
@@ -746,21 +780,84 @@ class IterativeBootstrapper:
             self._pending = None
             self._save_state()
 
-        if self._predictor is None:
-            best_idx = self._best_index(np.array(self._accumulated_scores))
-            optimal = self._accumulated_configs[best_idx]
-        else:
-            optimal = self._search_full_design_space()
+        optimal = self._select_final_mixture()
 
         elapsed = time.time() - t0
         print(f"\n{'=' * 70}")
         print(f"  CLIMB Search Complete ({elapsed:.1f}s)")
+        print(f"  Selection mode: {self._selection_mode}")
+        for reason in self._selection_guard_reasons:
+            print(f"    guard: {reason}")
         print(f"  Optimal mixture weights:")
         for i, w in enumerate(optimal.mixture_weights.weights):
             print(f"    C{i}: {w:.4f}")
         print(f"{'=' * 70}")
 
         return optimal, self._iteration_results
+
+    def _no_signal_reasons(self) -> List[str]:
+        """B3 no-signal guard reasons for the final selection (prod1 lesson).
+
+        prod1 shipped a full-design-space argmin from a predictor whose
+        held-out R2 was -0.001/-0.537/-0.012 (worse than predicting the
+        mean) with f < 0 on every benchmark (binomial noise >=
+        between-config variance): the "optimal" mixture was an UNMEASURED
+        Dirichlet corner, not a measured winner. When the predictor
+        carries no signal, the honest optimum is the best MEASURED
+        configuration. Fully automatic — no human gate.
+        """
+        reasons: List[str] = []
+        # Held-out R2 when a val split exists (<10 configs trains without
+        # one); train R2 as the fallback signal there — optimistic by
+        # construction, but <= 0 on TRAIN data is still a hard no-signal.
+        r2 = getattr(self._predictor, "val_r2_", None)
+        if r2 is None:
+            r2 = getattr(self._predictor, "train_r2_", None)
+        if r2 is not None and r2 <= 0.0:
+            reasons.append(
+                f"predictor held-out R²={r2:.3f} <= 0 (no better than "
+                f"predicting the mean)")
+        if self._task_f:
+            f_values = list(self._task_f.values())
+            if all(fv <= 0.0 for fv in f_values):
+                reasons.append(
+                    f"every benchmark has f<=0 (noise >= between-config "
+                    f"variance): {[round(fv, 2) for fv in f_values]}")
+        return reasons
+
+    def _select_final_mixture(self) -> MixtureConfig:
+        """Final selection (paper §3.3) with the no-signal guard.
+
+        - No predictor trained (too few valid configs): best MEASURED config.
+        - Predictor has no signal (guard reasons): best MEASURED config,
+          loudly annotated — never an unmeasured design-space corner.
+        - Otherwise: paper-faithful full-design-space search.
+        """
+        if self._predictor is None:
+            self._selection_mode = "no_predictor_best_measured"
+            print("[Search] No predictor trained — selecting the best "
+                  "MEASURED configuration")
+            best_idx = self._best_index(
+                np.array(self._accumulated_scores, dtype=np.float64))
+            return self._accumulated_configs[best_idx]
+
+        guard_reasons = self._no_signal_reasons()
+        if guard_reasons:
+            self._selection_mode = "no_signal_best_measured"
+            self._selection_guard_reasons = guard_reasons
+            print("[Search] ! NO-SIGNAL GUARD — the predictor carries no "
+                  "usable signal:")
+            for r in guard_reasons:
+                print(f"[Search] !   · {r}")
+            print("[Search] ! Selecting the best MEASURED configuration "
+                  "instead of the design-space argmin (prod1 shipped an "
+                  "unmeasured Dirichlet corner exactly this way).")
+            best_idx = self._best_index(
+                np.array(self._accumulated_scores, dtype=np.float64))
+            return self._accumulated_configs[best_idx]
+
+        self._selection_mode = "predictor_design_space"
+        return self._search_full_design_space()
 
     def _search_full_design_space(self) -> MixtureConfig:
         """
@@ -823,6 +920,14 @@ class IterativeBootstrapper:
     @property
     def predictor(self):
         return self._predictor
+
+    @property
+    def selection_mode(self) -> str:
+        return self._selection_mode
+
+    @property
+    def selection_guard_reasons(self) -> List[str]:
+        return list(self._selection_guard_reasons)
 
     @property
     def predictor_eval(self) -> List[Dict[str, Any]]:
