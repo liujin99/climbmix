@@ -22,16 +22,30 @@ must never touch a production run's prefix). Requires a backend whose
 job_api implements submit_raw (the climbmix-ma adapter; node_count
 support >= the adapter commit that adds the parameter).
 
-Usage (server):
+Usage (server, DEDICATED throwaway clone — never the running run's dir):
+  cd ~/work
+  git clone https://github.com/liujin99/climbmix.git climbmix-probe
+  cd climbmix-probe
+  git clone https://github.com/liujin99/climbmix-ma.git climbmix-ma-probe
+  PYTHONPATH=$PWD/climbmix-ma-probe \
   python3 scripts/probe/run_multinode_probes.py \
-      --remote-config <run_dir>/remote_config.json \
-      --obs-prefix obs://bucket/.../probe_multinode \
+      --remote-config /home/ma-user/work/climbmix/result/<run>/remote_config.json \
+      --obs-prefix obs://bucket/.../probe_multinode_<ts> \
       --node-count 2
-  # + probe C:
+  # + probe C (pick a >=2*8-card idle window):
       --with-train --d28-uri obs://.../climbmix_resource_package/d28 \
       --tokenizer-uri obs://.../climbmix_resource_package/tokenizer \
       --data-dir <local dir with shard_*.parquet> \
       --nanochat-dir ~/work/nanochat-npu
+
+Isolation: everything the probes write lives under --obs-prefix (a
+DEDICATED probe prefix); the remote_config's obs_prefix is IGNORED.
+Embedding caches, cluster caches, the production run's prefix and its
+local result/ dirs are never touched (probe C READS the shared d28 /
+tokenizer / resource-package assets via input mounts — read-only).
+Scope: multi-node is for the 1.5B (d28) TARGET ARMS ONLY — the search
+fleet, embedding waves, and proxy experiments stay single-node by
+design (wave packing / independent jobs / cheap failure).
 
 Safe to re-run: every probe's artifacts live under {prefix}/probe_X/,
 and --skip-a/--skip-b resume after a completed earlier probe.
