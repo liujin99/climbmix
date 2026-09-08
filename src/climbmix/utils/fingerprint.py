@@ -63,8 +63,15 @@ TARGET_ONLY = {
 # Dev tools: never hashed by any stage.
 GLOBAL_EXCLUDE = {
     "scripts/get_model_info.py",
+    # Self-exclusion: hashing the classifier itself means every
+    # classification edit (e.g. adding an exclude prefix) shifts all
+    # fingerprints for zero semantic change. Classification changes
+    # still propagate through the hashed FILE SET they produce.
+    "src/climbmix/utils/fingerprint.py",
 }
-GLOBAL_EXCLUDE_PREFIXES = ("scripts/diagnostics/",)
+# Phase-0 multi-node probes (scripts/probe/): platform diagnostics, same
+# class as scripts/diagnostics/ — must never reset search/target products.
+GLOBAL_EXCLUDE_PREFIXES = ("scripts/diagnostics/", "scripts/probe/")
 
 
 def _stages_for(rel_path: str):
