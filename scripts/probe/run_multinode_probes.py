@@ -169,6 +169,60 @@ def submit_probe(job_api, name: str, command: str, env: Dict[str, str],
     return job_id
 
 
+def submit_probe_retry(job_api, name: str, command: str, env: Dict[str, str],
+                       prefix: str, tag: str, node_count: int, run_ts: str,
+                       inputs: Optional[List[Dict]] = None,
+                       input_base: str = DEFAULT_INPUT_BASE,
+                       max_attempts: int = 4, backoff_s: float = 60.0) -> str:
+    """submit_probe + the fleet's transient-rejection retry net. The
+    gateway's obs-path validation flaps under load (ModelArts.2791
+    "not a directory" seen ACCEPTED then REJECTED for a byte-identical
+    input list minutes apart, while the search fleet hammers the same
+    bucket) — the adapter maps it to TransientSubmitError, so back off
+    and resubmit instead of dying (hard RuntimeErrors propagate)."""
+    from climbmix.remote.job_api import TransientSubmitError
+    delay = backoff_s
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return submit_probe(job_api, name, command, env, prefix, tag,
+                                node_count, run_ts, inputs=inputs,
+                                input_base=input_base)
+        except TransientSubmitError as e:
+            if attempt == max_attempts:
+                raise
+            print(f"  [{tag}] submit rejected (transient, attempt "
+                  f"{attempt}/{max_attempts}): {e}\n"
+                  f"  [{tag}] retrying in {delay:.0f}s...", flush=True)
+            time.sleep(delay)
+            delay *= 2
+    raise AssertionError("unreachable")
+
+
+def default_wheel_sources(remote_config) -> List[str]:
+    """Where the run's platform wheels live: assets/ (the fresh channel
+    ma_sync_code populates) and assets_big/ (the one-time bundle beside
+    the d28 base ckpt). Both are read-only shares of static assets."""
+    p = remote_config.obs_prefix.rstrip("/")
+    return [f"{p}/assets", f"{p}/assets_big"]
+
+
+def verify_input(obs, label: str, uri: str, min_files: int = 1) -> int:
+    """Pre-submit local check of an input mount URI: the gateway's
+    equivalent check is a 400 at best (30 wasted minutes) and flaky at
+    worst — listing OBS ourselves is instant and precise."""
+    objs = obs.list_objects(uri)
+    if len(objs) < min_files:
+        raise SystemExit(
+            f"[C] {label} input lists {len(objs)} objects at {uri} — "
+            f"nothing would stage into the container. Check the URI "
+            f"(a FILE on OBS is not a mountable directory here).")
+    names = ", ".join(sorted(o.rsplit('/', 1)[-1]
+                             for o in objs[:5]))
+    print(f"[C] {label} input OK: {len(objs)} objects at {uri} "
+          f"(e.g. {names})")
+    return len(objs)
+
+
 def wait_probe(job_api, job_id: str, tag: str, queue_timeout_s: float,
                runtime_timeout_s: float, poll_s: float) -> str:
     """Returns 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | 'TIMEOUT'."""
@@ -490,9 +544,9 @@ def main():
                     help="stage .whl files into the probe code dir for the "
                          "offline dep boot (OBS dir URI, single .whl OBS "
                          "URI, or local .whl path; repeatable). Default: "
-                         "{remote_config obs_prefix}/assets — a READ-ONLY "
-                         "share of the run's static wheels, same class as "
-                         "the d28/tokenizer input mounts")
+                         "the run's assets/ AND assets_big/ — a READ-ONLY "
+                         "share of its static wheels, same class as the "
+                         "d28/tokenizer input mounts")
     ap.add_argument("--no-wheels", action="store_true",
                     help="skip wheel staging (probe_train.sh then relies "
                          "on pip / the internal mirror fallbacks)")
@@ -542,10 +596,10 @@ def main():
         env = {"PROBE_NNODES": str(args.node_count),
                "PROBE_RDZV_TIMEOUT": "90"}
         try:
-            jid = submit_probe(job_api, f"probe-mn-a-{ts}",
-                               shell_wrap("probe_env_dump.sh"), env,
-                               prefix, "a", args.node_count, ts,
-                               input_base=input_base)
+            jid = submit_probe_retry(job_api, f"probe-mn-a-{ts}",
+                                     shell_wrap("probe_env_dump.sh"), env,
+                                     prefix, "a", args.node_count, ts,
+                                     input_base=input_base)
         except RuntimeError as e:
             print(f"[A] SUBMIT REJECTED — the gateway/pool refused the "
                   f"multi-node job body (node_count={args.node_count}):\n"
@@ -590,10 +644,10 @@ def main():
         if rdzv_mode == "static":
             env["PROBE_MASTER_ADDR"] = args.master_addr
             env["PROBE_MASTER_PORT"] = "29500"
-        jid = submit_probe(job_api, f"probe-mn-b-{ts}",
-                           shell_wrap("probe_hccl.sh"), env,
-                           prefix, "b", args.node_count, ts,
-                           input_base=input_base)
+        jid = submit_probe_retry(job_api, f"probe-mn-b-{ts}",
+                                 shell_wrap("probe_hccl.sh"), env,
+                                 prefix, "b", args.node_count, ts,
+                                 input_base=input_base)
         st = wait_probe(job_api, jid, "b",
                         args.queue_timeout_min * 60,
                         args.runtime_timeout_min_b * 60, args.poll_s)
@@ -617,6 +671,10 @@ def main():
         ) if not v]
         if missing:
             raise SystemExit(f"probe C needs {missing}")
+        # pre-submit verification (instant, precise — better than a
+        # gateway 400 after the uploads): d28/tokenizer must list objects
+        verify_input(obs, "d28", args.d28_uri)
+        verify_input(obs, "tokenizer", args.tokenizer_uri)
         # nanochat tar: reuse or build from a checkout
         tar_local = args.nanochat_tar
         if not tar_local:
@@ -639,12 +697,12 @@ def main():
             obs.upload_file(os.path.join(args.data_dir, s),
                             f"{data_uri}/{s}")
         print(f"[C] uploaded {len(shards)} data shards + nanochat tar")
+        verify_input(obs, "data", data_uri, min_files=len(shards))
         # wheels for the offline dep boot (the vllm image lacks rustbpe/
         # pyarrow; the worker boot installs them from the code dir — the
         # probe's shell path needs them staged the same way)
         if not args.no_wheels:
-            sources = args.wheel_from or [
-                remote_config.obs_prefix.rstrip("/") + "/assets"]
+            sources = args.wheel_from or default_wheel_sources(remote_config)
             staged = stage_wheels(obs, sources, prefix, tag="C")
             if not staged:
                 print(f"[C] WARN: no wheels found at {sources} — "
@@ -668,10 +726,10 @@ def main():
             {"name": "data", "access_method": "env",
              "remote": {"obs": {"obs_url": data_uri}}},
         ]
-        jid = submit_probe(job_api, f"probe-mn-c-{ts}",
-                           shell_wrap("probe_train.sh"), env,
-                           prefix, "c", args.node_count, ts, inputs=inputs,
-                           input_base=input_base)
+        jid = submit_probe_retry(job_api, f"probe-mn-c-{ts}",
+                                 shell_wrap("probe_train.sh"), env,
+                                 prefix, "c", args.node_count, ts,
+                                 inputs=inputs, input_base=input_base)
         st = wait_probe(job_api, jid, "c",
                         args.queue_timeout_min * 60,
                         args.runtime_timeout_min_c * 60, args.poll_s)
