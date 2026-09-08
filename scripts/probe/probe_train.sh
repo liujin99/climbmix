@@ -51,6 +51,26 @@ else
   echo "[probe C $(hostname)] nanochat already present"
 fi
 
+# ── 2.5) deps the vllm-ascend image lacks (verbatim the worker boot's
+#         loop: import probe -> OFFLINE wheel from the code dir -> pip ->
+#         internal mirror; rustbpe AND pyarrow both hit ModuleNotFoundError
+#         live — the driver stages the run's wheels into the code dir) ──
+for d in datasets dotenv=python-dotenv fastapi filelock huggingface_hub \
+         jinja2 numpy pandas psutil pyarrow pydantic pytest requests \
+         rustbpe sentence_transformers=sentence-transformers tiktoken \
+         tokenizers tqdm transformers urllib3 uvicorn wandb yaml=pyyaml; do
+  m=${d%%=*}; p=${d##*=}
+  python3 -c "import $m" 2>/dev/null || {
+    echo "[probe C $(hostname)] installing missing dep: $m"
+    python3 -m pip install --no-index --find-links "$CODE" \
+            --find-links "$CODE/assets" "$p" >/dev/null 2>&1 || \
+    python3 -m pip install "$p" >/dev/null 2>&1 || \
+    python3 -m pip install -i \
+            http://repo.myhuaweicloud.com/repository/pypi/simple \
+            --trusted-host repo.myhuaweicloud.com "$p" || true
+  }
+done
+
 # ── 3) rendezvous + train ──
 rdzv_resolve || {
   echo "[probe C] FATAL: rendezvous failed on $(hostname)" \

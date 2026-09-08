@@ -13,10 +13,14 @@ prints a go/no-go decision table at the end:
                   findings (platform env > k8s StatefulSet DNS >
                   output-sync election > static)
   C  training    50-step real mid_train at ws=16 (2 nodes), dbs=1,
-                 --load-optimizer=0 — measures s/step vs the 18.2s ws=8
-                 anchor, peak memory, and cross-node checkpoint shards.
-                 Opt-in: --with-train (needs --d28-uri/--tokenizer-uri/
-                 --data-dir/--nanochat-dir).
+                  --load-optimizer=0 — measures s/step vs the 18.2s ws=8
+                  anchor, peak memory, and cross-node checkpoint shards.
+                  Opt-in: --with-train (needs --d28-uri/--tokenizer-uri/
+                  --data-dir/--nanochat-dir). The vllm image lacks deps
+                  nanochat needs (rustbpe, pyarrow): the driver stages
+                  the run's wheels into the code dir (read-only share of
+                  {obs_prefix}/assets) and probe_train.sh runs the same
+                  offline dep boot the worker path uses.
 
 Runs against a DEDICATED probe prefix (--obs-prefix, no default: probes
 must never touch a production run's prefix). Requires a backend whose
@@ -306,6 +310,42 @@ def analyze_probe_c(local_dir: str) -> List[Dict]:
     return out
 
 
+def stage_wheels(obs, sources: List[str], prefix: str,
+                 tag: str = "C") -> List[str]:
+    """Stage .whl files into {prefix}/assets/ (the job's code dir).
+
+    Sources are OBS dir URIs (every *.whl under them), single .whl OBS
+    URIs, or local .whl paths. The vllm-ascend image lacks deps the
+    nanochat toolchain needs (rustbpe AND pyarrow both hit
+    ModuleNotFoundError live); the worker boot installs them offline
+    from the code dir — probe C's shell path has no boot, so the driver
+    stages the wheels and probe_train.sh runs the same dep loop."""
+    staged: List[str] = []
+    for src in sources:
+        dst_base = f"{prefix.rstrip('/')}/assets"
+        if src.startswith("obs://"):
+            objs = ([src] if src.endswith(".whl")
+                    else [o for o in obs.list_objects(src)
+                          if o.endswith(".whl")])
+            for obj in objs:
+                name = obj.rsplit("/", 1)[-1]
+                tmp = os.path.join(tempfile.gettempdir(),
+                                   f"probe_wheel_{name}")
+                obs.download_file(obj, tmp)
+                obs.upload_file(tmp, f"{dst_base}/{name}")
+                staged.append(name)
+        else:
+            path = os.path.abspath(os.path.expanduser(src))
+            if not (os.path.isfile(path) and path.endswith(".whl")):
+                raise SystemExit(f"--wheel-from: not a .whl file: {path}")
+            obs.upload_file(path,
+                            f"{dst_base}/{os.path.basename(path)}")
+            staged.append(os.path.basename(path))
+    if staged:
+        print(f"[{tag}] wheels -> assets: {', '.join(staged)}")
+    return staged
+
+
 def busbw_verdict(busbw: Optional[float]) -> str:
     if busbw is None:
         return "FAIL (no data)"
@@ -445,6 +485,17 @@ def main():
     ap.add_argument("--nanochat-tar", default="",
                     help="existing nanochat-npu.tar.gz (alternative to "
                          "--nanochat-dir)")
+    ap.add_argument("--wheel-from", action="append", default=None,
+                    metavar="OBS_OR_PATH",
+                    help="stage .whl files into the probe code dir for the "
+                         "offline dep boot (OBS dir URI, single .whl OBS "
+                         "URI, or local .whl path; repeatable). Default: "
+                         "{remote_config obs_prefix}/assets — a READ-ONLY "
+                         "share of the run's static wheels, same class as "
+                         "the d28/tokenizer input mounts")
+    ap.add_argument("--no-wheels", action="store_true",
+                    help="skip wheel staging (probe_train.sh then relies "
+                         "on pip / the internal mirror fallbacks)")
     ap.add_argument("--npu-env-script", default=os.path.join(
         REPO_ROOT, "runs", "lib", "npu_env.sh"))
     ap.add_argument("--download-dir", default="",
@@ -588,6 +639,18 @@ def main():
             obs.upload_file(os.path.join(args.data_dir, s),
                             f"{data_uri}/{s}")
         print(f"[C] uploaded {len(shards)} data shards + nanochat tar")
+        # wheels for the offline dep boot (the vllm image lacks rustbpe/
+        # pyarrow; the worker boot installs them from the code dir — the
+        # probe's shell path needs them staged the same way)
+        if not args.no_wheels:
+            sources = args.wheel_from or [
+                remote_config.obs_prefix.rstrip("/") + "/assets"]
+            staged = stage_wheels(obs, sources, prefix, tag="C")
+            if not staged:
+                print(f"[C] WARN: no wheels found at {sources} — "
+                      "probe_train.sh will fall back to pip/mirror "
+                      "(rustbpe is NOT a pip-packageable dep; expect "
+                      "ModuleNotFoundError)")
         env = build_probe_env(
             args.node_count, args.nproc, rdzv_mode, args.npu_env_script,
             extra={"PROBE_STEPS": str(args.probe_steps),
