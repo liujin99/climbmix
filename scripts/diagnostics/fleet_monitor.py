@@ -23,7 +23,9 @@
 #  平台全池状态 (他人作业) 本探针看不到 — 只盯自己的舰队。
 # ═══════════════════════════════════════════════════════════════════════
 import argparse
+import contextlib
 import glob as globmod
+import io
 import json
 import os
 import re
@@ -162,10 +164,14 @@ def main():
         os.path.join(args.run_dir, "dispatch_*.log")))
     sources += [os.path.join(args.run_dir, "arm_watcher.log")]
 
+    prev_statuses = {}
     while True:
         now = time.time()
         known = collect_jobs(sources)
         timeline = load_timeline(timeline_path)
+        # 降噪种子: 上一次调用的时间线末条里已 UNKNOWN 的, 本次直接静默
+        if timeline and not prev_statuses:
+            prev_statuses = dict(timeline[-1]["s"])
         seen_ids = set()
         for rec in timeline:
             seen_ids.update(rec["s"].keys())
@@ -178,8 +184,15 @@ def main():
             statuses = {}
             errors = {}
             for jid in all_ids:
+                # 降噪: 上一轮已 UNKNOWN (网关删记录的死作业) 的, 本轮
+                # 吞掉后端 status() 的报错 print — 首次出现仍完整打印。
+                quiet = prev_statuses.get(jid) == "UNKNOWN"
                 try:
-                    statuses[jid] = api.status(jid).value
+                    if quiet:
+                        with contextlib.redirect_stdout(io.StringIO()):
+                            statuses[jid] = api.status(jid).value
+                    else:
+                        statuses[jid] = api.status(jid).value
                 except Exception as e:
                     statuses[jid] = "UNKNOWN"
                     errors[jid] = f"{type(e).__name__}: {e}"
@@ -253,6 +266,7 @@ def main():
                       f"mean {fmt_dur(sum(queue_waits) / len(queue_waits))}, "
                       f"max {fmt_dur(max(queue_waits))}")
             print("═" * 66)
+            prev_statuses = dict(statuses)
 
         if args.interval <= 0:
             break
