@@ -8,6 +8,9 @@
 #      secrets masked)
 #   4. is the output mount bi-directionally visible across nodes?
 #      (rendezvous marker test: every node writes one, then polls)
+#   5. k8s StatefulSet DNS rendezvous: hostname is <svc>-worker-N and
+#      /etc/hosts carries the pod FQDN — do per-pod DNS records resolve
+#      every worker FQDN? (master = worker-0, rank = hostname suffix)
 #
 # Env contract (set by the driver through the job's environments):
 #   PROBE_OUT       container output mount dir (synced back to OBS)
@@ -94,21 +97,67 @@ fi
 log "[probe A] rendezvous marker test: $verdict"
 
 # compact machine-readable summary
-python3 - "$SUMMARY" "$NNODES" "$seen" "$elapsed" "$verdict" <<'PYEOF'
+python3 - "$SUMMARY" "$NNODES" "$seen" "$elapsed" "$verdict" "$LOG" <<'PYEOF'
 import json
 import os
+import re
 import socket
 import sys
 
-summary_path, nnodes, seen, elapsed, verdict = (
+summary_path, nnodes, seen, elapsed, verdict, log_path = (
     sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]),
-    sys.argv[5])
+    sys.argv[5], sys.argv[6])
 try:
     import subprocess
     ips = subprocess.run(["hostname", "-I"], capture_output=True,
                          text=True).stdout.split()
 except Exception:
     ips = []
+
+# k8s StatefulSet rendezvous capability: hostname is <svc>-worker-N and
+# /etc/hosts carries the pod FQDN <host>.<svc>.<ns>.svc.cluster.local.
+# With a governing headless service, per-pod DNS records resolve every
+# worker FQDN from every node -> master = worker-0's FQDN, rank = own
+# worker number. Resolving a SIBLING is the real cross-node test (own
+# name may be satisfied by /etc/hosts alone).
+sts = {"pattern": False, "service": None, "fqdn": None, "node_rank": None,
+       "master_addr": None, "worker_ips": {}, "service_ips": [],
+       "ok": False}
+host = socket.gethostname()
+m = re.match(r"^(.*)-worker-([0-9]+)$", host)
+if m:
+    svc, rank = m.group(1), int(m.group(2))
+    fqdn = None
+    try:
+        with open(os.environ.get("PROBE_HOSTS_FILE", "/etc/hosts")) as f:
+            for line in f:
+                fl = line.split()
+                if (len(fl) >= 3 and fl[2] == host) or (
+                        len(fl) == 2 and fl[1] == host):
+                    fqdn = fl[1]
+                    break
+    except OSError:
+        pass
+    if fqdn and "." in fqdn:
+        domain = fqdn.split(".", 1)[1]
+        sts.update({"pattern": True, "service": svc, "fqdn": fqdn,
+                    "node_rank": rank,
+                    "master_addr": f"{svc}-worker-0.{domain}"})
+        ok = True
+        for k in range(nnodes):
+            name = f"{svc}-worker-{k}.{domain}"
+            try:
+                sts["worker_ips"][f"worker-{k}"] = socket.gethostbyname(name)
+            except socket.gaierror:
+                sts["worker_ips"][f"worker-{k}"] = None
+                ok = False
+        try:
+            sts["service_ips"] = sorted({ai[4][0] for ai in
+                                         socket.getaddrinfo(
+                                             domain, None, socket.AF_INET)})
+        except socket.gaierror:
+            sts["service_ips"] = []
+        sts["ok"] = ok
 summary = {
     "hostname": socket.gethostname(),
     "ips": ips,
@@ -116,6 +165,7 @@ summary = {
     "rdzv_markers_seen": seen,
     "rdzv_poll_elapsed_s": elapsed,
     "rdzv_cross_node_output_visibility": verdict,
+    "sts_dns": sts,
     # platform identity candidates (resolved values, None = unset)
     "platform_env": {
         "MASTER_ADDR": os.environ.get("MASTER_ADDR"),
@@ -133,6 +183,9 @@ summary = {
 }
 with open(summary_path, "w") as f:
     json.dump(summary, f, indent=2)
+with open(log_path, "a") as f:
+    f.write("\n---- sts-dns rendezvous ----\n")
+    f.write(json.dumps(sts, indent=2) + "\n")
 print("[probe A] summary written to", summary_path)
 PYEOF
 

@@ -9,8 +9,9 @@ prints a go/no-go decision table at the end:
                  what node-identity env exists, is the output mount
                  cross-node visible (rendezvous primitive)
   B  HCCL        ws = N x 8 init_process_group(hccl) + 1GiB allreduce
-                 bandwidth + latency. Rendezvous mode chosen from A's
-                 findings (platform env > output-sync election > static)
+                  bandwidth + latency. Rendezvous mode chosen from A's
+                  findings (platform env > k8s StatefulSet DNS >
+                  output-sync election > static)
   C  training    50-step real mid_train at ws=16 (2 nodes), dbs=1,
                  --load-optimizer=0 — measures s/step vs the 18.2s ws=8
                  anchor, peak memory, and cross-node checkpoint shards.
@@ -47,8 +48,9 @@ Scope: multi-node is for the 1.5B (d28) TARGET ARMS ONLY — the search
 fleet, embedding waves, and proxy experiments stay single-node by
 design (wave packing / independent jobs / cheap failure).
 
-Safe to re-run: every probe's artifacts live under {prefix}/probe_X/,
-and --skip-a/--skip-b resume after a completed earlier probe.
+Safe to re-run: every probe's artifacts live under {prefix}/probe_X/<ts>/,
+so re-runs never mix with earlier results (and --skip-a/--skip-b skip
+earlier probes outright).
 """
 
 import argparse
@@ -132,7 +134,7 @@ def shell_wrap(script: str) -> str:
 # ── submit + wait ──────────────────────────────────────────────────────────
 
 def submit_probe(job_api, name: str, command: str, env: Dict[str, str],
-                 prefix: str, tag: str, node_count: int,
+                 prefix: str, tag: str, node_count: int, run_ts: str,
                  inputs: Optional[List[Dict]] = None,
                  input_base: str = DEFAULT_INPUT_BASE,
                  output_base: str = DEFAULT_OUTPUT_BASE) -> str:
@@ -140,7 +142,10 @@ def submit_probe(job_api, name: str, command: str, env: Dict[str, str],
         "name": "probe_out",
         "local_dir": f"{output_base}/probe_out_0",
         "access_method": "env",
-        "remote": {"obs": {"obs_url": f"{prefix.rstrip('/')}/probe_{tag}/result"}},
+        # per-run subdir: re-runs against the same prefix never mix old
+        # and new node summaries in one result dir
+        "remote": {"obs": {
+            "obs_url": f"{prefix.rstrip('/')}/probe_{tag}/{run_ts}/result"}},
     }]
     ins = []
     for e in (inputs or []):
@@ -241,6 +246,8 @@ def analyze_probe_a(local_dir: str, node_count: int) -> Dict:
         "platform_triplet": None,
         "output_sync_visible": False,
         "ips": [],
+        "sts_dns_ok": False,
+        "sts_master_addr": None,
     }
     if not summaries:
         return out
@@ -256,12 +263,21 @@ def analyze_probe_a(local_dir: str, node_count: int) -> Dict:
         str(s.get("rdzv_cross_node_output_visibility", "")).startswith("visible")
         for s in summaries)
     out["ips"] = sorted({ip for s in summaries for ip in s.get("ips", [])})
+    # k8s StatefulSet DNS rendezvous: pattern matched AND every worker
+    # FQDN resolved on every node (a sibling resolution is the real
+    # cross-node DNS test — own name may come from /etc/hosts alone)
+    sts = [s.get("sts_dns") or {} for s in summaries]
+    out["sts_dns_ok"] = all(bool(t.get("ok")) for t in sts)
+    out["sts_master_addr"] = next(
+        (t.get("master_addr") for t in sts if t.get("master_addr")), None)
     return out
 
 
 def choose_rdzv_mode(a: Dict, args) -> str:
     if a["platform_triplet"] is not None:
         return "platform"
+    if a.get("sts_dns_ok"):
+        return "dns-sts"
     if a["output_sync_visible"]:
         return "output-sync"
     if args.master_addr:
@@ -328,6 +344,11 @@ def print_decision_table(a: Optional[Dict], b: Optional[Dict],
               f"({a['nodes_seen']} node dumps)")
         print(f"A  platform identity env .......................... "
               f"{a['platform_triplet'] or 'none found'}")
+        print(f"A  k8s sts-dns rendezvous (worker FQDN) ........... "
+              f"{'YES' if a.get('sts_dns_ok') else 'NO'}"
+              + (f" (master={a['sts_master_addr']})"
+                 if a.get('sts_dns_ok') and a.get('sts_master_addr')
+                 else ""))
         print(f"A  cross-node output visibility (rdzv primitive) .. "
               f"{'YES' if a['output_sync_visible'] else 'NO'}")
         print(f"A  rendezvous mode chosen for B/C .................. "
@@ -402,8 +423,8 @@ def main():
     ap.add_argument("--master-addr", default="",
                     help="static rendezvous master IP (last-resort mode)")
     ap.add_argument("--rdzv-mode", default="",
-                    help="force platform|output-sync|static (default: auto "
-                         "from probe A)")
+                    help="force platform|dns-sts|output-sync|static "
+                         "(default: auto from probe A)")
     ap.add_argument("--poll-s", type=float, default=30.0)
     ap.add_argument("--queue-timeout-min", type=float, default=60.0)
     ap.add_argument("--runtime-timeout-min-a", type=float, default=15.0)
@@ -472,7 +493,7 @@ def main():
         try:
             jid = submit_probe(job_api, f"probe-mn-a-{ts}",
                                shell_wrap("probe_env_dump.sh"), env,
-                               prefix, "a", args.node_count,
+                               prefix, "a", args.node_count, ts,
                                input_base=input_base)
         except RuntimeError as e:
             print(f"[A] SUBMIT REJECTED — the gateway/pool refused the "
@@ -488,7 +509,7 @@ def main():
                         args.queue_timeout_min * 60,
                         args.runtime_timeout_min_a * 60, args.poll_s)
         files = download_results(
-            obs, f"{prefix}/probe_a/result", os.path.join(dl_root, "a"),
+            obs, f"{prefix}/probe_a/{ts}/result", os.path.join(dl_root, "a"),
             min_files=args.node_count, tag="a")
         a = analyze_probe_a(os.path.join(dl_root, "a"), args.node_count)
         print(f"[A] {json.dumps(a, ensure_ascii=False)}")
@@ -509,7 +530,8 @@ def main():
     if not args.skip_b:
         if rdzv_mode == "none":
             print("[B] SKIP: no rendezvous strategy (no platform env, no "
-                  "cross-node output visibility, no --master-addr)")
+                  "sts-dns, no cross-node output visibility, no "
+                  "--master-addr)")
             print_decision_table(a, None, c, args.node_count, rdzv_mode, ws)
             return 1
         env = build_probe_env(args.node_count, args.nproc, rdzv_mode,
@@ -519,12 +541,12 @@ def main():
             env["PROBE_MASTER_PORT"] = "29500"
         jid = submit_probe(job_api, f"probe-mn-b-{ts}",
                            shell_wrap("probe_hccl.sh"), env,
-                           prefix, "b", args.node_count,
+                           prefix, "b", args.node_count, ts,
                            input_base=input_base)
         st = wait_probe(job_api, jid, "b",
                         args.queue_timeout_min * 60,
                         args.runtime_timeout_min_b * 60, args.poll_s)
-        download_results(obs, f"{prefix}/probe_b/result",
+        download_results(obs, f"{prefix}/probe_b/{ts}/result",
                          os.path.join(dl_root, "b"), min_files=1, tag="b")
         b = analyze_probe_b(os.path.join(dl_root, "b"))
         print(f"[B] {json.dumps(b, ensure_ascii=False)}")
@@ -554,8 +576,8 @@ def main():
                   f"{args.nanochat_dir} (~300MB, one-time)")
             tar_local = build_nanochat_tar(args.nanochat_dir)
         obs.upload_file(tar_local, f"{prefix}/assets/nanochat-npu.tar.gz")
-        # data: cap shards
-        data_uri = f"{prefix}/probe_c/data"
+        # data: cap shards (per-run dir: re-runs never mix)
+        data_uri = f"{prefix}/probe_c/{ts}/data"
         shards = sorted(
             f for f in os.listdir(args.data_dir) if f.endswith(".parquet"))
         if args.max_shards:
@@ -585,12 +607,12 @@ def main():
         ]
         jid = submit_probe(job_api, f"probe-mn-c-{ts}",
                            shell_wrap("probe_train.sh"), env,
-                           prefix, "c", args.node_count, inputs=inputs,
+                           prefix, "c", args.node_count, ts, inputs=inputs,
                            input_base=input_base)
         st = wait_probe(job_api, jid, "c",
                         args.queue_timeout_min * 60,
                         args.runtime_timeout_min_c * 60, args.poll_s)
-        download_results(obs, f"{prefix}/probe_c/result",
+        download_results(obs, f"{prefix}/probe_c/{ts}/result",
                          os.path.join(dl_root, "c"),
                          min_files=args.node_count, tag="c")
         c = analyze_probe_c(os.path.join(dl_root, "c"))

@@ -2,7 +2,7 @@
 # Shared rendezvous resolution for probes B (HCCL) and C (training).
 # Sourced, not executed. Resolves a (master_addr, master_port, node_rank)
 # triple for a torchrun multi-node launch and exports:
-#   RDZV_MODE         platform | output-sync | static
+#   RDZV_MODE         platform | dns-sts | output-sync | static
 #   RDZV_MASTER_ADDR  reachable IP of the rank-0 node
 #   RDZV_MASTER_PORT  free TCP port on it
 #   RDZV_NODE_RANK    this node's rank in [0, PROBE_NNODES)
@@ -11,12 +11,16 @@
 #   PROBE_OUT         container output mount dir
 #   PROBE_NNODES      node count of the job
 #   PROBE_NPROC       NPUs per node (default 8)
-#   PROBE_RDZV_MODE   auto | platform | output-sync | static
-#                     (auto: platform first, then output-sync, then static)
+#   PROBE_RDZV_MODE   auto | platform | dns-sts | output-sync | static
+#                     (auto: platform, then k8s sts-dns, then output-sync)
 #   PROBE_MASTER_ADDR / PROBE_MASTER_PORT / PROBE_NODE_RANK  (static mode)
-#   PROBE_MASTER_PORT fallback port for platform/output-sync (default 29500)
+#   PROBE_MASTER_PORT fallback port for non-static modes (default 29500)
 #   PROBE_RDZV_TIMEOUT  election poll seconds (default 240)
 #   PROBE_IP_OVERRIDE   use this IP instead of hostname -I's first
+#   PROBE_HOSTS_FILE    hosts file for sts-dns derivation (default
+#                       /etc/hosts; lookup is files-then-DNS, mirroring
+#                       nsswitch — own FQDN hits the file, siblings hit
+#                       the cluster DNS)
 #
 # Platform identity triplets, in priority order (probe A's env dump tells
 # the driver which one actually exists; the driver pins PROBE_RDZV_MODE
@@ -51,6 +55,65 @@ rdzv_try_platform() {
     fi
   done
   return 1
+}
+
+# Resolve a name to an IP: hosts file first, then DNS (mirrors nsswitch
+# "files dns" — own pod FQDN comes from /etc/hosts, siblings from the
+# cluster's per-pod DNS records).
+rdzv_dns_lookup() {
+  local name="$1" hosts="${PROBE_HOSTS_FILE:-/etc/hosts}" ip
+  ip=$(awk -v n="$name" \
+       '$1 !~ /^#/ && ($2 == n || $3 == n) {print $1; exit}' \
+       "$hosts" 2>/dev/null)
+  if [ -n "$ip" ]; then
+    echo "$ip"
+    return 0
+  fi
+  python3 - "$name" <<'PYLOOKUP' 2>/dev/null
+import socket, sys
+try:
+    print(socket.gethostbyname(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+PYLOOKUP
+}
+
+# Kubernetes StatefulSet rendezvous: hostname is <svc>-worker-N and
+# /etc/hosts carries the pod FQDN <host>.<svc>.<ns>.svc.cluster.local
+# (k8s writes it for pods with hostname+subdomain set). With a governing
+# headless service, per-pod DNS records resolve every worker FQDN from
+# every node: master = worker-0 (resolved to an IP), rank = own worker
+# number. Needs NO platform env and NO shared mount (probe A verifies
+# the DNS capability; ModelArts runs jobs as exactly this StatefulSet).
+rdzv_try_sts_dns() {
+  local host svc rank fqdn domain master ip
+  host=$(hostname)
+  if [[ "$host" =~ ^(.*)-worker-([0-9]+)$ ]]; then
+    svc="${BASH_REMATCH[1]}"
+    rank="${BASH_REMATCH[2]}"
+  else
+    rdzv_log "sts-dns: hostname '$host' is not <svc>-worker-N"
+    return 1
+  fi
+  fqdn=$(awk -v h="$host" \
+         '((NF >= 3 && $3 == h) || (NF == 2 && $2 == h)) {print $2; exit}' \
+         "${PROBE_HOSTS_FILE:-/etc/hosts}" 2>/dev/null)
+  if [ -z "$fqdn" ] || [ "${fqdn#*.}" = "$fqdn" ]; then
+    rdzv_log "sts-dns: no pod FQDN for '$host' in ${PROBE_HOSTS_FILE:-/etc/hosts}"
+    return 1
+  fi
+  domain=${fqdn#*.}
+  master="$svc-worker-0.$domain"
+  ip=$(rdzv_dns_lookup "$master") || {
+    rdzv_log "sts-dns: cannot resolve master $master"
+    return 1
+  }
+  RDZV_MODE=dns-sts
+  RDZV_MASTER_ADDR="$ip"
+  RDZV_MASTER_PORT="${PROBE_MASTER_PORT:-29500}"
+  RDZV_NODE_RANK="$rank"
+  rdzv_log "sts-dns -> master $master ($ip):$RDZV_MASTER_PORT rank=$rank"
+  return 0
 }
 
 # Election through the shared output mount: every node writes a marker with
@@ -95,6 +158,9 @@ rdzv_resolve() {
     platform)
       rdzv_try_platform || { rdzv_log "FATAL: no platform MASTER_* env"; return 1; }
       ;;
+    dns-sts)
+      rdzv_try_sts_dns || { rdzv_log "FATAL: sts-dns derivation failed"; return 1; }
+      ;;
     output-sync)
       rdzv_elect_output_sync || return 1
       ;;
@@ -106,8 +172,8 @@ rdzv_resolve() {
       rdzv_log "static -> $RDZV_MASTER_ADDR:$RDZV_MASTER_PORT rank=$RDZV_NODE_RANK"
       ;;
     auto)
-      rdzv_try_platform || rdzv_elect_output_sync || {
-        rdzv_log "FATAL: no platform env and output-sync election failed"
+      rdzv_try_platform || rdzv_try_sts_dns || rdzv_elect_output_sync || {
+        rdzv_log "FATAL: no platform env, sts-dns, or output-sync election"
         return 1
       }
       ;;
