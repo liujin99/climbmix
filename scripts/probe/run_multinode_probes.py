@@ -400,6 +400,44 @@ def stage_wheels(obs, sources: List[str], prefix: str,
     return staged
 
 
+def repartition_shards(shard_paths: List[str], out_dir: str,
+                       row_groups: int,
+                       min_required: Optional[int] = None) -> List[str]:
+    """Rewrite each parquet shard with >= row_groups row groups (probe C).
+
+    _document_batches DDP-shards row groups PER FILE — rg_idx starts at
+    the global rank and strides by world_size — so any rank >= a file's
+    num_row_groups reads NOTHING from that file; when every file is that
+    short the generator spins reopening files forever without yielding
+    (runs 20260909_145450/154328/165952: ranks 16-23 vs 16-row-group
+    mixture shards at ws=24 — first misread as sick storage/obsfs, and
+    the 20260909_165952 per-op traces finally exposed the 0.0s spin).
+    The real mixture shards carry 16 row groups, so the probe rewrites
+    ITS COPIES to row_groups per file (48 feeds every rank at
+    ws=8/16/24/32) instead of touching nanochat."""
+    import pyarrow.parquet as pq
+    out_paths: List[str] = []
+    for src in shard_paths:
+        table = pq.read_table(src)
+        # floor, never ceil: slightly MORE row groups than requested is
+        # always safe (extra rgs just shard out to low ranks); fewer
+        # would starve the top ranks again
+        rg_size = max(1, table.num_rows // row_groups)
+        dst = os.path.join(out_dir, os.path.basename(src))
+        pq.write_table(table, dst, row_group_size=rg_size)
+        had = pq.ParquetFile(src).metadata.num_row_groups
+        got = pq.ParquetFile(dst).metadata.num_row_groups
+        print(f"[C] repartition {os.path.basename(src)}: "
+              f"{had} -> {got} row groups ({table.num_rows} rows)")
+        out_paths.append(dst)
+        if min_required and got < min_required:
+            raise SystemExit(
+                f"repartitioned {dst} has only {got} row groups "
+                f"(< {min_required} = world size) — top ranks would "
+                f"starve; use a bigger shard or raise --probe-row-groups")
+    return out_paths
+
+
 def busbw_verdict(busbw: Optional[float]) -> str:
     if busbw is None:
         return "FAIL (no data)"
@@ -564,6 +602,11 @@ def main():
                     help="local dir with shard_*.parquet for probe C")
     ap.add_argument("--max-shards", type=int, default=4,
                     help="cap parquet uploads for probe C (0 = all)")
+    ap.add_argument("--probe-row-groups", type=int, default=48,
+                    help="rewrite probe C data shards to this many row "
+                         "groups per file before upload (mixture shards "
+                         "carry 16 and starve ranks >= 16; 48 feeds every "
+                         "rank at ws=8/16/24/32)")
     ap.add_argument("--nanochat-dir", default="",
                     help="local nanochat-npu checkout to tar for probe C")
     ap.add_argument("--nanochat-tar", default="",
@@ -716,7 +759,10 @@ def main():
                   f"{args.nanochat_dir} (~300MB, one-time)")
             tar_local = build_nanochat_tar(args.nanochat_dir)
         obs.upload_file(tar_local, f"{prefix}/assets/nanochat-npu.tar.gz")
-        # data: cap shards (per-run dir: re-runs never mix)
+        # data: cap shards (per-run dir: re-runs never mix); rewrite each
+        # to >= --probe-row-groups row groups FIRST — 16-rg mixture
+        # shards starve ranks 16-23 at ws=24 (repartition_shards
+        # docstring has the failure history)
         data_uri = f"{prefix}/probe_c/{ts}/data"
         shards = sorted(
             f for f in os.listdir(args.data_dir) if f.endswith(".parquet"))
@@ -724,9 +770,12 @@ def main():
             shards = shards[:args.max_shards]
         if not shards:
             raise SystemExit(f"no parquet shards in {args.data_dir}")
-        for s in shards:
-            obs.upload_file(os.path.join(args.data_dir, s),
-                            f"{data_uri}/{s}")
+        with tempfile.TemporaryDirectory(prefix="probe_repart_") as tmp:
+            parts = repartition_shards(
+                [os.path.join(args.data_dir, s) for s in shards], tmp,
+                args.probe_row_groups, min_required=ws)
+            for p in parts:
+                obs.upload_file(p, f"{data_uri}/{os.path.basename(p)}")
         print(f"[C] uploaded {len(shards)} data shards + nanochat tar")
         verify_input(obs, "data", data_uri, min_files=len(shards))
         # wheels for the offline dep boot (the vllm image lacks rustbpe/
