@@ -22,7 +22,7 @@ NANOCHAT="${PROBE_NANOCHAT_DIR:-/home/ma-user/work/nanochat-npu}"
 STEPS="${PROBE_STEPS:-50}"
 TAG="${PROBE_TAG:-d28}"
 export PROBE_OUT="$OUT"
-mkdir -p "$OUT" "$BASE/mid_checkpoints" "$BASE/base_checkpoints"
+mkdir -p "$OUT"
 
 . "$CODE/probe_common.sh"
 
@@ -36,13 +36,19 @@ export HCCL_CONNECT_TIMEOUT="${HCCL_CONNECT_TIMEOUT:-600}"
 # device-plane evidence (best-effort, into the boot log)
 rdzv_dump_host_nets
 
-# ── 1) assets: input mounts -> nanochat layout ──
-ln -sfn "$IN/d28_0"      "$BASE/base_checkpoints/$TAG"
-ln -sfn "$IN/tokenizer_0" "$BASE/tokenizer"
-DATA="$NANOCHAT.probe_data"
-rm -rf "$DATA"
-ln -sfn "$IN/data_0" "$DATA"
-echo "[probe C $(hostname)] assets: d28=$(ls "$IN"/d28_0/model_*.pt 2>/dev/null | head -1) data=$(ls "$IN"/data_0/*.parquet 2>/dev/null | wc -l) parquet files"
+# ── 1) assets: materialize input mounts to LOCAL disk ──
+# obsfs read-hang hardening (see probe_mat_cp). load_optimizer=0 means
+# checkpoint_manager never opens optim_*.pt (it only reads them when
+# load_optimizer=True), so model+meta is the COMPLETE read set — skip
+# the ~10GB of optim shards.
+mkdir -p "$BASE/mid_checkpoints" "$BASE/base_checkpoints/$TAG" \
+         "$BASE/tokenizer" "$BASE/probe_data"
+probe_mat_cp "$IN"/d28_0/model_*.pt  "$BASE/base_checkpoints/$TAG" "d28 model" || exit 1
+probe_mat_cp "$IN"/d28_0/meta_*.json "$BASE/base_checkpoints/$TAG" "d28 meta" || exit 1
+probe_mat_cp "$IN"/tokenizer_0/*     "$BASE/tokenizer" "tokenizer" || exit 1
+probe_mat_cp "$IN"/data_0/*.parquet  "$BASE/probe_data" "data shards" || exit 1
+DATA="$BASE/probe_data"
+echo "[probe C $(hostname)] assets local: d28=$(ls "$BASE/base_checkpoints/$TAG"/model_*.pt 2>/dev/null | head -1) data=$(ls "$BASE/probe_data"/*.parquet 2>/dev/null | wc -l) parquet files"
 
 # ── 2) nanochat code from the code-dir tar (fresh channel) ──
 if [ ! -d "$NANOCHAT/scripts" ]; then

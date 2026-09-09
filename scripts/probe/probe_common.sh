@@ -203,6 +203,38 @@ rdzv_dump_host_nets() {
   return 0
 }
 
+# Materialize input-mount paths to LOCAL disk with a per-file timeout.
+# Runs 20260908_201827 / _102807 / 20260909_1129xx: 1-2 nodes per job
+# hang READING the obsfs input mounts (d28 model / tokenizer / parquet)
+# while every other stage is provably healthy (wrap logs: device
+# compute, store connect, init_process_group all ok) — the job then
+# freezes ~20min until HCCL EI0015 kills the healthy ranks. Copy to
+# local disk: a bad mount fails THIS node fast + visibly
+# (train_failure marker) and training never touches obsfs. Glob in src;
+# zero matches is a hard fail. Env: PROBE_MAT_TIMEOUT seconds per file
+# (default 900).
+probe_mat_cp() {
+  local src_glob="$1" dst="$2" label="$3" n=0 t0 f
+  t0=$(date +%s)
+  mkdir -p "$dst"
+  echo "[probe $(hostname)] materialize $label: $src_glob -> $dst"
+  for f in $src_glob; do
+    [ -f "$f" ] || continue
+    if ! timeout "${PROBE_MAT_TIMEOUT:-900}" cp "$f" "$dst/" 2>/dev/null; then
+      echo "[probe] FATAL: materialize $label FAILED on $(hostname): $f (read error or ${PROBE_MAT_TIMEOUT:-900}s timeout — obsfs?)" \
+        | tee -a "${PROBE_OUT:-/tmp}/train_failure_$(hostname).log" >&2
+      return 1
+    fi
+    n=$((n + 1))
+  done
+  if [ "$n" -eq 0 ]; then
+    echo "[probe] FATAL: materialize $label matched NO files: $src_glob" \
+      | tee -a "${PROBE_OUT:-/tmp}/train_failure_$(hostname).log" >&2
+    return 1
+  fi
+  echo "[probe $(hostname)] $label: $n files local in $(( $(date +%s) - t0 ))s"
+}
+
 rdzv_resolve() {
   local mode="${PROBE_RDZV_MODE:-auto}"
   case "$mode" in

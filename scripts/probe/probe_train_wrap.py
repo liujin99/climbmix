@@ -109,6 +109,47 @@ for _n in _NAMES:
 _patched = [n for n in _NAMES if callable(getattr(dist, n, None))]
 bc("patches applied: " + ",".join(_patched))
 
+# nanochat boot-stage patches. Run 20260909_1129xx: the hung nodes'
+# ranks cleared init_process_group and then went silent — the gap is
+# model/tokenizer/data loading (all obsfs reads on the input mounts).
+# mid_train binds these names via from-imports at runpy time, so
+# patching the source modules NOW (before runpy) intercepts every call
+# site. nanochat/__init__ is empty — importing has no side effects.
+try:
+    import nanochat.checkpoint_manager as _cm
+    import nanochat.dataloader as _dl
+    import nanochat.tokenizer as _tok
+
+    def _bc_patch(mod, name):
+        fn = getattr(mod, name, None)
+        if not callable(fn):
+            return
+
+        def wrapped(*a, **k):
+            bc(f"{name} enter")
+            t0 = time.time()
+            try:
+                r = fn(*a, **k)
+            except BaseException as e:
+                bc(f"{name} RAISED {type(e).__name__} "
+                   f"after {time.time() - t0:.0f}s")
+                raise
+            bc(f"{name} done in {time.time() - t0:.0f}s")
+            return r
+
+        setattr(mod, name, wrapped)
+
+    for _m, _nms in (
+            (_cm, ("load_model", "load_optimizer_state")),
+            (_dl, ("tokenizing_distributed_data_loader_flat",
+                   "tokenizing_distributed_data_loader_with_state_flat")),
+            (_tok, ("get_token_bytes",))):
+        for _nm in _nms:
+            _bc_patch(_m, _nm)
+    bc("nanochat boot-stage patches applied")
+except BaseException as e:
+    bc(f"nanochat patches unavailable: {type(e).__name__}: {e}")
+
 bc("runpy scripts.mid_train " + " ".join(sys.argv[1:]))
 sys.argv = ["scripts.mid_train"] + sys.argv[1:]
 try:
