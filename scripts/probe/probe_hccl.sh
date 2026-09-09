@@ -17,5 +17,11 @@ rdzv_resolve || {
   exit 1
 }
 
+# Bound HCCL's own connect timeout (default ~20min): a hung node then
+# fails at ~10min with EI0015 + breadcrumb evidence instead of freezing
+# the job until the driver's runtime timeout cancels it.
+export HCCL_CONNECT_TIMEOUT="${HCCL_CONNECT_TIMEOUT:-600}"
+
 cd "$CODE"
-exec torchrun $(rdzv_torchrun_argv) "$CODE/probe_hccl.py"
+exec torchrun $(rdzv_torchrun_argv) "$CODE/probe_hccl.py" \
+  > "$OUT/hccl_torchrun_$(hostname).log" 2>&1

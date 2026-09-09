@@ -26,6 +26,13 @@ mkdir -p "$OUT" "$BASE/mid_checkpoints" "$BASE/base_checkpoints"
 
 . "$CODE/probe_common.sh"
 
+# Boot-stage breadcrumbs -> output mount (the console log is NOT synced;
+# run 20260908_201827's silent worker-3 left us no boot evidence).
+# Bound HCCL connect timeout: EI0015 at ~10min instead of a 20min freeze.
+BOOTLOG="$OUT/boot_$(hostname).log"
+exec > >(tee -a "$BOOTLOG") 2>&1
+export HCCL_CONNECT_TIMEOUT="${HCCL_CONNECT_TIMEOUT:-600}"
+
 # ── 1) assets: input mounts -> nanochat layout ──
 ln -sfn "$IN/d28_0"      "$BASE/base_checkpoints/$TAG"
 ln -sfn "$IN/tokenizer_0" "$BASE/tokenizer"

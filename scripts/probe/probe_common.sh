@@ -152,6 +152,31 @@ rdzv_elect_output_sync() {
   rdzv_log "output-sync election -> master $RDZV_MASTER_ADDR:$RDZV_MASTER_PORT rank=$rank"
 }
 
+# Cross-node reachability check: connect to the master's rendezvous port
+# BEFORE torchrun binds it. The honest pre-launch answer is "refused"
+# (RST comes back: the network path is open, nothing is listening yet);
+# "timeout" means packets are dropped — a node like that will hang the
+# whole job exactly like the 20260908_201827 run (w3 -> w0, all healthy
+# ranks die on HCCL EI0015 rank-list mismatch, the blocked node stays
+# silent). Sets RDZV_TCP_RESULT/RDZV_TCP_RC/RDZV_TCP_MS; never fatal —
+# the audit json carries the evidence.
+rdzv_tcp_probe() {
+  RDZV_TCP_RESULT=skipped RDZV_TCP_RC="" RDZV_TCP_MS=""
+  [ -n "${PROBE_SKIP_TCP_PROBE:-}" ] && return 0
+  local t0
+  t0=$(date +%s%N)
+  timeout "${PROBE_TCP_TIMEOUT:-5}" \
+    bash -c "exec 3<>/dev/tcp/$RDZV_MASTER_ADDR/$RDZV_MASTER_PORT" 2>/dev/null
+  RDZV_TCP_RC=$?
+  RDZV_TCP_MS=$(( ( $(date +%s%N) - t0 ) / 1000000 ))
+  case "$RDZV_TCP_RC" in
+    0)   RDZV_TCP_RESULT=open ;;
+    124) RDZV_TCP_RESULT=timeout ;;
+    *)   RDZV_TCP_RESULT=refused ;;
+  esac
+  rdzv_log "tcp probe $RDZV_MASTER_ADDR:$RDZV_MASTER_PORT -> $RDZV_TCP_RESULT (rc=$RDZV_TCP_RC ${RDZV_TCP_MS}ms)"
+}
+
 rdzv_resolve() {
   local mode="${PROBE_RDZV_MODE:-auto}"
   case "$mode" in
@@ -183,11 +208,13 @@ rdzv_resolve() {
       ;;
   esac
   export RDZV_MODE RDZV_MASTER_ADDR RDZV_MASTER_PORT RDZV_NODE_RANK
+  rdzv_tcp_probe
   # audit trail: what this node resolved (merges into the job's OBS output)
   if [ -n "${PROBE_OUT:-}" ]; then
-    printf '{"hostname":"%s","mode":"%s","master":"%s","port":"%s","rank":"%s","my_ip":"%s"}\n' \
+    printf '{"hostname":"%s","mode":"%s","master":"%s","port":"%s","rank":"%s","my_ip":"%s","tcp":"%s","tcp_rc":"%s","tcp_ms":"%s"}\n' \
       "$(hostname)" "$RDZV_MODE" "$RDZV_MASTER_ADDR" "$RDZV_MASTER_PORT" \
       "$RDZV_NODE_RANK" "$(rdzv_my_ip)" \
+      "$RDZV_TCP_RESULT" "${RDZV_TCP_RC:-}" "${RDZV_TCP_MS:-}" \
       > "$PROBE_OUT/rdzv_resolved_$(hostname).json" 2>/dev/null || true
   fi
   return 0
