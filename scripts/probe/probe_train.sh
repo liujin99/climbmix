@@ -97,7 +97,7 @@ export WANDB_MODE=disabled
 LOG="$OUT/mid_train_$(hostname).log"
 cd "$NANOCHAT"
 
-torchrun $(rdzv_torchrun_argv) "$CODE/probe_train_wrap.py" \
+torchrun $(rdzv_torchrun_argv) "$CODE/probe_train_wrap.py" -- \
   --num-iterations="$STEPS" \
   --lr-scale=1.0 \
   --warmup-ratio=0.0 \
