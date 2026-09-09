@@ -9,7 +9,7 @@ built torchrun commands (constructed on the submit host by the same shared
 builders the local executor uses), so the remote job runs exactly the argv a
 local experiment would run.
 
-Flow:
+Flow (single-node, spec node_count=1 — today's form):
   1. Download spec.json + (unless eval_only) mixture shards from OBS.
   2. eval_only: download the mid checkpoint from {result_uri}/mid_checkpoint.
      Otherwise: symlink the base checkpoint, run mid_train (torchrun).
@@ -19,6 +19,16 @@ Flow:
      run base_eval.
   4. Claim the CSV out of the private dir, upload it + logs + result.json to
      {result_uri}/.
+
+Multi-node (spec v3 node_count>1, the Phase-1 d28 target arms): the SAME
+worker runs on EVERY node of the job. Each node resolves its rendezvous
+(platform MASTER_* env or the k8s StatefulSet DNS the job runs as) and
+retargets the torchrun launcher prefix (nanochat_cmds); the training argv
+after "-m" stays pinned by the spec. Roles: every node trains; node 0
+additionally uploads the checkpoint, runs eval (single-node 8-rank), and
+owns result.json + mid_train.log; node r>0 exits with its train rc after
+uploading mid_train_node{r}.log. The job succeeds only if every node
+exits 0.
 
 Progress visibility: a daemon thread streams the IN-PROGRESS mid_train.log
 and eval.log to {result_uri} every log_stream_s seconds (spec field, default
@@ -55,7 +65,7 @@ import traceback
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import nanochat_cmds  # noqa: E402
 
-SPEC_VERSION = 2  # exp_spec.SPEC_VERSION (v2: +ckpt_src — keep in lockstep)
+SPEC_VERSION = 3  # exp_spec.SPEC_VERSION (v3: +node_count/master_port — keep in lockstep)
 HEARTBEAT_S = 300  # print progress to the job console every 5 minutes
 LOG_STREAM_S = 30  # default in-progress log upload period (spec-tunable)
 
@@ -188,17 +198,20 @@ def run_cmd(cmd, log_path: str, cwd: str, env) -> int:
 
 
 def start_log_streamer(storage, work: str, result_uri: str,
-                       period_s: float):
+                       period_s: float,
+                       names=("mid_train.log", "eval.log", "embed.log")):
     """Best-effort live log upload (see the module docstring). Returns the
     stop() closure; the thread is a daemon, so early-exit paths never need
-    to call it explicitly."""
+    to call it explicitly. names is overridable so multi-node workers can
+    stream their per-node train log (mid_train_node{r}.log) alongside the
+    master-owned mid_train.log."""
     if period_s <= 0:
         return lambda: None
     stop = threading.Event()
 
     def _loop():
         while not stop.wait(period_s):
-            for name in ("mid_train.log", "eval.log", "embed.log"):
+            for name in names:
                 lp = os.path.join(work, name)
                 if not os.path.isfile(lp):
                     continue
@@ -300,11 +313,37 @@ def main() -> int:
     work = s["work_dir"]
     result_uri = s["result_uri"].rstrip("/")
     os.makedirs(work, exist_ok=True)
+
+    # ── multi-node (spec v3): node_count > 1 runs THIS worker on every
+    # node of the job. node_rank/master_addr resolve HERE (platform env /
+    # StatefulSet DNS — unknowable on the submit host), and the torchrun
+    # launcher prefix is swapped accordingly; the training argv after
+    # "-m" stays pinned by the spec. Node roles: EVERY node trains; node 0
+    # additionally evals + owns result.json; non-master nodes exit with
+    # their train rc after uploading their own log.
+    node_count = int(s.get("node_count", 1) or 1)
+    master_port = int(s.get("master_port", 29500) or 29500)
+    node_rank = 0
+    if node_count > 1:
+        master_addr, master_port, node_rank = \
+            nanochat_cmds.resolve_multinode_rendezvous(
+                node_count, master_port, log=print)
+        s["mid_train_cmd"] = nanochat_cmds.retarget_torchrun_multinode(
+            s["mid_train_cmd"], node_count, node_rank,
+            master_addr, master_port)
+        print(f"[worker] multi-node job: node {node_rank}/{node_count}, "
+              f"master {master_addr}:{master_port}", flush=True)
+    train_log_name = ("mid_train.log" if node_rank == 0
+                      else f"mid_train_node{node_rank}.log")
+
     # Live progress: stream the in-progress logs to the result prefix
     # while the stages run (0/absent disables — final uploads only).
+    stream_names = ["mid_train.log", "eval.log", "embed.log"]
+    if train_log_name not in stream_names:
+        stream_names.append(train_log_name)
     stop_stream = start_log_streamer(
         storage, work, result_uri,
-        float(s.get("log_stream_s", LOG_STREAM_S)))
+        float(s.get("log_stream_s", LOG_STREAM_S)), tuple(stream_names))
 
     res = {
         "spec_version": SPEC_VERSION,
@@ -332,6 +371,12 @@ def main() -> int:
 
     try:
         eval_only = bool(s.get("eval_only", False))
+        if eval_only and node_count > 1:
+            # N standalone evals would race one CSV and N result.json
+            # writers would clobber each other — refuse the shape.
+            raise RuntimeError(
+                "eval_only specs are single-node only (node_count="
+                f"{node_count})")
         # eval_only's PREMISE is a previously-successful training (the submit
         # host verified the marker + checkpoint); rc 0, not -1.
         mid_rc = 0
@@ -402,12 +447,27 @@ def main() -> int:
                 device_ids=s.get("visible_devices") or [0],
                 extra_env=s.get("env") or None)
             mid_rc = run_cmd(s["mid_train_cmd"],
-                             os.path.join(work, "mid_train.log"),
+                             os.path.join(work, train_log_name),
                              cwd=s["nanochat_dir"], env=env)
             res["mid_train_rc"] = mid_rc
+            if node_count > 1 and node_rank != 0:
+                # Non-master node: training was this node's ENTIRE job.
+                # result.json is master-owned (a second writer would
+                # clobber it); the own-log upload is the only artifact.
+                # Exit code = train rc: the multi-node job only succeeds
+                # when EVERY node exits 0, and a master-side failure
+                # (torchrun teardown) already reports through node 0.
+                lp = os.path.join(work, train_log_name)
+                if os.path.isfile(lp):
+                    try:
+                        storage.upload_file(lp, f"{result_uri}/{train_log_name}")
+                    except Exception:
+                        traceback.print_exc()  # log delivery is best-effort
+                stop_stream()
+                return mid_rc
             if mid_rc != 0:
-                storage.upload_file(os.path.join(work, "mid_train.log"),
-                                    f"{result_uri}/mid_train.log")
+                storage.upload_file(os.path.join(work, train_log_name),
+                                    f"{result_uri}/{train_log_name}")
                 return finish(mid_rc)
             if s.get("upload_checkpoint", True):
                 ckpt_dir = os.path.join(base, "mid_checkpoints", tag)

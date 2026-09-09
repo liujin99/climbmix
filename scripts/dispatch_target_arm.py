@@ -9,6 +9,16 @@ difference vs a local experiment is WHERE it runs), so both arms become
 remote jobs that OVERLAP the search (random) or each other's tails, and
 the master's cards stay free for the k=8 local search slot.
 
+Multi-node (Phase 1, TARGET_ARM_NODES>1, default from launch_env): the
+arm job is submitted with node_count=N (power of 2 only — d28's AdamW
+reduce_scatter asserts shape[0] % world_size == 0). Every node runs the
+worker; node 0 owns eval (single-node 8-rank) + result.json. Because
+ws=8*N != 8, the d28 8-shard optimizer cannot load: mid_train gets
+--load-optimizer=0 (cold optimizer — derived, cross-checked against the
+fingerprinted TARGET_LOAD_OPTIMIZER from launch_env so a stale-fingerprint
+run fails instead of silently diverging). Phase-0 measured 6.1 s/step at
+4 nodes vs 18.2 s single-node.
+
 Execution shapes (all marker-idempotent, safe to re-run):
   --arm random   full lifecycle: wait for the cluster cache + balanced
                  profile (the early nohup launch overlaps the search),
@@ -22,7 +32,8 @@ Execution shapes (all marker-idempotent, safe to re-run):
                  checkpoint remotely (--model-type=base, the prod1-local
                  argv form) to verify the remote eval path reproduces the
                  local base score (0.1738). Lands eval_base_remote.csv;
-                 touches NO arm markers (an anchor, not an arm).
+                 touches NO arm markers (an anchor, not an arm). Always
+                 single-node.
 
 Three-layer fallback contract with runs/run_climbmix.sh run_arm(): a
 non-zero exit without .done_mid_train_<arm> makes the main script fall
@@ -189,13 +200,29 @@ class QueueTimedOut(Exception):
 
 def submit_with_backoff(job_api, name: str, command: List[str],
                         env: Dict[str, str], asset_mounts: Optional[Dict[str, str]],
-                        retry_timeout_s: float, label: str) -> str:
+                        retry_timeout_s: float, label: str,
+                        node_count: int = 1) -> str:
     backoff = 30.0
     deadline = time.time() + retry_timeout_s
     attempt = 0
     while True:
         attempt += 1
         try:
+            if node_count > 1:
+                # Multi-node width passthrough (the climbmix-ma adapter's
+                # submit carries node_count into the job body; Phase-0
+                # probes used the same passthrough via submit_raw).
+                try:
+                    return job_api.submit(name=name, command=command, env=env,
+                                          asset_mounts=asset_mounts,
+                                          node_count=node_count)
+                except TypeError as e:
+                    if "node_count" not in str(e):
+                        raise
+                    raise SystemExit(
+                        f"✗ [{label}] backend job_api.submit does not accept "
+                        f"node_count — multi-node arms need the climbmix-ma "
+                        f"adapter's node_count passthrough")
             return job_api.submit(name=name, command=command, env=env,
                                   asset_mounts=asset_mounts)
         except TransientSubmitError as e:
@@ -270,7 +297,8 @@ def wait_job(job_api, obs, job_id: str, label: str, result_uri: str,
 
 def submit_and_wait(job_api, obs, base_name: str, command: List[str],
                     job_env: Dict[str, str], asset_mounts, remote: RemoteConfig,
-                    label: str, result_uri: str, runtime_timeout_s: float):
+                    label: str, result_uri: str, runtime_timeout_s: float,
+                    node_count: int = 1):
     """Submit + wait with queue-timeout resubmission (arm jobs are
     must-deliver: queue patience = queue_timeout_s x (1 + attempts), no
     adaptive eviction)."""
@@ -279,7 +307,7 @@ def submit_and_wait(job_api, obs, base_name: str, command: List[str],
         name = base_name if attempt == 0 else f"{base_name[:59]}-r{attempt}"
         job_id = submit_with_backoff(
             job_api, name, command, job_env, asset_mounts,
-            remote.submit_retry_timeout_s, label)
+            remote.submit_retry_timeout_s, label, node_count=node_count)
         print(f"  [{label}] submitted job {job_id}", flush=True)
         try:
             return job_id, wait_job(
@@ -304,11 +332,20 @@ def download_result_json(obs, result_uri: str) -> Optional[Dict]:
         return None
 
 
-def land_logs(obs, result_uri: str, output_dir: str, arm: str) -> None:
-    for src, dst in ((f"{result_uri.rstrip('/')}/mid_train.log",
-                      os.path.join(output_dir, f"mid_train_{arm}.log")),
-                     (f"{result_uri.rstrip('/')}/eval.log",
-                      os.path.join(output_dir, f"eval_{arm}.log"))):
+def land_logs(obs, result_uri: str, output_dir: str, arm: str,
+              node_count: int = 1) -> None:
+    """Land the master's mid_train.log/eval.log (as before) plus every
+    non-master node's mid_train_node{r}.log when the arm ran multi-node."""
+    names = ["mid_train.log", "eval.log"] + [
+        f"mid_train_node{r}.log" for r in range(1, max(1, node_count))]
+    for name in names:
+        src = f"{result_uri.rstrip('/')}/{name}"
+        if name == "mid_train.log":
+            dst = os.path.join(output_dir, f"mid_train_{arm}.log")
+        elif name == "eval.log":
+            dst = os.path.join(output_dir, f"eval_{arm}.log")
+        else:
+            dst = os.path.join(output_dir, f"{name[:-4]}_{arm}.log")
         if obs.stat(src):
             obs.download_file(src, dst)
             print(f"  [{arm}] landed {os.path.basename(dst)}")
@@ -339,6 +376,18 @@ def write_audit(path: str, payload: Dict) -> None:
 
 # ── main ─────────────────────────────────────────────────────────────────
 
+def _validate_node_count(n: int, ctx: str) -> None:
+    """Power of 2 only: d28's AdamW reduce_scatter asserts
+    shape[0] % world_size == 0 and every d28 dim is a power of 2, so
+    world_size = 8*n must be a power of 2 (ws=24 failed live, run
+    601cdb67 — node_count 3 is structurally invalid, not a fluke)."""
+    if n < 1 or n & (n - 1):
+        raise SystemExit(
+            f"✗ {ctx}: node_count={n} — must be a power of 2 (1/2/4): "
+            f"world_size=8*n has to divide d28's power-of-2 param dims "
+            f"(AdamW reduce_scatter assert)")
+
+
 def main() -> int:
     p = argparse.ArgumentParser(
         description="dispatch a d28 target arm (or base anchor) as a remote job")
@@ -352,8 +401,14 @@ def main() -> int:
                    help="local mixed-data dir (default: $OUTPUT_DIR/<arm>_mixed)")
     p.add_argument("--tag", default="",
                    help="model tag (default: d<TARGET_DEPTH>_<arm>_<EXP_NAME>)")
-    p.add_argument("--job-timeout-h", type=float, default=13.0,
-                   help="remote RUNTIME timeout for the arm job (h, default 13)")
+    p.add_argument("--job-timeout-h", type=float, default=0.0,
+                   help="remote RUNTIME timeout for the arm job (h; 0 = auto: "
+                        "13h single-node, 9h multi-node — 2000 steps at "
+                        "6.1s/step + materialization + eval + uploads)")
+    p.add_argument("--node-count", type=int, default=None,
+                   help="nodes for the arm job (default: $TARGET_ARM_NODES / "
+                        "launch_env, i.e. the run's TARGET_ARM_NODES; power "
+                        "of 2 only. base_eval_check is always single-node)")
     p.add_argument("--d28-asset-uri", default="",
                    help="obs:// dir of the d28 base ckpt asset "
                         "(default: $REMOTE_D28_ASSET_URI or "
@@ -369,9 +424,15 @@ def main() -> int:
                    help="re-attempt remote even if a prior dispatch failed")
     p.add_argument("--wait-cluster-min", type=float, default=120.0,
                    help="random arm: max minutes to wait for the cluster "
-                        "cache + balanced profile (default 120)")
+                         "cache + balanced profile (default 120)")
     p.add_argument("--cluster-poll-s", type=float, default=60.0)
     args = p.parse_args()
+
+    if args.node_count is not None:
+        _validate_node_count(args.node_count, "--node-count")
+    if args.arm == "base_eval_check" and args.node_count > 1:
+        raise SystemExit("✗ --arm base_eval_check is single-node (eval-only "
+                         "anchor; eval is 8-rank calibrated on node 0)")
 
     # ── env + remote config ──
     output_dir = args.output_dir or os.environ.get("OUTPUT_DIR", "")
@@ -386,7 +447,7 @@ def main() -> int:
     rc_path = args.remote_config or os.path.join(output_dir, "remote_config.json")
     if not os.path.isfile(rc_path):
         raise SystemExit(
-            f"✗ remote config not found: {rc_path} (REMOTE_ENABLED=1 run?) — "
+            f"✗ remote config not found at {rc_path} (REMOTE_ENABLED=1 run?) — "
             f"the main script will fall back to local execution")
     remote = RemoteConfig.from_json_file(rc_path)
     # Arm jobs are whole-node 8-NPU jobs (d28 needs the full card group)
@@ -395,6 +456,33 @@ def main() -> int:
     # warnings would be noise).
     remote.npu_per_job = int(launch_env.get("NUM_NPU") or 8)
     remote.local_parallel = False
+
+    # ── multi-node resolution (CLI > env > launch_env) ──
+    node_count = (args.node_count if args.node_count is not None
+                  else int(os.environ.get("TARGET_ARM_NODES") or 0)
+                  or int(launch_env.get("TARGET_ARM_NODES") or 1))
+    _validate_node_count(node_count, "resolved node_count")
+    if base_check and node_count > 1:
+        raise SystemExit("✗ base_eval_check is single-node (eval-only anchor)")
+    # The optimizer-loading semantics DERIVE from node_count (ws!=8 cannot
+    # load the 8-shard d28 optimizer). run_climbmix.sh fingerprints
+    # TARGET_LOAD_OPTIMIZER — a disagreement means this dispatch would run
+    # different training semantics than the stage fingerprint recorded:
+    # refuse (stale .done markers would lie about what ran).
+    lo_derived = "0" if node_count > 1 else "1"
+    lo_recorded = (launch_env.get("TARGET_LOAD_OPTIMIZER") or "").strip()
+    if lo_recorded and lo_recorded != lo_derived:
+        raise SystemExit(
+            f"✗ launch_env TARGET_LOAD_OPTIMIZER={lo_recorded} disagrees "
+            f"with node_count={node_count} (derives {lo_derived}) — the "
+            f"stage fingerprint was computed for a different arm shape; "
+            f"relaunch the main script with TARGET_ARM_NODES={node_count}")
+    load_optimizer = "0" if node_count > 1 else None
+    job_timeout_h = args.job_timeout_h or (9.0 if node_count > 1 else 13.0)
+    if node_count > 1:
+        print(f"  [{args.arm}] multi-node arm: node_count={node_count} "
+              f"(ws={node_count * 8}), load_optimizer={load_optimizer}, "
+              f"timeout {job_timeout_h:.0f}h")
 
     arm = args.arm
     base_check = arm == "base_eval_check"
@@ -605,6 +693,7 @@ def main() -> int:
             core_metric_every=launch_env.get("CORE_METRIC_EVERY") or "-1",
             device_batch_size=launch_env.get("MID_DEVICE_BATCH_SIZE") or "1",
             loader=launch_env.get("MID_TRAIN_LOADER") or "flat",
+            load_optimizer=load_optimizer,
             nproc_per_node=nproc,
         )
         eval_cmd = build_target_eval_cmd(
@@ -635,6 +724,8 @@ def main() -> int:
         upload_checkpoint=not base_check,
         visible_devices=list(range(nproc)),
         env=spec_env,
+        node_count=node_count,
+        master_port=29500,
     )
     spec_uri = f"{arm_root}/spec.json"
     # stale OBS artifacts from a previous attempt must not linger (same
@@ -655,7 +746,8 @@ def main() -> int:
     t0 = time.time()
     job_id, status = submit_and_wait(
         job_api, obs, job_name, worker_argv, dict(remote.job_env), mounts,
-        remote, arm, result_uri, args.job_timeout_h * 3600.0)
+        remote, arm, result_uri, job_timeout_h * 3600.0,
+        node_count=node_count)
     elapsed = time.time() - t0
     console = ""
     try:
@@ -668,7 +760,7 @@ def main() -> int:
     res = download_result_json(obs, result_uri) or {}
     mid_rc = int(res.get("mid_train_rc", -1))
     eval_rc = int(res.get("eval_rc", -1))
-    land_logs(obs, result_uri, output_dir, arm)
+    land_logs(obs, result_uri, output_dir, arm, node_count=node_count)
 
     # ── land artifacts ──
     csv_landed = False
@@ -704,6 +796,8 @@ def main() -> int:
         "tag": tag,
         "job_id": job_id,
         "job_name": job_name,
+        "node_count": node_count,
+        "load_optimizer": lo_derived,
         "status": status.value,
         "ok": ok,
         "salvaged_train_only": (not base_check and mid_rc == 0

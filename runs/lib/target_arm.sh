@@ -16,6 +16,8 @@
 #    CORE_METRIC_EVERY  MID_DEVICE_BATCH_SIZE  MID_TRAIN_LOADER
 #    EVAL_BENCHMARKS  EVAL_MAX_PER_TASK  EVAL_DEVICE_BATCH_SIZE
 #    EVAL_CORE_BATCH_SIZE
+#    TARGET_LOAD_OPTIMIZER (可选; 缺省/1 = 加载 d28 优化器 shard — prod1
+#    行为; 0 = 冷优化器, TARGET_ARM_NODES>1 的运行由主管道派生并导出)
 #
 #  作用域纪律 (同 npu_env.sh): 只在臂训练/评测的子 shell 里 source
 #  npu_env.sh, 绝不让它进入并行搜索阶段 (2026-08-26 事故)。
@@ -35,6 +37,15 @@ target_arm_train() {
     # Clear partial checkpoints from a crashed attempt (nanochat may otherwise
     # try to auto-resume from inconsistent state; whole-run atomicity instead)
     rm -rf "$NANOCHAT_BASE_DIR/mid_checkpoints/$tag"
+    # TARGET_ARM_NODES>1 的运行: 远端臂以 ws=32 冷优化器训练 (--load-optimizer=0,
+    # 8-shard d28 优化器在 ws≠8 形状对不上无法加载), 本地兜底同样冷启动 —— 两臂
+    # 无论各走哪条路径 (远端/本地), 优化器语义必须一致, 否则 random(远端冷) vs
+    # climb(本地热) 的对比不公平。单节点运行 (TARGET_LOAD_OPTIMIZER=1/缺省) 保持
+    # prod1 argv 逐 token 不变 (默认加载优化器)。
+    local lo_extra=()
+    if [ "${TARGET_LOAD_OPTIMIZER:-1}" = "0" ]; then
+        lo_extra+=(--load-optimizer=0)
+    fi
     # 单 8-rank torchrun (quadmix 验证过 env 块安全的唯一形态);
     # 并行搜索阶段绝不 source npu_env.sh (2026-08-26 事故).
     (
@@ -48,6 +59,7 @@ target_arm_train() {
         --loader="$MID_TRAIN_LOADER" \
         --sample-every=-1 \
         --eval-every=-1 \
+        ${lo_extra[@]+"${lo_extra[@]}"} \
         --run="${name}_mid" --model-tag="$tag" \
         --data-dir="$data_dir" 2>&1 | tee "$OUTPUT_DIR/mid_train_${name}.log"
     )

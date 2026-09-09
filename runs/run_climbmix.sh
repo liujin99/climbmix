@@ -211,6 +211,21 @@ REMOTE_ASSET_MOUNTS="${REMOTE_ASSET_MOUNTS:-}"
 #   由 Step 6 发出。远端失败 → 自动回退本地 torchrun (三层兜底)。
 # local: 永远本地跑 (prod1 行为)。
 TARGET_ARM_MODE="${TARGET_ARM_MODE:-remote}"
+# 多节点目标臂 (Phase 1): TARGET_ARM_NODES=4 → ws=32, 实测 6.1s/step (单节点
+# 18.2s, 3.0x; Phase-0 job 440f760e)。约束: 2 的幂 (1/2/4) —— d28 优化器
+# reduce_scatter 断言 shape[0] % world_size == 0, 全部维数是 2 的幂, 故
+# ws=8×N 必须是 2 的幂 (ws=24 已实测失败, run 601cdb67)。与 TARGET_ARM_MODE
+# 一样是执行形态, 刻意不进指纹 —— 但它派生的 target_load_optimizer 是训练
+# 语义, 进指纹 (见 FP_TARGET_PARAMS)。
+TARGET_ARM_NODES="${TARGET_ARM_NODES:-1}"
+# ws≠8 无法加载 8-shard d28 优化器 (形状断言) → 多节点臂冷启动优化器; 单节点
+# 保持 prod1 行为 (加载)。本地兜底 (target_arm.sh) 读同一变量: 两臂无论走
+# 远端还是本地兜底, 优化器语义一致, 对比才公平。派生量, 非用户旋钮。
+if [ "$TARGET_ARM_NODES" -gt 1 ]; then
+    TARGET_LOAD_OPTIMIZER=0
+else
+    TARGET_LOAD_OPTIMIZER=1
+fi
 # 远端 d28 基座资产 (obs:// 目录): dispatch 首次引导时把本地
 # base_checkpoints/d28 上传到该 URI (一次性); 缺省 {prefix}/assets_big/d28。
 REMOTE_D28_ASSET_URI="${REMOTE_D28_ASSET_URI:-}"
@@ -300,6 +315,10 @@ FP_TARGET_PARAMS=(
     "target_warmdown=$TARGET_WARMDOWN"
     "mid_device_batch_size=$MID_DEVICE_BATCH_SIZE"
     "mid_train_loader=$MID_TRAIN_LOADER"
+    # 优化器加载语义 (TARGET_ARM_NODES>1 派生出 0=冷启动): 改变训练语义,
+    # 必须进指纹 —— 否则旧 .done 会跳过重新训练。nodes 本身不进 (执行形态,
+    # num_npu/TARGET_ARM_MODE 先例)。
+    "target_load_optimizer=$TARGET_LOAD_OPTIMIZER"
     "eval_device_batch_size=$EVAL_DEVICE_BATCH_SIZE"
     "eval_core_batch_size=$EVAL_CORE_BATCH_SIZE"
     "core_metric_every=$CORE_METRIC_EVERY"
@@ -327,7 +346,8 @@ export EXP_NAME DATA_DIR CLIMBMIX_DIR NANOCHAT_DIR NANOCHAT_BASE_DIR \
        MID_DEVICE_BATCH_SIZE MID_TRAIN_LOADER EVAL_BENCHMARKS \
        EVAL_MAX_PER_TASK EVAL_DEVICE_BATCH_SIZE EVAL_CORE_BATCH_SIZE \
        STEM_RATIO NUM_NPU NPU_PER_EXP K_ENHANCED HF_ENDPOINT \
-       REMOTE_D28_ASSET_URI NANOCHAT_DTYPE OUTPUT_DIR
+       REMOTE_D28_ASSET_URI NANOCHAT_DTYPE OUTPUT_DIR \
+       TARGET_ARM_NODES TARGET_LOAD_OPTIMIZER
 python3 - "$OUTPUT_DIR/launch_env.json" "$TARGET_BASE_CKPT" <<'PYEOF'
 import json, os, sys
 out, target_base_ckpt = sys.argv[1], sys.argv[2]
@@ -338,7 +358,8 @@ keys = ["EXP_NAME", "DATA_DIR", "CLIMBMIX_DIR", "NANOCHAT_DIR",
         "MID_TRAIN_LOADER", "EVAL_BENCHMARKS", "EVAL_MAX_PER_TASK",
         "EVAL_DEVICE_BATCH_SIZE", "EVAL_CORE_BATCH_SIZE", "STEM_RATIO",
         "NUM_NPU", "NPU_PER_EXP", "K_ENHANCED", "HF_ENDPOINT",
-        "REMOTE_D28_ASSET_URI", "NANOCHAT_DTYPE", "OUTPUT_DIR"]
+        "REMOTE_D28_ASSET_URI", "NANOCHAT_DTYPE", "OUTPUT_DIR",
+        "TARGET_ARM_NODES", "TARGET_LOAD_OPTIMIZER"]
 env = {k: os.environ.get(k, "") for k in keys}
 env["TARGET_BASE_CKPT"] = target_base_ckpt
 with open(out, "w") as f:

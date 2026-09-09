@@ -17,6 +17,11 @@ Contents:
     argv (shell-Step-6/7 form; parity with runs/lib/target_arm.sh is
     test-asserted — dispatch_target_arm.py builds the REMOTE arm jobs
     with these so remote and local arms run the same tokens)
+  - retarget_torchrun_multinode / resolve_multinode_rendezvous: the
+    multi-node worker halves — node_rank/master_addr resolve INSIDE the
+    job (platform env or k8s StatefulSet DNS), so the worker swaps the
+    torchrun launcher prefix at runtime while the spec keeps pinning the
+    training argv after "-m"
   - make_eval_base_dir: the private-base-dir symlink farm that makes parallel
     eval CSVs collision-free (base_eval writes step-only CSV names)
   - claim_eval_csv: move THIS experiment's CSV out of the private dir
@@ -24,7 +29,9 @@ Contents:
 """
 
 import os
+import re
 import shutil
+import socket
 from typing import Dict, List, Optional, Tuple
 
 
@@ -142,6 +149,7 @@ def build_target_mid_train_cmd(
     core_metric_every,
     device_batch_size,
     loader,
+    load_optimizer: Optional[str] = None,
     nproc_per_node: Optional[int] = None,
     master_port: Optional[int] = None,
     npu_devices: int = 8,
@@ -154,10 +162,15 @@ def build_target_mid_train_cmd(
     build_mid_train_cmd are deliberate and match the shell Step-6 form
     proven in prod1:
       - `--key=value` token style (the shell's form)
-      - no --load-optimizer: default 1 loads the d28 optimizer shards —
-        the arm job runs the SAME 8-rank world size as the pretrain, so
-        the shard shapes match (the proxy path must NOT load them: its
-        world size varies)
+      - no --load-optimizer by default: the single-node arm runs the SAME
+        8-rank world size as the pretrain, so the d28 optimizer shards
+        load with matching shapes (the proxy path must NOT load them: its
+        world size varies). load_optimizer="0" (multi-node arms, ws=32)
+        appends --load-optimizer=0 — the 8-shard moments CANNOT load at
+        ws!=8 (AdamW reduce_scatter shape assert, run 601cdb67), so the
+        optimizer state is cold; the SHELL fallback emits the same flag
+        from TARGET_LOAD_OPTIMIZER=0 (both arms must share the semantics
+        or a remote-cold vs local-warm arm pair is an unfair verdict).
       - no --device-type (the proven target argv does not pass it)
       - --eval-every=-1 explicit (val bpb eval off; the external
         base_eval after training is the scorer)
@@ -182,6 +195,10 @@ def build_target_mid_train_cmd(
         f"--loader={loader}",
         "--sample-every=-1",
         "--eval-every=-1",
+    ]
+    if load_optimizer is not None:
+        cmd.append(f"--load-optimizer={load_optimizer}")
+    cmd += [
         f"--run={run_name}",
         f"--model-tag={model_tag}",
         f"--data-dir={data_dir}",
@@ -230,6 +247,170 @@ def build_target_eval_cmd(
         f"--model-type={model_type}",
     ]
     return cmd
+
+
+# ── multi-node target arms (Phase 1: 4-node ws=32 d28 arms) ───────────────
+# Phase 0 (2026-09-09, job 440f760e) proved the shape: 4 nodes x 8 ranks,
+# 6.1 s/step vs 18.2 s single-node, 34 optimizer ckpt shards across nodes.
+# The spec's mid_train_cmd is built on the SUBMIT host, where node_rank and
+# master_addr are unknowable — they resolve INSIDE the job (platform env or
+# the k8s StatefulSet DNS ModelArts jobs run as). The two helpers below are
+# the worker-side halves of that contract; both live here so the whole
+# fleet (local executor, dispatch, worker) shares one implementation.
+
+
+def retarget_torchrun_multinode(
+    cmd: List[str],
+    node_count: int,
+    node_rank: int,
+    master_addr: str,
+    master_port: int,
+    log=print,
+) -> List[str]:
+    """Rewrite a single-node torchrun argv into its multi-node form.
+
+    Swaps ONLY the launcher prefix (everything before "-m"): the module
+    tail — the training argv the spec pins — stays byte-identical. The
+    resulting prefix mirrors the Phase-0-proven form
+    (scripts/probe/probe_common.sh rdzv_torchrun_argv):
+      --nnodes=N --node_rank=R --master_addr=A --master_port=P
+      --nproc_per_node=M
+
+    Strict on purpose: a launcher-shape drift must raise here, not
+    silently mangle the training argv.
+    """
+    if not cmd or cmd[0] != "torchrun":
+        raise ValueError(
+            f"retarget: cmd[0] is not torchrun: {cmd[:2]!r}")
+    try:
+        m_idx = cmd.index("-m")
+    except ValueError:
+        raise ValueError(
+            f"retarget: no -m module boundary in launcher prefix "
+            f"{cmd[:8]!r}")
+    nproc = None
+    for tok in cmd[1:m_idx]:
+        if tok.startswith("--nproc_per_node="):
+            nproc = tok.split("=", 1)[1]
+            break
+    if nproc is None:
+        raise ValueError(
+            f"retarget: no --nproc_per_node=N token before -m in "
+            f"{cmd[:m_idx]!r}")
+    if not 0 <= node_rank < node_count:
+        raise ValueError(
+            f"retarget: node_rank {node_rank} outside [0, {node_count})")
+    prefix = [
+        "torchrun",
+        f"--nnodes={node_count}",
+        f"--node_rank={node_rank}",
+        f"--master_addr={master_addr}",
+        f"--master_port={master_port}",
+        f"--nproc_per_node={nproc}",
+    ]
+    log(f"[worker] torchrun prefix -> {' '.join(prefix[1:])}")
+    return prefix + cmd[m_idx:]
+
+
+def _hosts_file_lookup(name: str, hosts_file: str) -> Optional[str]:
+    """Resolve a name to an IP from a hosts file (first match, comments
+    skipped). Mirrors probe_common.sh rdzv_dns_lookup's awk: the name must
+    appear as the 2nd or 3rd field."""
+    try:
+        with open(hosts_file) as f:
+            for line in f:
+                parts = line.split()
+                if not parts or parts[0].startswith("#"):
+                    continue
+                if len(parts) >= 2 and name in parts[1:3]:
+                    return parts[0]
+    except OSError:
+        pass
+    return None
+
+
+def resolve_multinode_rendezvous(
+    node_count: int,
+    master_port: int = 29500,
+    env: Optional[Dict[str, str]] = None,
+    hostname: Optional[str] = None,
+    hosts_file: str = "/etc/hosts",
+    log=print,
+) -> Tuple[str, int, int]:
+    """Resolve (master_addr, master_port, node_rank) inside a multi-node
+    job container.
+
+    Priority — identical to the Phase-0 probe chain
+    (scripts/probe/probe_common.sh rdzv_resolve auto mode):
+      1. platform env: MASTER_ADDR + MASTER_PORT + NODE_RANK (torch-elastic
+         style), then the MA_/VC_ prefixed variants;
+      2. k8s StatefulSet DNS: hostname is <svc>-worker-N and /etc/hosts
+         carries the pod FQDN <host>.<svc>.<ns>.svc.cluster.local —
+         master = <svc>-worker-0.<domain> (resolved to an IP via the hosts
+         file, then DNS), rank = own worker number. ModelArts runs its
+         multi-node jobs as exactly this StatefulSet (probe A verified).
+    Anything else raises: a wrong-but-plausible triple hangs the whole
+    job at the first HCCL collective (EI0015), so ambiguity must fail
+    FAST and VISIBLY instead.
+    """
+    e = env if env is not None else os.environ
+    for p in ("", "MA_", "VC_"):
+        addr = e.get(p + "MASTER_ADDR", "")
+        port = e.get(p + "MASTER_PORT", "")
+        rank = e.get(p + "NODE_RANK", "")
+        if addr and port and rank:
+            r = int(rank)
+            if not 0 <= r < node_count:
+                raise RuntimeError(
+                    f"rdzv: platform NODE_RANK={r} outside "
+                    f"[0, {node_count})")
+            log(f"[worker] rdzv: platform env ({p or 'plain'}MASTER_*) "
+                f"-> {addr}:{port} rank={r}")
+            return addr, int(port), r
+
+    host = hostname or socket.gethostname()
+    m = re.match(r"^(.*)-worker-([0-9]+)$", host)
+    if not m:
+        raise RuntimeError(
+            f"rdzv: no platform MASTER_* env and hostname {host!r} is not "
+            f"<svc>-worker-N — cannot derive this node's rank; refusing to "
+            f"guess (a wrong triple hangs every rank at the first HCCL "
+            f"collective)")
+    svc, rank = m.group(1), int(m.group(2))
+    if not 0 <= rank < node_count:
+        raise RuntimeError(
+            f"rdzv: sts-dns rank {rank} (from {host!r}) outside "
+            f"[0, {node_count})")
+    # pod FQDN: the hosts-file line whose 2nd (NF==2) or 3rd (NF>=3) field
+    # is our short hostname — same awk as probe_common.sh rdzv_try_sts_dns
+    fqdn = ""
+    try:
+        with open(hosts_file) as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 3 and parts[2] == host:
+                    fqdn = parts[1]
+                    break
+                if len(parts) == 2 and parts[1] == host:
+                    fqdn = parts[1]
+                    break
+    except OSError:
+        pass
+    if not fqdn or "." not in fqdn:
+        raise RuntimeError(
+            f"rdzv: sts-dns: no pod FQDN for {host!r} in {hosts_file}")
+    domain = fqdn.split(".", 1)[1]
+    master_name = f"{svc}-worker-0.{domain}"
+    ip = _hosts_file_lookup(master_name, hosts_file)
+    if ip is None:
+        try:
+            ip = socket.gethostbyname(master_name)
+        except OSError as e:
+            raise RuntimeError(
+                f"rdzv: sts-dns: cannot resolve master {master_name}: {e}")
+    log(f"[worker] rdzv: sts-dns -> master {master_name} ({ip}):"
+        f"{master_port} rank={rank}")
+    return ip, master_port, rank
 
 
 def build_subprocess_env(

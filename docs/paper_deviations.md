@@ -26,6 +26,7 @@
 | D12 | 评测子采样 | 全量 | speedrun 100 题/任务(fixed shuffle seed 1337,跨实验可比较);生产 -1 全量 | speedrun 时间预算;生产无偏差 |
 | D13 | 剪枝规则 | 簇平均质量 < 3.0 即剪(fasttext,§2.1/§3.1) | 平均阈值 + **单列下限** hybrid:任一质量列的簇均值 < `PRUNE_COLUMN_FLOOR`(生产默认 2.0,0=关)即剪 | 平均线漏检"格式干净但知识贫瘠"的簇(2026-08-31 20-分片画像:69/1000 簇过均线但 knowledge_value 1.8-2.0;6.6% docs / 仅 1.5% tokens);标签未校验故取保守档 2.0,见细节 D13 |
 | D14 | 宏簇构造 | 距离合并到固定 K_enhanced(主实验 21 超簇;D.4:K_final 15/21/30 不敏感,15 最优) | **prod2 起默认 `MERGE_STRATEGY=balanced`:容量约束平衡划分到恰好 K_ENHANCED 个宏簇**(distance 仍可选对照) | 本池嵌入空间 = 单一致密连续流形(99% tokens)+ 13 格式孤岛:距离合并在任何 (K,τ) 下都链式塌成巨簇(K=14/21/24/32 实测留 99.0/98.5/98.3/97.5%,去掉 floor 塌到 K=3/99.9%,912/912 次合并全部合法)——搜索空间退化为 ~1 个旋钮(prod1 根因#1);balanced 用 K1000 层已验证的 k-means 机制,构造性保证 max token share ≤ (1+slack)/K;代价:宏簇是连续体的容量切片而非纯主题(语义由 balanced_profile.json 的 fine→anchor cosine 审计)。prod2 = balanced + K=15(对齐 D.4 最优) |
+| D15 | 目标臂优化器状态 | 未记载(论文以外部 base 为冻结起点,无优化器延续概念) | 单节点臂加载 d28 预训练 8-shard 优化器(prod1 行为);多节点臂(TARGET_ARM_NODES=4,ws=32)**冷启动**(`--load-optimizer=0`) | 8-shard moments 在 ws≠8 形状对不上(AdamW reduce_scatter 断言,run 601cdb67),非可选项;两臂同语义(本地兜底同步冷启动),`target_load_optimizer` 进 target 指纹;语义上与论文口径一致(外部 base 本就无优化器状态可载) |
 
 ## 细节与出处
 
@@ -170,6 +171,28 @@ pipeline abort,新旧两路与 cache 命中路径都过闸);`MERGE_STRATEGY` 进
 search-stage fingerprint(与 K/τ 同待遇);`balanced_profile.json` 为
 run 级审计文件(份额/cosine/overflow/advice)。默认仍为 distance,
 speedrun 不变。
+
+### D15 目标臂优化器状态:多节点冷启动(2026-09-09,Phase 1)
+
+背景:prod1 两臂为单节点 ws=8,与 d28 预训练同 world size,优化器
+8-shard(lm_head/wte moments 按 rank 切 [vocab/8, n_embd])形状恰好
+匹配,直接加载。Phase 1 多节点臂(TARGET_ARM_NODES=4,ws=32)下:
+
+- 形状不可载:AdamW reduce_scatter 断言 shape[0] % world_size == 0
+  (optim.py:499),全部 d28 大参数维数是 2 的幂 → ws 必须是 2 的幂
+  (node_count ∈ 1/2/4;ws=24 已实测失败,run 601cdb67)。同为 2 的幂
+  的 ws=32 与 8-shard 的切分也不兼容(torch load_state_dict 不做形状
+  检查,静默错配会在首个 AdamW lerp_ 爆 aclnnInplaceLerp EZ1001 —
+  proxy 路径 2026-08-26 已撞过),故 `--load-optimizer=0` 冷启动。
+- 公平性保证:优化器语义是臂间对比的语义变量——由 TARGET_ARM_NODES
+  **派生**(nodes>1 → 0,nodes=1 → 加载),dispatch 与 launch_env 的
+  TARGET_LOAD_OPTIMIZER 交叉校验(不一致即拒),本地兜底 shell 读同一
+  变量发同一 flag;`target_load_optimizer` 进 target 指纹。两臂无论各
+  走远端/本地哪条路径,冷热一致。
+- 论文口径:CLIMB 以外部 base checkpoint 为冻结起点,本就无优化器延续
+  概念;冷启动反而更贴字面语义。WSD 退火的 lr/warmdown 全部继承自
+  预训练 meta(user_config),不受影响;冷启动的 bias correction 与
+  Muon 零动量对两臂完全对称。
 
 ## 已核对一致(正向审计)
 

@@ -17,16 +17,17 @@ import json
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-SPEC_VERSION = 2
+SPEC_VERSION = 3
 
 
 @dataclass
 class ExpSpec:
     # Contract version. The worker refuses other versions (fail-fast instead
     # of silently misinterpreting fields). v2 adds ckpt_src (eval an existing
-    # container checkpoint, e.g. the d28 base anchor) — v1 specs are not
-    # accepted by v2 workers; both sides always ship together (the executor
-    # re-stages the assets bundle on every init).
+    # container checkpoint); v3 adds node_count/master_port (multi-node
+    # target arms) — v2 specs are not accepted by v3 workers; both sides
+    # always ship together (the executor re-stages the assets bundle on
+    # every init; embed_dispatch.py's spec writer moves in lockstep).
     spec_version: int = SPEC_VERSION
     experiment_id: int = 0
     experiment_name: str = "main"
@@ -81,6 +82,23 @@ class ExpSpec:
     # the job finishes. 0 disables streaming (final uploads only).
     log_stream_s: int = 30
 
+    # ── multi-node (Phase 1: 4-node ws=32 d28 target arms) ──
+    # Number of nodes in the job (world_size = node_count * 8). 1 =
+    # single-node — today's form, the argv is used verbatim. >1 = EVERY
+    # node runs this worker; each resolves its own rendezvous (platform
+    # env / StatefulSet DNS) and retargets the torchrun launcher prefix
+    # (nanochat_cmds.retarget_torchrun_multinode); node 0 additionally
+    # uploads the checkpoint, runs eval single-node 8-rank, and owns
+    # result.json (non-master nodes exit after training with their own
+    # train rc — a multi-node job succeeds only if every node exits 0).
+    # Power of 2 only: d28's AdamW reduce_scatter asserts
+    # shape[0] % world_size == 0 and every d28 dim is a power of 2, so
+    # world_size=8*node_count must be a power of 2 (node_count 1/2/4;
+    # ws=24 failed live, run 601cdb67).
+    node_count: int = 1
+    # Rendezvous port when node_count > 1 (the Phase-0-probed 29500).
+    master_port: int = 29500
+
     def remote_mixture_data_dir(self) -> str:
         """Container path of the mixture shards (the --data-dir value baked
         into mid_train_cmd)."""
@@ -108,6 +126,8 @@ class ExpSpec:
             "visible_devices": list(self.visible_devices),
             "env": dict(self.env),
             "log_stream_s": self.log_stream_s,
+            "node_count": self.node_count,
+            "master_port": self.master_port,
         }
 
     def to_json(self) -> str:
@@ -145,6 +165,8 @@ class ExpSpec:
             visible_devices=[int(x) for x in d.get("visible_devices", [0])],
             env={str(k): str(v) for k, v in d.get("env", {}).items()},
             log_stream_s=int(d.get("log_stream_s", 30)),
+            node_count=int(d.get("node_count", 1) or 1),
+            master_port=int(d.get("master_port", 29500) or 29500),
         )
 
     @staticmethod

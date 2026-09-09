@@ -12,7 +12,10 @@ prefetch pools, the stella buffer repair, the FAKE XFORMERS shim
 eager/sdpa fallbacks die at model import in the container). Keep the
 two in sync when touching either.
 
-Unit spec (JSON, spec_version 1):
+Unit spec (JSON, spec_version 3 — the shared spec counter, see
+exp_spec.SPEC_VERSION; embed_dispatch writes it, remote_worker AND this
+worker both gate on it; 2026-09-09 fix: the v2 bump missed this file, so
+every embed unit since 9d6c810 died at the version gate "2 != 1"):
   kind: "embed"
   unit_id: "u0000"                  — unit label (logging + result files)
   text_col, batch_size, truncate_len, emb_dim
@@ -47,7 +50,7 @@ import sys
 import time
 import traceback
 
-SPEC_VERSION = 1
+SPEC_VERSION = 3  # shared spec counter (exp_spec/remote_worker/embed_dispatch)
 
 
 # ── ledger (ported from embedding_cluster._write_worker_progress) ─────────

@@ -26,7 +26,8 @@ from climbmix.core.types import (  # noqa: E402
     CLIMBConfig, MixtureConfig, MixtureWeights, ProxyResult)
 from climbmix.core.iterative_bootstrapper import IterativeBootstrapper  # noqa: E402
 from climbmix.pipeline.nanochat_cmds import (  # noqa: E402
-    build_target_mid_train_cmd, build_target_eval_cmd)
+    build_target_mid_train_cmd, build_target_eval_cmd,
+    retarget_torchrun_multinode, resolve_multinode_rendezvous)
 from climbmix.remote.exp_spec import ExpSpec, SPEC_VERSION  # noqa: E402
 from climbmix.remote.job_api import JobStatus  # noqa: E402
 from climbmix.remote.remote_executor import (  # noqa: E402
@@ -121,6 +122,36 @@ with tempfile.TemporaryDirectory(prefix="prod2rt_") as td:
     link = os.path.join(base_dir, "base_checkpoints", TAG)
     check("parity: base symlink cleaned up after train",
           not os.path.lexists(link))
+
+    # cold-optimizer variant (TARGET_ARM_NODES>1 runs derive
+    # TARGET_LOAD_OPTIMIZER=0): the flag must reach shell AND python at
+    # the same position — a remote-cold vs local-warm arm pair would be
+    # an unfair verdict, so both paths share the semantics.
+    env["TARGET_LOAD_OPTIMIZER"] = "0"
+    r = run_lib(f'target_arm_train /data/mixed {TAG} {NAME}')
+    check("parity: target_arm_train exit 0 (load-optimizer=0)",
+          r.returncode == 0)
+    shell_train_cold = ["torchrun"] + open(argv_file).read().splitlines()
+    py_train_cold = build_target_mid_train_cmd(
+        run_name=f"{NAME}_mid", model_tag=TAG, data_dir="/data/mixed",
+        num_iterations=ENVV["TARGET_STEPS"], lr_scale=ENVV["TARGET_LR_SCALE"],
+        warmup=ENVV["TARGET_WARMUP"], warmdown=ENVV["TARGET_WARMDOWN"],
+        core_metric_every=ENVV["CORE_METRIC_EVERY"],
+        device_batch_size=ENVV["MID_DEVICE_BATCH_SIZE"],
+        loader=ENVV["MID_TRAIN_LOADER"], load_optimizer="0",
+        nproc_per_node=8)
+    check("parity: cold-optimizer argv token-identical (shell == python)",
+          shell_train_cold == py_train_cold,
+          f"shell={shell_train_cold}" if shell_train_cold != py_train_cold else "")
+    check("parity: --load-optimizer=0 sits after --eval-every=-1, before --run",
+          py_train_cold.index("--eval-every=-1")
+          < py_train_cold.index("--load-optimizer=0")
+          < py_train_cold.index(f"--run={NAME}_mid"))
+    check("parity: cold argv differs from warm only by the one flag",
+          py_train_cold == py_train[:py_train.index(f"--run={NAME}_mid")]
+          + ["--load-optimizer=0"]
+          + py_train[py_train.index(f"--run={NAME}_mid"):])
+    del env["TARGET_LOAD_OPTIMIZER"]
 
     r = run_lib(f'target_arm_eval {TAG} {NAME}')
     check("parity: target_arm_eval exit 0", r.returncode == 0)
@@ -412,17 +443,105 @@ check("c_eff: startup ramp dropped",
       bare_ceff([1, 1, 1, 1, 8, 8, 8, 8]) == 8)
 
 # ═══════════════════════════════════════════════════════════════════════
-# 5. spec v2 + worker/embed version lockstep
+# 5. spec v3 + worker/embed version lockstep + multi-node helpers
 # ═══════════════════════════════════════════════════════════════════════
 spec = ExpSpec(model_tag="d28_random_x", ckpt_src="/nc/base_checkpoints/d28")
 rt = ExpSpec.from_json(spec.to_json())
-check("spec: v2 roundtrip preserves ckpt_src",
-      rt.ckpt_src == "/nc/base_checkpoints/d28" and rt.spec_version == 2)
+check("spec: v3 roundtrip preserves ckpt_src",
+      rt.ckpt_src == "/nc/base_checkpoints/d28" and rt.spec_version == 3)
+spec_mn = ExpSpec(model_tag="d28_climb_x", node_count=4, master_port=29600)
+rt_mn = ExpSpec.from_json(spec_mn.to_json())
+check("spec: v3 roundtrip preserves node_count/master_port",
+      rt_mn.node_count == 4 and rt_mn.master_port == 29600)
+_d3 = spec_mn.to_dict()
+del _d3["node_count"], _d3["master_port"]
+check("spec: node_count/master_port default when absent",
+      ExpSpec.from_dict(_d3).node_count == 1
+      and ExpSpec.from_dict(_d3).master_port == 29500)
+try:
+    ExpSpec.from_dict({"spec_version": 2})
+    check("spec: v2 rejected by v3 parser", False)
+except ValueError:
+    check("spec: v2 rejected by v3 parser", True)
 try:
     ExpSpec.from_dict({"spec_version": 1})
-    check("spec: v1 rejected by v2 parser", False)
+    check("spec: v1 rejected by v3 parser", False)
 except ValueError:
-    check("spec: v1 rejected by v2 parser", True)
+    check("spec: v1 rejected by v3 parser", True)
+
+# retarget_torchrun_multinode: prefix swap only, module tail pinned
+_mn_base = build_target_mid_train_cmd(
+    run_name="climb_mid", model_tag="d28_x", data_dir="/d",
+    num_iterations="2000", lr_scale="1.0", warmup="0.0", warmdown="0.9",
+    core_metric_every="-1", device_batch_size="1", loader="flat",
+    load_optimizer="0", nproc_per_node=8)
+_mn = retarget_torchrun_multinode(_mn_base, 4, 2, "10.3.0.1", 29500)
+check("retarget: prefix shape (probe-proven flag order)",
+      _mn[:6] == ["torchrun", "--nnodes=4", "--node_rank=2",
+                  "--master_addr=10.3.0.1", "--master_port=29500",
+                  "--nproc_per_node=8"])
+check("retarget: module tail byte-identical to the spec's argv",
+      _mn[6:] == _mn_base[_mn_base.index("-m"):])
+check("retarget: single-node argv keeps --standalone until retargeted",
+      "--standalone" in _mn_base and "--standalone" not in _mn)
+for _bad in (["python3", "-m", "x"],
+             ["torchrun", "-m", "x"],
+             ["torchrun", "--standalone", "-m", "x"]):
+    try:
+        retarget_torchrun_multinode(_bad, 2, 0, "a", 1)
+        check(f"retarget: rejects malformed prefix {_bad[:2]!r}", False)
+    except ValueError:
+        check(f"retarget: rejects malformed prefix {_bad[:2]!r}", True)
+try:
+    retarget_torchrun_multinode(_mn_base, 4, 4, "a", 1)
+    check("retarget: rank outside [0, node_count) rejected", False)
+except ValueError:
+    check("retarget: rank outside [0, node_count) rejected", True)
+
+# resolve_multinode_rendezvous: platform env first, then sts-dns
+check("rdzv: platform env triplet wins (addr/port/rank)",
+      resolve_multinode_rendezvous(
+          4, 29500, env={"MASTER_ADDR": "10.1.1.1", "MASTER_PORT": "1234",
+                         "NODE_RANK": "3"}) == ("10.1.1.1", 1234, 3))
+check("rdzv: MA_ prefixed platform triplet",
+      resolve_multinode_rendezvous(
+          4, 29500, env={"MA_MASTER_ADDR": "10.2.2.2", "MA_MASTER_PORT": "77",
+                         "MA_NODE_RANK": "1"}) == ("10.2.2.2", 77, 1))
+check("rdzv: VC_ prefixed platform triplet",
+      resolve_multinode_rendezvous(
+          4, 29500, env={"VC_MASTER_ADDR": "10.2.2.3", "VC_MASTER_PORT": "78",
+                         "VC_NODE_RANK": "0"}) == ("10.2.2.3", 78, 0))
+with tempfile.NamedTemporaryFile("w", suffix="hosts", delete=False) as _hf:
+    _hf.write("# fake /etc/hosts (sts pods with hostname+subdomain)\n")
+    _hf.write("10.5.0.1 jobA-worker-0.jobA.ns.svc.cluster.local jobA-worker-0\n")
+    _hf.write("10.5.0.2 jobA-worker-2.jobA.ns.svc.cluster.local jobA-worker-2\n")
+    _hosts_path = _hf.name
+check("rdzv: sts-dns derives master ip + own rank",
+      resolve_multinode_rendezvous(
+          4, 29500, env={}, hostname="jobA-worker-2",
+          hosts_file=_hosts_path) == ("10.5.0.1", 29500, 2))
+for _bad_host, _why in (("plainhost", "non-sts hostname"),
+                        ("jobB-worker-2", "fqdn for another svc")):
+    try:
+        resolve_multinode_rendezvous(
+            4, 29500, env={}, hostname=_bad_host, hosts_file=_hosts_path)
+        check(f"rdzv: {_why} raises", False)
+    except RuntimeError:
+        check(f"rdzv: {_why} raises", True)
+try:
+    resolve_multinode_rendezvous(
+        2, 29500, env={}, hostname="jobA-worker-2", hosts_file=_hosts_path)
+    check("rdzv: rank >= node_count raises", False)
+except RuntimeError:
+    check("rdzv: rank >= node_count raises", True)
+try:
+    resolve_multinode_rendezvous(
+        4, 29500, env={"MASTER_ADDR": "a", "MASTER_PORT": "1",
+                       "NODE_RANK": "9"})
+    check("rdzv: platform rank >= node_count raises", False)
+except RuntimeError:
+    check("rdzv: platform rank >= node_count raises", True)
+os.unlink(_hosts_path)
 
 # remote_worker imports nanochat_cmds from ITS OWN directory (the staged
 # assets bundle layout) — mirror the staging dir exactly
@@ -434,10 +553,159 @@ shutil.copy(os.path.join(REPO, "src", "climbmix", "pipeline",
 sys.path.insert(0, _stage)
 import remote_worker  # noqa: E402
 check("spec: remote_worker SPEC_VERSION in lockstep",
-      remote_worker.SPEC_VERSION == SPEC_VERSION == 2)
+      remote_worker.SPEC_VERSION == SPEC_VERSION == 3)
 embed_src = open(os.path.join(REPO, "scripts", "embed_dispatch.py")).read()
-check("spec: embed_dispatch spec_version bumped to 2",
-      '"spec_version": 2' in embed_src)
+check("spec: embed_dispatch spec_version bumped to 3",
+      '"spec_version": 3' in embed_src)
+# 2026-09-09 latent bug: the v2 bump missed embed_worker, so every embed
+# unit since 9d6c810 would die at ITS version gate ("2 != 1") — the whole
+# assets bundle must move on the shared counter together.
+embed_wsrc = open(os.path.join(REPO, "scripts", "embed_worker.py")).read()
+check("spec: embed_worker SPEC_VERSION in lockstep (v2-bump miss fixed)",
+      re.search(r"^SPEC_VERSION = 3", embed_wsrc, re.M) is not None)
+
+# ── multi-node worker simulation (spec v3, node_count=2) ──────────────────
+# Runs the REAL remote_worker.py as a subprocess twice (node 0 + node 1)
+# against a LocalStorage fake OBS, with a stub torchrun recording argv.
+# Rendezvous goes through the platform-env path (MASTER_ADDR/MASTER_PORT/
+# NODE_RANK in the worker's inherited env) — no hostname tricks needed.
+with tempfile.TemporaryDirectory(prefix="prod2mn_") as mn_td:
+    mn_bin = os.path.join(mn_td, "bin")
+    os.makedirs(mn_bin)
+    argv_rec = os.path.join(mn_td, "argv_rec.txt")
+    stub_tr = os.path.join(mn_bin, "torchrun")
+    with open(stub_tr, "w") as f:
+        f.write(
+            "#!/usr/bin/env bash\n"
+            'printf \'%s\\n\' "$@" >> "$ARGV_REC"\n'
+            'echo "=== call ===" >> "$ARGV_REC"\n'
+            "# emulate mid_train: create the checkpoint the worker uploads\n"
+            "# (train calls carry --num-iterations; eval calls do not)\n"
+            'tag=""; train=0\n'
+            'for a in "$@"; do case "$a" in '
+            '--model-tag=*) tag="${a#--model-tag=}";; '
+            '--num-iterations=*) train=1;; esac; done\n'
+            'if [ "$train" = 1 ] && [ -n "$tag" ]; then\n'
+            '  mkdir -p "$NANOCHAT_BASE_DIR/mid_checkpoints/$tag"\n'
+            '  echo ckpt > "$NANOCHAT_BASE_DIR/mid_checkpoints/$tag/'
+            'model_000100.pt"\n'
+            "fi\n"
+            "exit 0\n")
+    os.chmod(stub_tr, 0o755)
+
+    mn_root = os.path.join(mn_td, "fakeobs")       # LocalStorage root
+    mn_base = os.path.join(mn_td, "nc_base")       # spec base_dir
+    mn_work = os.path.join(mn_td, "nc_work")       # spec work_dir
+    mn_ncdir = os.path.join(mn_td, "nanochat")     # spec nanochat_dir (cwd)
+    for d in (mn_root, os.path.join(mn_base, "tokenizer"), mn_work, mn_ncdir):
+        os.makedirs(d, exist_ok=True)
+    mn_ckpt_src = os.path.join(mn_td, "d28_asset")
+    os.makedirs(mn_ckpt_src)
+    with open(os.path.join(mn_ckpt_src, "model_000000.pt"), "w") as f:
+        f.write("base")
+    result_uri = "obs://b/p/arms/x/result"
+    mixture_uri = "obs://b/p/arms/x/mixture_data"
+    mix_local = os.path.join(mn_root, "b", "p", "arms", "x", "mixture_data")
+    os.makedirs(mix_local)
+    with open(os.path.join(mix_local, "shard_00000.parquet"), "w") as f:
+        f.write("data")
+
+    def mn_spec(node_count):
+        spec = ExpSpec(
+            model_tag="d28_mn_x", nanochat_dir=mn_ncdir, base_dir=mn_base,
+            work_dir=mn_work, base_ckpt_src=mn_ckpt_src,
+            mixture_data_uri=mixture_uri, result_uri=result_uri,
+            mid_train_cmd=build_target_mid_train_cmd(
+                run_name="climb_mid", model_tag="d28_mn_x",
+                data_dir=os.path.join(mn_work, "mixture_data"),
+                num_iterations="50", lr_scale="1.0", warmup="0.0",
+                warmdown="0.9", core_metric_every="-1",
+                device_batch_size="1", loader="flat",
+                load_optimizer="0", nproc_per_node=8),
+            eval_cmd=build_target_eval_cmd(
+                model_tag="d28_mn_x", eval_benchmarks="stem",
+                eval_max_per_task="-1", device_batch_size="16",
+                core_batch_size="8", nproc_per_node=8),
+            node_count=node_count, log_stream_s=0,
+        )
+        path = os.path.join(mn_td, f"spec_{node_count}.json")
+        with open(path, "w") as f:
+            f.write(spec.to_json())
+        return path
+
+    def run_worker(spec_path, node_rank):
+        env = dict(os.environ)
+        env.update({"PATH": mn_bin + os.pathsep + env["PATH"],
+                    "ARGV_REC": argv_rec,
+                    "MASTER_ADDR": "127.0.0.1", "MASTER_PORT": "29511",
+                    "NODE_RANK": str(node_rank)})
+        return subprocess.run(
+            [sys.executable, os.path.join(_stage, "remote_worker.py"),
+             "--spec-uri", "obs://unused/spec.json",
+             "--spec-local", spec_path, "--storage", "local",
+             "--storage-root", mn_root],
+            env=env, capture_output=True, text=True, timeout=120)
+
+    # single-node sanity first: node_count=1 runs the argv VERBATIM
+    r0 = run_worker(mn_spec(1), 0)
+    check("worker sim: single-node exit 0", r0.returncode == 0,
+          r0.stdout[-400:] + r0.stderr[-400:])
+    rec1 = open(argv_rec).read()
+    check("worker sim: single-node argv untouched (--standalone kept)",
+          "--standalone" in rec1 and "--nnodes" not in rec1)
+    res_local = os.path.join(mn_root, "b", "p", "arms", "x", "result",
+                             "result.json")
+    check("worker sim: single-node lands result.json",
+          json.load(open(res_local))["mid_train_rc"] == 0)
+
+    os.remove(argv_rec)
+    # multi-node: node 0 (master) then node 1 (non-master)
+    r_n0 = run_worker(mn_spec(2), 0)
+    check("worker sim: multi-node node0 exit 0", r_n0.returncode == 0,
+          r_n0.stdout[-400:] + r_n0.stderr[-400:])
+    rec_n0 = open(argv_rec).read()
+    check("worker sim: node0 train argv retargeted (--nnodes=2 rank 0)",
+          "--nnodes=2" in rec_n0 and "--node_rank=0" in rec_n0
+          and "--master_addr=127.0.0.1" in rec_n0
+          and "--master_port=29511" in rec_n0
+          and "--standalone" not in rec_n0.split("=== call ===")[0])
+    check("worker sim: node0 eval stays single-node 8-rank",
+          rec_n0.count("=== call ===") == 2
+          and "--standalone" in rec_n0.split("=== call ===")[1]
+          and "--nnodes" not in rec_n0.split("=== call ===")[1])
+    res_json = json.load(open(res_local))
+    check("worker sim: master owns result.json (train+eval rc 0)",
+          res_json["mid_train_rc"] == 0 and res_json["eval_rc"] == 0
+          and res_json["csv"] is None)  # stub eval writes no CSV
+
+    os.remove(argv_rec)
+    r_n1 = run_worker(mn_spec(2), 1)
+    check("worker sim: multi-node node1 exit 0", r_n1.returncode == 0,
+          r_n1.stdout[-400:] + r_n1.stderr[-400:])
+    rec_n1 = open(argv_rec).read()
+    check("worker sim: node1 train only, retargeted rank 1",
+          rec_n1.count("=== call ===") == 1 and "--node_rank=1" in rec_n1
+          and "--nnodes=2" in rec_n1)
+    check("worker sim: node1 does NOT touch master's result.json",
+          json.load(open(res_local))["eval_rc"] == 0)
+    node1_log = os.path.join(mn_root, "b", "p", "arms", "x", "result",
+                             "mid_train_node1.log")
+    check("worker sim: node1 uploads its own mid_train_node1.log",
+          os.path.isfile(node1_log))
+    master_log = os.path.join(mn_root, "b", "p", "arms", "x", "result",
+                              "mid_train.log")
+    check("worker sim: master's mid_train.log present",
+          os.path.isfile(master_log))
+
+    # eval_only + node_count>1 must refuse (N evals would race one CSV)
+    spec_eo = ExpSpec.from_json(open(mn_spec(2)).read())
+    spec_eo.eval_only = True
+    eo_path = os.path.join(mn_td, "spec_eo.json")
+    with open(eo_path, "w") as f:
+        f.write(spec_eo.to_json())
+    r_eo = run_worker(eo_path, 0)
+    check("worker sim: eval_only + node_count=2 refuses",
+          r_eo.returncode != 0 and "single-node" in r_eo.stdout + r_eo.stderr)
 
 # private eval dir must carry base_checkpoints/{tag} when the base dir
 # has it: --model-type=base (the remote d28 anchor) loads through
@@ -650,11 +918,28 @@ r = subprocess.run(
     [sys.executable, os.path.join(REPO, "scripts", "dispatch_target_arm.py"),
      "--help"], capture_output=True, text=True)
 check("dispatch: --help exits 0", r.returncode == 0
-      and "--arm" in r.stdout and "base_eval_check" in r.stdout)
+      and "--arm" in r.stdout and "base_eval_check" in r.stdout
+      and "--node-count" in r.stdout)
 r = subprocess.run(
     [sys.executable, os.path.join(REPO, "scripts", "dispatch_target_arm.py"),
      "--arm", "bogus"], capture_output=True, text=True)
 check("dispatch: unknown arm rejected", r.returncode != 0)
+# node_count power-of-2 guard (ws=8*n must divide d28's power-of-2 dims;
+# ws=24 failed live, run 601cdb67) — validated before any config is needed
+for bad in ("3", "0", "-2", "5"):
+    r = subprocess.run(
+        [sys.executable, os.path.join(REPO, "scripts",
+                                      "dispatch_target_arm.py"),
+         "--arm", "random", "--node-count", bad],
+        capture_output=True, text=True)
+    check(f"dispatch: node_count={bad} rejected (power of 2 only)",
+          r.returncode != 0 and "power of 2" in r.stdout + r.stderr)
+r = subprocess.run(
+    [sys.executable, os.path.join(REPO, "scripts", "dispatch_target_arm.py"),
+     "--arm", "base_eval_check", "--node-count", "4"],
+    capture_output=True, text=True)
+check("dispatch: base_eval_check refuses multi-node",
+      r.returncode != 0 and "single-node" in r.stdout + r.stderr)
 
 for sh in ("runs/run_climbmix.sh", "runs/lib/target_arm.sh",
            "scripts/diagnostics/prod2_watch.sh"):
@@ -673,6 +958,18 @@ check("shell: ADAPTIVE_COMPACT default 0 + forwarded",
       and 'ADAPTIVE_ARGS+=(--adaptive-compact)' in src)
 check("shell: TARGET_ARM_MODE not fingerprinted (execution shape)",
       re.search(r'"target_arm_mode=', src) is None)
+check("shell: TARGET_ARM_NODES default 1",
+      'TARGET_ARM_NODES="${TARGET_ARM_NODES:-1}"' in src)
+check("shell: TARGET_ARM_NODES not fingerprinted (execution shape)",
+      re.search(r'"target_arm_nodes=', src) is None)
+check("shell: nodes>1 derives TARGET_LOAD_OPTIMIZER=0",
+      re.search(r'\[ "\$TARGET_ARM_NODES" -gt 1 \]; then\s*'
+                r'TARGET_LOAD_OPTIMIZER=0', src) is not None)
+check("shell: target_load_optimizer in FP_TARGET_PARAMS (semantic)",
+      '"target_load_optimizer=$TARGET_LOAD_OPTIMIZER"' in src)
+check("shell: TARGET_ARM_NODES/LOAD_OPTIMIZER in launch_env.json",
+      src.count("TARGET_ARM_NODES") >= 3
+      and src.count("TARGET_LOAD_OPTIMIZER") >= 4)
 check("shell: MERGE_STRATEGY defaults to balanced",
       'MERGE_STRATEGY="${MERGE_STRATEGY:-balanced}"' in src)
 check("shell: REMOTE_LOCAL_PARALLEL defaults to 0 (opt-in slot)",
@@ -687,6 +984,13 @@ check("shell: dispatch three-layer in run_arm",
       and "TARGET_ARM_MODE" in src)
 check("shell: launch_env.json snapshot written",
       "launch_env.json" in src)
+# target_arm.sh fallback shares the optimizer semantics (fair verdict:
+# a remote-cold arm vs local-warm arm pair would be an unfair comparison)
+tasrc = open(os.path.join(REPO, "runs", "lib", "target_arm.sh")).read()
+check("shell: target_arm_train emits --load-optimizer=0 from env",
+      'lo_extra+=(--load-optimizer=0)' in tasrc
+      and '${TARGET_LOAD_OPTIMIZER:-1}' in tasrc
+      and 'lo_extra[@]+"${lo_extra[@]}"' in tasrc)
 
 # ── summary ───────────────────────────────────────────────────────────────
 print()
