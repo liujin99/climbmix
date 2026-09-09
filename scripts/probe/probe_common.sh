@@ -235,6 +235,58 @@ probe_mat_cp() {
   echo "[probe $(hostname)] $label: $n files local in $(( $(date +%s) - t0 ))s"
 }
 
+# Parquet pre-flight: open every shard, read metadata + EVERY row group,
+# with a hard outer timeout. Run 20260909_154328 (heartbeat stacks):
+# one node's 8 ranks spent 23min inside pyarrow ParquetFile.__init__ on
+# the LOCAL materialized copies (~60s per read op; the 7.4GB model on
+# the same disk read back in 9-14s from page cache) while healthy nodes
+# finished in seconds — a sick per-node cold-read path. This check
+# catches it BEFORE torchrun (visible train_failure marker, no 20min
+# EI0015 burn) AND warms the page cache for every row group the
+# distributed loaders will touch. Env: PROBE_PARQ_TOTAL (default 240s
+# outer `timeout`), PROBE_PARQ_PER_FILE (default 60s soft, diagnostics).
+probe_parquet_check() {
+  local data_dir="$1"
+  if [ ! -d "$data_dir" ]; then
+    echo "[probe] FATAL: parquet pre-flight: no such dir: $data_dir" \
+      | tee -a "${PROBE_OUT:-/tmp}/train_failure_$(hostname).log" >&2
+    return 1
+  fi
+  timeout "${PROBE_PARQ_TOTAL:-240}" python3 - "$data_dir" \
+      "${PROBE_PARQ_PER_FILE:-60}" <<'PYEOF'
+import glob
+import sys
+import time
+
+import pyarrow.parquet as pq
+
+data_dir, per_file = sys.argv[1], float(sys.argv[2])
+files = sorted(f for f in glob.glob(data_dir + "/*.parquet"))
+assert files, "no .parquet files in " + data_dir
+t_all = time.time()
+for f in files:
+    t0 = time.time()
+    pf = pq.ParquetFile(f)
+    n = pf.metadata.num_row_groups
+    for rg in range(n):
+        t = pf.read_row_group(rg)
+        del t
+    dt = time.time() - t0
+    print(f"[probe parquet] {f}: {n} row groups in {dt:.1f}s", flush=True)
+    if dt > per_file:
+        sys.exit(f"SLOW: {f} took {dt:.0f}s (> {per_file:.0f}s budget)")
+print(f"[probe parquet] OK: {len(files)} shards, all row groups "
+      f"in {time.time() - t_all:.1f}s on {data_dir}")
+PYEOF
+  local rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "[probe] FATAL: parquet pre-flight FAILED on $(hostname) (rc=$rc) — sick local read path? (run 20260909_154328 crawled ~60s/op in ParquetFile.__init__ on LOCAL copies)" \
+      | tee -a "${PROBE_OUT:-/tmp}/train_failure_$(hostname).log" >&2
+    return 1
+  fi
+  return 0
+}
+
 rdzv_resolve() {
   local mode="${PROBE_RDZV_MODE:-auto}"
   case "$mode" in

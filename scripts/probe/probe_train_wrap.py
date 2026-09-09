@@ -333,6 +333,52 @@ try:
 except BaseException as e:
     bc(f"nanochat patches unavailable: {type(e).__name__}: {e}")
 
+# pyarrow breadcrumbs. Run 20260909_154328 (heartbeat stacks): the hung
+# node's ranks crawled ~60s PER READ OP inside ParquetFile.__init__ on
+# LOCAL files (healthy nodes: seconds). Patch the class methods — every
+# `pq.ParquetFile(...)` call site resolves through the same class object
+# regardless of import order. __init__: every call (few per rank).
+# read_row_group: first 3 + every 50th (one call per rank per row group).
+try:
+    import pyarrow.parquet as _pq  # noqa: E402
+
+    _pf_init = _pq.ParquetFile.__init__
+    _rrg = _pq.ParquetFile.read_row_group
+    _rrg_n = [0]
+
+    def _pf_init_w(self, *a, **k):
+        src = a[0] if a else k.get("source", "?")
+        bc(f"ParquetFile.__init__ enter: {src}")
+        t0 = time.time()
+        try:
+            _pf_init(self, *a, **k)
+        except BaseException as e:
+            bc(f"ParquetFile.__init__ RAISED {type(e).__name__} "
+               f"after {time.time() - t0:.1f}s: {src}")
+            raise
+        bc(f"ParquetFile.__init__ ok in {time.time() - t0:.1f}s: {src} "
+           f"({self.metadata.num_row_groups} row groups)")
+
+    def _rrg_w(self, *a, **k):
+        c = _rrg_n[0]
+        _rrg_n[0] = c + 1
+        log = c < 3 or (c + 1) % 50 == 0
+        if log:
+            bc(f"read_row_group #{c + 1} enter")
+        t0 = time.time()
+        r = _rrg(self, *a, **k)
+        dt = time.time() - t0
+        if log or dt > 10:
+            bc(f"read_row_group #{c + 1} ok in {dt:.1f}s"
+               + ("" if log else " (SLOW)"))
+        return r
+
+    _pq.ParquetFile.__init__ = _pf_init_w
+    _pq.ParquetFile.read_row_group = _rrg_w
+    bc("pyarrow patches applied (ParquetFile.__init__ + read_row_group)")
+except BaseException as e:
+    bc(f"pyarrow patches unavailable: {type(e).__name__}: {e}")
+
 bc("runpy scripts.mid_train " + " ".join(sys.argv[1:]))
 sys.argv = ["scripts.mid_train"] + sys.argv[1:]
 try:

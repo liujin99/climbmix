@@ -91,6 +91,12 @@ for d in datasets dotenv=python-dotenv fastapi filelock huggingface_hub \
   }
 done
 
+# ── 2.7) parquet pre-flight (after deps: needs pyarrow; before
+#         torchrun): run 20260909_154328 hung 23min in
+#         ParquetFile.__init__ on LOCAL copies on one node — catch a
+#         sick cold-read path NOW + warm every row group's page cache ──
+probe_parquet_check "$DATA" || exit 1
+
 # ── 3) rendezvous + train (wrapper breadcrumbs: a hung non-master
 #        node is otherwise invisible between import and the first
 #        collective traceback) ──
