@@ -153,6 +153,60 @@ _counts = {}
 _NAMES = ("init_process_group", "all_reduce", "reduce_scatter",
           "all_gather", "broadcast", "barrier", "destroy_process_group")
 
+# All-rank arrival gate at the FIRST data collective. EI0015's
+# communicator-creation timeout is ~20min and HCCL_CONNECT_TIMEOUT does
+# not shorten it on this CANN — runs 20260908_201827 .. a3cd7236 all
+# burned the full 20min waiting for ranks that never arrive. Before the
+# first real collective, every rank marks the c10d store; if not all
+# world_size marks appear within PROBE_FIRSTCOLL_TIMEOUT_S (300), raise
+# immediately — the hung ranks' heartbeat stacks name the frame, and a
+# 25min job becomes a ~10min one.
+_gate_armed = {"v": True}
+
+
+def _first_collective_gate(timeout_s):
+    if not _gate_armed["v"]:
+        return
+    _gate_armed["v"] = False
+    try:
+        ws = dist.get_world_size()
+        rank = dist.get_rank()
+        store = dist.distributed_c10d._get_default_store()
+    except BaseException as e:
+        bc(f"gate unavailable (proceeding ungated): "
+           f"{type(e).__name__}: {e}")
+        return
+    lws = int(os.environ.get("LOCAL_WORLD_SIZE", "8") or 8)
+    bc(f"gate: rank {rank}/{ws} at first collective — waiting for all "
+       f"(<= {timeout_s:.0f}s)")
+    t0 = time.time()
+    try:
+        store.set(f"probe/arr/{rank}", "1")
+    except BaseException as e:
+        bc(f"gate store.set FAILED: {type(e).__name__}: {e}")
+        return
+    while True:
+        missing = []
+        for r in range(ws):
+            try:
+                store.get(f"probe/arr/{r}")
+            except BaseException:
+                missing.append(r)
+        if not missing:
+            bc(f"gate: all {ws} ranks arrived in {time.time() - t0:.0f}s")
+            return
+        if time.time() - t0 > timeout_s:
+            nodes = sorted({r // lws for r in missing})
+            msg = (f"gate FAILED: {len(missing)}/{ws} ranks never reached "
+                   f"the first collective within {timeout_s:.0f}s (missing "
+                   f"ranks {missing[:12]}{'...' if len(missing) > 12 else ''}"
+                   f", node(s) {nodes}) — hung BEFORE any HCCL call; their "
+                   f"wrap_rank*.log heartbeats name the exact frame. "
+                   f"Aborting instead of waiting ~20min for EI0015")
+            bc(msg)
+            raise RuntimeError(msg)
+        time.sleep(2)
+
 
 def _patch(name):
     fn = getattr(dist, name, None)
@@ -165,6 +219,9 @@ def _patch(name):
         log = c < 3 or (c + 1) % 50 == 0
         if log:
             bc(f"dist.{name} #{c + 1} enter")
+        if name not in ("init_process_group", "destroy_process_group"):
+            _first_collective_gate(
+                float(os.environ.get("PROBE_FIRSTCOLL_TIMEOUT_S", "300")))
         try:
             r = fn(*a, **k)
         except BaseException as e:
