@@ -71,6 +71,11 @@ CONFIGS_PER_ITER="${CONFIGS_PER_ITER:-20,10,5}"
 # rolling C_eff 三机制, 见 docs/parallel_k_selection.md §5.2)。
 # 默认 0 = 字面语义 (每轮恰好 n 个, 老行为)。
 ADAPTIVE_CONFIGS="${ADAPTIVE_CONFIGS:-0}"
+# prod3 时间盒 (需 ADAPTIVE_CONFIGS=1): 池 = e_i+4 不吃 S0 填充、admit
+# buffer 0 → 探针把每轮落在恰好 w_i 波 (波 ≈ 3h)。贪心模式每轮至少
+# 2 波 (池 ≥ S0+4); 紧凑用 overshoot 样本换墙钟: [20,10,10] ≈ 22/11/11
+# 承认 4 波 ~13h vs 贪心 6-7 波 ~19h。默认 0 = 贪心 (闲卡是免费样本)。
+ADAPTIVE_COMPACT="${ADAPTIVE_COMPACT:-0}"
 SEARCH_NUM_ITERATIONS="${SEARCH_NUM_ITERATIONS:-3}"
 K_ENHANCED="${K_ENHANCED:-3}"
 # balanced 模式下 K_max 语义等同 K_ENHANCED (容量约束划分恰好到 K);
@@ -261,6 +266,7 @@ FP_SEARCH_PARAMS=(
     # 期望列表语义开关是搜索语义的一部分 (进指纹); TARGET_ARM_MODE /
     # REMOTE_* 是执行形态, 刻意不进 (num_npu 先例)。
     "adaptive_configs=$ADAPTIVE_CONFIGS"
+    "adaptive_compact=$ADAPTIVE_COMPACT"
     "search_num_iterations=$SEARCH_NUM_ITERATIONS"
     "K_enhanced=$K_ENHANCED"
     "K_cluster_max=$K_CLUSTER_MAX"
@@ -454,6 +460,7 @@ else
 
     ADAPTIVE_ARGS=()
     [ "$ADAPTIVE_CONFIGS" = "1" ] && ADAPTIVE_ARGS+=(--adaptive-configs)
+    [ "$ADAPTIVE_COMPACT" = "1" ] && ADAPTIVE_ARGS+=(--adaptive-compact)
     python3 "$CLIMBMIX_DIR/scripts/run_climb.py" \
         --data-dir "$DATA_DIR" \
         --nanochat-dir "$NANOCHAT_DIR" \

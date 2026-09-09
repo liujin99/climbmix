@@ -84,21 +84,36 @@ class ConfigEvictedError(RuntimeError):
 class AdmissionController:
     """Per-batch adaptive admission state machine (prod2 B++).
 
-    The bootstrapper sizes iterations in WAVES: expected configs e_i over
-    an expected slot count S0 (remote max jobs + local slots) gives a wave
-    budget w_i = max(1, round(e_i / S0)). The bootstrapper then samples a
-    POOL sized to the upper bound (iter 1: w_i * S0 + reserve) or the last
-    realized concurrency (iter >= 2), and this controller right-sizes what
-    actually runs:
+    The bootstrapper sizes iterations in WAVES: the configured per-iteration
+    count e_i (configs_per_iter — a sample-count FLOOR, not a target: the
+    predictor needs at least e_i new results per iteration to learn) over an
+    expected slot count S0 (remote max jobs + local slots) gives a wave
+    budget w_i = max(1, round(e_i / S0)). The bootstrapper samples a POOL
+    sized to the upper bound, and this controller right-sizes what actually
+    runs in two tiers:
+
+      - floor tier — the first floor_configs queue entries (guided
+        iterations queue best-predicted first, so the floor holds the
+        best): the per-iteration sample guarantee. Never truncated, never
+        evicted; when the pool is tight these configs queue patiently
+        (queue_timeout_s bounds the wait).
+      - overshoot tier — everything beyond the floor: the dynamic fill for
+        idle slots. probe-truncate drops the never-submitted tail so the
+        admitted count lands at w_i * C_eff + admit_buffer (the buffer
+        keeps the queue non-empty through the batch drain — unsubmitted
+        configs cost nothing, an empty queue idles slots; 2026-09-09
+        prod2 iter1 truncated 26->22 and idled 9 slots for 2.75h); PENDING
+        stragglers are cancelled (over-admission grace while siblings run,
+        tail-kill once every other admitted config is terminal). Evicted
+        configs are dropped from the iteration, never re-run.
 
       - probe-truncate: once the first job has RUN for probe_delay_s (or
         probe_deadline_s elapsed since batch start), measure C_eff =
-        remote RUNNING median + local slots; admit w_i * C_eff configs by
-        dropping the never-submitted tail of the queue (guided iterations
-        queue best-predicted first, so the tail is the worst — rank-head
-        preservation).
-      - straggler eviction: handled in _wait_job (needs per-job PENDING
-        clocks); records evicted indices here.
+        remote RUNNING median + local slots; drop the never-submitted
+        queue tail (rank-head preservation).
+      - straggler eviction: applied by _wait_job via evict_pending() /
+        evict_tail() (they need per-job PENDING clocks); evicted indices
+        are recorded here.
       - rolling C_eff: run_batch exposes the measured concurrency so the
         NEXT iteration sizes directly from it.
 
@@ -112,22 +127,67 @@ class AdmissionController:
     def __init__(self, wave_budget: int, expected_slots: int,
                  min_configs: int = 4,
                  allow_truncate: bool = True,
+                 floor_configs: Optional[int] = None,
+                 admit_buffer_configs: Optional[int] = None,
                  probe_delay_s: float = 1800.0,
                  probe_deadline_s: float = 2400.0,
-                 pending_grace_s: float = 1800.0):
+                 pending_grace_s: float = 1800.0,
+                 tail_grace_s: float = 900.0):
         self.wave_budget = max(1, int(wave_budget))
         self.expected_slots = max(1, int(expected_slots))
         self.min_configs = max(1, int(min_configs))
+        # Floor tier size: the per-iteration sample guarantee (>= the
+        # absolute min). None keeps the legacy behavior where only
+        # min_configs guards truncation.
+        self.floor_configs = max(self.min_configs, int(
+            floor_configs if floor_configs is not None else self.min_configs))
+        # Overshoot headroom kept queued on top of w*C_eff: a slot freeing
+        # between the probe and the batch end picks the next config
+        # instantly instead of idling through the drain. The compact
+        # profile (ADAPTIVE_COMPACT=1) pins it to an explicit value (0):
+        # time-boxed sizing — the buffer would push the admitted count
+        # past the next wave boundary and every extra wave costs ~3h of
+        # iteration wall.
+        self.admit_buffer = (
+            max(0, int(admit_buffer_configs))
+            if admit_buffer_configs is not None
+            else max(0, self.expected_slots // 2))
         self.allow_truncate = bool(allow_truncate)
         self.probe_delay_s = float(probe_delay_s)
         self.probe_deadline_s = float(probe_deadline_s)
         self.pending_grace_s = float(pending_grace_s)
+        self.tail_grace_s = float(tail_grace_s)
         self.first_running_at: Optional[float] = None
         self.decided = False
         self.c_eff: Optional[int] = None
         self.drop_set: set = set()      # global indices dropped (truncate + evict)
         self.truncated: List[int] = []  # dropped before pickup (queue tail)
         self.evicted: List[int] = []    # submitted, cancelled while PENDING
+
+    def is_floor(self, gidx: int) -> bool:
+        """True when the global index belongs to the floor tier (the
+        first floor_configs entries of the ranked queue)."""
+        return gidx < self.floor_configs
+
+    def evict_pending(self, is_floor: bool, pending_s: float,
+                      fleet_running: int) -> bool:
+        """Over-admission eviction: PENDING past grace while siblings run.
+        Floor-tier configs are exempt — the sample guarantee outranks
+        iteration latency (queue_timeout_s bounds their wait)."""
+        if is_floor or self.pending_grace_s <= 0:
+            return False
+        return pending_s > self.pending_grace_s and fleet_running > 0
+
+    def evict_tail(self, is_floor: bool, tail_pending_s: float) -> bool:
+        """Tail-kill: this job is PENDING, every other admitted lifecycle
+        is terminal, and it has stayed PENDING past tail_grace_s since
+        becoming the batch's last remaining config — the platform has no
+        cards for it and the iteration cannot advance until it resolves.
+        Floor-tier exempt (patient); RUNNING tails are never killed (their
+        cards burn productively and they finish on their own)."""
+        if is_floor or self.tail_grace_s <= 0:
+            return False
+        return tail_pending_s > self.tail_grace_s
 
     def note_running(self, now: float) -> None:
         if self.first_running_at is None:
@@ -144,13 +204,14 @@ class AdmissionController:
                local_slots: int, in_queue: int = 0) -> List[int]:
         """Probe-point truncation decision. Marks (and returns) the global
         indices to drop from the queue TAIL so the admitted count lands at
-        wave_budget * C_eff. Empty list = admit everything (no truncation).
+        wave_budget * C_eff + admit_buffer, floored at floor_configs (the
+        per-iteration sample guarantee). Empty list = admit everything.
 
         Guardrails (docs/parallel_k_selection.md §5.2): C_eff < 2 disables
         truncation entirely (no usable pool signal — literal behavior, the
         queue's own 24h patience handles it); a pool smaller than
         min_configs is never truncated; the admitted count never drops
-        below min_configs.
+        below the floor.
         """
         self.decided = True
         self.c_eff = int(running_now) + int(local_slots)
@@ -161,8 +222,9 @@ class AdmissionController:
         total = int(total_configs)
         if total < self.min_configs:
             return []
-        n_target = max(self.min_configs,
-                       min(self.wave_budget * self.c_eff, total))
+        n_target = max(
+            self.floor_configs,
+            min(self.wave_budget * self.c_eff + self.admit_buffer, total))
         need_drop = total - n_target - len(self.drop_set)
         if need_drop <= 0:
             return []
@@ -408,10 +470,14 @@ class RemoteExecutor(ProxyRunner):
         self._cap_inflight = 0
         # Running-job registry (adaptive C_eff measurement): a shared
         # RUNNING counter + periodic samples, maintained by every _wait_job
-        # poll (first RUNNING +1, terminal -1). Reset per batch.
+        # poll (first RUNNING +1, terminal -1). Reset per batch. The
+        # active-lifecycle counter (worker pickup -> result written) feeds
+        # the tail-kill decision: active == 1 means this job is the last
+        # thing the batch is waiting on.
         self._run_lock = threading.Lock()
         self._running_now = 0
         self._run_samples: List[int] = []
+        self._active_lifecycles = 0
         # Per-batch adaptive admission state (None = literal behavior).
         self._admission: Optional["AdmissionController"] = None
         # Post-batch adaptive accounting — the bootstrapper reads these via
@@ -822,8 +888,8 @@ class RemoteExecutor(ProxyRunner):
             argv += ["--storage-root", self.remote.storage_root]
         return argv
 
-    def _submit_and_wait(self, experiment_id: int,
-                         spec_uri: str) -> Tuple[str, JobStatus]:
+    def _submit_and_wait(self, experiment_id: int, spec_uri: str,
+                         is_floor: bool = False) -> Tuple[str, JobStatus]:
         """Submit the worker job and wait for a terminal status. A QUEUE
         timeout (never started) resubmits with a fresh queue clock up to
         queue_resubmit_attempts times — the mixture was never trained, so
@@ -845,7 +911,8 @@ class RemoteExecutor(ProxyRunner):
                   f"(spec: {spec_uri})")
 
             try:
-                return job_id, self._wait_job(job_id, experiment_id)
+                return job_id, self._wait_job(job_id, experiment_id,
+                                              is_floor=is_floor)
             except QueueTimeoutError as e:
                 if attempt >= attempts:
                     raise
@@ -855,12 +922,13 @@ class RemoteExecutor(ProxyRunner):
         raise AssertionError("unreachable")  # pragma: no cover
 
     def _wait_job(self, job_id: str, experiment_id: int,
-                  timeout: Optional[float] = None) -> JobStatus:
+                  timeout: Optional[float] = None,
+                  is_floor: bool = False) -> JobStatus:
         """Poll until the job reaches a terminal state; RETURNS the status
         (does not raise on FAILED — the result.json the worker uploads on
         known-stage failures carries the precise rc's, and the caller needs
         it to write the eval-only resume markers). Raises only on timeout
-        (job cancelled).
+        (job cancelled) or eviction (config dropped).
 
         Two clocks: job_timeout_s measures RUNTIME (first RUNNING →
         terminal — platform queue time does not burn it; shared pools can
@@ -871,15 +939,20 @@ class RemoteExecutor(ProxyRunner):
         Adaptive mode adds: (a) fleet RUNNING accounting — first RUNNING
         increments the shared counter (and feeds the admission probe's
         C_eff), terminal decrements it, every poll appends a sample; (b)
-        straggler eviction — a job still PENDING past pending_grace_min
-        while siblings RUN is over-admission: cancel + ConfigEvictedError
-        (the config is dropped from the iteration, never re-run)."""
+        two-tier eviction — over-admission (PENDING past grace while
+        siblings run) and tail-kill (PENDING past tail grace once every
+        other admitted lifecycle is terminal) cancel + raise
+        ConfigEvictedError (the config is dropped from the iteration,
+        never re-run). Floor-tier configs (is_floor) are exempt from both:
+        the per-iteration sample guarantee outranks iteration latency, and
+        queue_timeout_s bounds their wait."""
         timeout = timeout if timeout is not None else self.remote.job_timeout_s
         queue_timeout = self.remote.queue_timeout_s
         submitted_at = time.time()
         first_running_at: Optional[float] = None
         counted_running = False
         last_print = 0.0
+        tail_pending_since: Optional[float] = None
         while True:
             st = self.job_api.status(job_id)
             now = time.time()
@@ -912,15 +985,17 @@ class RemoteExecutor(ProxyRunner):
                         f"started — queued {(now - submitted_at)/60:.0f}m "
                         f"(limit {queue_timeout/60:.0f}m); cancelled. "
                         f"logs (tail):\n{self.job_api.logs(job_id, 20)}")
-                # Straggler eviction (adaptive only): PENDING past grace
-                # while siblings run = over-admission (the realized pool
-                # is smaller than the probe admitted).
+                # Adaptive eviction (two-tier). tail_pending_since tracks
+                # when THIS job became the batch's only remaining pending
+                # lifecycle (reset when siblings appear again — the batch
+                # start race must not pre-charge the tail clock).
                 adm = self._admission
-                if (adm is not None and adm.pending_grace_s > 0
-                        and now - submitted_at > adm.pending_grace_s):
+                if adm is not None:
                     with self._run_lock:
                         fleet_running = self._running_now
-                    if fleet_running > 0:
+                        fleet_active = self._active_lifecycles
+                    if adm.evict_pending(is_floor, now - submitted_at,
+                                         fleet_running):
                         self.job_api.cancel(job_id)
                         raise ConfigEvictedError(
                             f"remote job {job_id} (exp {experiment_id}) sat "
@@ -928,6 +1003,21 @@ class RemoteExecutor(ProxyRunner):
                             f"{adm.pending_grace_s/60:.0f}m while siblings "
                             f"ran — over-admission; config dropped from the "
                             f"iteration (never re-run)")
+                    if fleet_active <= 1:
+                        if tail_pending_since is None:
+                            tail_pending_since = now
+                        elif adm.evict_tail(
+                                is_floor, now - tail_pending_since):
+                            self.job_api.cancel(job_id)
+                            raise ConfigEvictedError(
+                                f"remote job {job_id} (exp {experiment_id}) "
+                                f"still PENDING after all siblings finished "
+                                f"(batch tail, waited "
+                                f"{(now - tail_pending_since)/60:.0f}m > "
+                                f"{adm.tail_grace_s/60:.0f}m) — config "
+                                f"dropped from the iteration (never re-run)")
+                    else:
+                        tail_pending_since = None
             elif now - first_running_at > timeout:
                 self.job_api.cancel(job_id)
                 raise RuntimeError(
@@ -950,6 +1040,7 @@ class RemoteExecutor(ProxyRunner):
         mixture_config: MixtureConfig,
         experiment_id: int,
         output_dir: Optional[str] = None,
+        is_floor: bool = False,
     ) -> ProxyResult:
         output_dir = output_dir or self.config.output_dir
         exp_dir = os.path.join(output_dir, f"exp_{experiment_id:04d}")
@@ -1060,7 +1151,8 @@ class RemoteExecutor(ProxyRunner):
         spec_uri = f"{exp_obs}/spec.json"
         self.obs.upload_bytes(spec.to_json().encode("utf-8"), spec_uri)
 
-        job_id, job_status = self._submit_and_wait(experiment_id, spec_uri)
+        job_id, job_status = self._submit_and_wait(
+            experiment_id, spec_uri, is_floor=is_floor)
 
         # ── materialize the result into exp_dir ──
         # The worker uploads result.json even for KNOWN-stage failures
@@ -1167,12 +1259,20 @@ class RemoteExecutor(ProxyRunner):
                 # dropped-configs handling filters it out).
                 continue
             exp_id = experiment_id_base + gidx
+            # Floor tier (the first floor_configs queue entries): exempt
+            # from eviction — the per-iteration sample guarantee.
+            is_floor = bool(adm is not None and adm.is_floor(gidx))
             try:
                 self._acquire_slot()
+                with self._run_lock:
+                    self._active_lifecycles += 1
                 try:
                     results[gidx] = self._run_remote_experiment(
-                        remote_configs[gidx - offset], exp_id, output_dir)
+                        remote_configs[gidx - offset], exp_id, output_dir,
+                        is_floor=is_floor)
                 finally:
+                    with self._run_lock:
+                        self._active_lifecycles -= 1
                     self._release_slot()
             except ConfigEvictedError as e:
                 # Over-admission eviction (never trained, never re-run):
@@ -1233,13 +1333,22 @@ class RemoteExecutor(ProxyRunner):
                       f"{n_total} (literal behavior, queue patience applies)")
 
     def _compute_effective_concurrency(self, has_local: bool) -> Optional[int]:
-        """Median remote RUNNING over the steady-state window + local
-        slots. None when no job ever ran (no usable measurement)."""
+        """Median remote RUNNING over the whole batch (startup ramp
+        dropped) + local slots. None when no job ever ran (no usable
+        measurement).
+
+        Whole-batch window, NOT the trailing tail: a last-120-samples
+        window let the batch DRAIN phase poison the measurement (only the
+        final straggler RUNNING → median 1) — 2026-09-09 prod2 iter1
+        drained 2.75h on one job and the measured C_eff=2 shrank iter2's
+        pool from 10 to 4. Sample counts self-weight (10 running jobs
+        append 10 samples per poll, a lone straggler appends 1), so the
+        median of all samples reflects sustained concurrency."""
         with self._run_lock:
             samples = list(self._run_samples)
         if not samples:
             return None
-        window = samples[-120:]
+        window = samples
         if len(window) >= 8:
             window = window[len(window) // 2:]  # drop the startup ramp
         med = int(round(statistics.median(window)))
@@ -1295,6 +1404,7 @@ class RemoteExecutor(ProxyRunner):
         with self._run_lock:
             self._running_now = 0
             self._run_samples = []
+            self._active_lifecycles = 0
         self._admission = None
         self.last_dropped_configs = []
         self.last_admission_stats = {}
@@ -1305,6 +1415,12 @@ class RemoteExecutor(ProxyRunner):
                 expected_slots=int(admission.get("expected_slots", 1)),
                 min_configs=int(admission.get("min_configs", 4)),
                 allow_truncate=bool(admission.get("allow_truncate", True)),
+                floor_configs=(int(admission["floor_configs"])
+                               if admission.get("floor_configs") else None),
+                admit_buffer_configs=(
+                    int(admission["admit_buffer_configs"])
+                    if admission.get("admit_buffer_configs") is not None
+                    else None),
                 # probe windows are overridable purely for fast tests
                 probe_delay_s=float(admission.get("probe_delay_s", 1800.0)),
                 probe_deadline_s=float(
@@ -1314,8 +1430,8 @@ class RemoteExecutor(ProxyRunner):
             self._admission = adm
             print(f"  [Adaptive] wave budget {adm.wave_budget} "
                   f"(expected {adm.expected_slots} slots, pool "
-                  f"{len(configs)} configs, grace "
-                  f"{self.remote.pending_grace_min:.0f}m)")
+                  f"{len(configs)} configs, floor {adm.floor_configs}, "
+                  f"grace {self.remote.pending_grace_min:.0f}m)")
 
         initial_slots = self._probe_slots()
         self._adjust_capacity_limit(initial_slots)

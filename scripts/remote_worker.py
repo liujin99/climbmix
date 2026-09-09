@@ -429,7 +429,8 @@ def main() -> int:
         # stages done — the post-stage uploads below are authoritative
         stop_stream()
 
-        csv_path = nanochat_cmds.claim_eval_csv(work, tag, eval_base)
+        csv_path = nanochat_cmds.claim_eval_csv(work, tag, eval_base,
+                                                eval_rc=eval_rc)
         if csv_path is not None:
             res["csv"] = os.path.basename(csv_path)
             storage.upload_file(csv_path, f"{result_uri}/{res['csv']}")

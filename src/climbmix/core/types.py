@@ -338,13 +338,23 @@ class QualityFilterConfig:
 class SearchConfig:
     num_iterations: int = 3
     configs_per_iter: List[int] = field(default_factory=lambda: [15, 8, 4])
-    # prod2 B++: True = configs_per_iter is an EXPECTED list — the
+    # prod2 B++: True = configs_per_iter is a MINIMUM list (per-iteration
+    # sample-count FLOOR — the predictor's learning guarantee) — the
     # bootstrapper converts e_i to wave budgets (w_i = round(e_i / S0)) and
-    # the RemoteExecutor floats the realized count with the measured pool
-    # concurrency (probe-truncate / straggler eviction / rolling C_eff,
+    # the RemoteExecutor dynamically tops up beyond the floor when slots
+    # would idle (probe-truncate + admit buffer / straggler + tail eviction
+    # on the overshoot tier only / rolling C_eff over the whole batch,
     # docs/parallel_k_selection.md §5.2). False (default) = literal counts.
     # Semantic knob: enters the search fingerprint.
     adaptive_configs: bool = False
+    # Compact (time-boxed) profile for adaptive mode: pool = e_i + reserve
+    # (no capacity fill) and admit buffer 0 — the probe lands each
+    # iteration at exactly w_i waves (~3h/wave) instead of the greedy
+    # profile's every-iteration >= 2 waves (2026-09-09 time-budget
+    # decision: search+arm under ~24h; greedy stays the default because
+    # idle slots are free samples). No effect without adaptive_configs.
+    # Semantic knob: enters the search fingerprint.
+    adaptive_compact: bool = False
     dirichlet_alpha: Optional[float] = None
     predict_top_n_ratio: float = 0.5
     sample_from_top_m: int = 32

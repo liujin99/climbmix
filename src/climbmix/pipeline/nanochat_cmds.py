@@ -205,8 +205,10 @@ def build_target_eval_cmd(
     Parity target: runs/lib/target_arm.sh target_arm_eval. model_type
     stays parameterized so the remote base anchor can evaluate the raw
     d28 base checkpoint with the argv form prod1 used locally
-    (--model-type=base; the worker points mid_checkpoints/{tag} and
-    base_checkpoints/{tag} at the d28 asset mount via spec.ckpt_src).
+    (--model-type=base; the worker points mid_checkpoints/{tag} at the
+    d28 asset mount via spec.ckpt_src, and make_eval_base_dir links
+    base_checkpoints/{tag} — load_model("base") reads that dir — from
+    the container's mounted asset).
     --max-per-task is ALWAYS emitted (including -1 = full sets) to match
     the shell form.
     """
@@ -303,6 +305,18 @@ def make_eval_base_dir(
     os.makedirs(os.path.join(eval_base, "mid_checkpoints"))
     os.symlink(mid_src, os.path.join(eval_base, "mid_checkpoints", model_tag))
 
+    # --model-type=base (the remote d28 anchor) loads
+    # {base_dir}/base_checkpoints/{tag} — nanochat's load_model maps
+    # source "base" to that dir — so the private dir needs the link too
+    # (2026-09-09: the remote anchor exited 1 because only mid_checkpoints
+    # was linked; model-type=mid evals never read it and never noticed).
+    # Conditional: search exps (model-type=mid) have no such dir.
+    base_src = os.path.join(nanochat_base_dir, "base_checkpoints", model_tag)
+    if os.path.isdir(base_src):
+        os.makedirs(os.path.join(eval_base, "base_checkpoints"))
+        os.symlink(base_src, os.path.join(eval_base, "base_checkpoints",
+                                          model_tag))
+
     tok_src = os.path.join(nanochat_base_dir, "tokenizer")
     if not os.path.isdir(tok_src):
         raise FileNotFoundError(
@@ -326,6 +340,7 @@ def claim_eval_csv(
     exp_dir: str,
     model_tag: str,
     eval_base: str,
+    eval_rc: Optional[int] = None,
     log=print,
 ) -> Optional[str]:
     """Move the CSV written by THIS eval from its private base dir into
@@ -343,7 +358,11 @@ def claim_eval_csv(
     except OSError:
         names = []
     if not names:
-        log(f"  [Eval] WARNING: base_eval exited 0 but wrote no CSV in "
+        # rc included when known: 2026-09-09 the canned "exited 0" text
+        # contradicted the FAILED (exit code 1) line above it and sent
+        # the diagnosis down the wrong path.
+        rc_txt = f" (eval rc={eval_rc})" if eval_rc is not None else ""
+        log(f"  [Eval] WARNING: base_eval wrote no CSV{rc_txt} in "
             f"{csv_dir} — scores for {model_tag} will be NaN")
         return None
     newest = max(names, key=lambda f: os.path.getmtime(os.path.join(csv_dir, f)))

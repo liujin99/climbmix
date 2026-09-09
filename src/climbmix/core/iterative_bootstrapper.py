@@ -495,6 +495,17 @@ class IterativeBootstrapper:
         return new_configs
 
     @staticmethod
+    def _adaptive_pool_size(e_i: int, capacity_term: int,
+                            reserve: int = 4) -> int:
+        """Floor-guaranteed pool size: at least e_i (the per-iteration
+        sample-count FLOOR — the predictor's learning guarantee; a
+        drain-poisoned C_eff_prev must never shrink the pool below it)
+        or the wave-capacity estimate, whichever is larger, plus a
+        never-submitted-is-free reserve the probe can drop from the
+        tail."""
+        return max(int(e_i), int(capacity_term)) + int(reserve)
+
+    @staticmethod
     def _expected_fleet_slots(proxy_runner: Any) -> Optional[int]:
         """S0 for adaptive wave budgets: remote max jobs + local slots, or
         None when the runner is not a hybrid RemoteExecutor (local-only
@@ -528,10 +539,11 @@ class IterativeBootstrapper:
         pruning_info: Optional[Dict[str, Any]] = None
 
         # ── adaptive sizing (prod2 B++, search.adaptive_configs) ──
-        # e_i (expected count) -> w_i = round(e_i / S0) wave budgets. The
-        # iteration samples a POOL sized to the upper bound (iter 1) or the
-        # last realized concurrency (iter >= 2); the executor's probe
-        # right-sizes what actually runs to w_i * C_eff.
+        # e_i (per-iteration sample-count FLOOR since 2026-09-09) ->
+        # w_i = round(e_i / S0) wave budgets. The iteration samples a
+        # POOL floored at e_i (or the wave capacity, whichever is larger)
+        # plus reserve; the executor's probe right-sizes what actually
+        # runs to w_i * C_eff + buffer, never below the floor tier.
         e_i = int(n_configs)
         w_i = 1
         n_sample = n_configs
@@ -543,37 +555,56 @@ class IterativeBootstrapper:
                                     False))
         except AttributeError:
             adaptive = False
+        # Compact profile (adaptive_compact, 2026-09-09): time-boxed pool
+        # sizing — every extra wave costs ~3h of iteration wall, and the
+        # greedy profile's capacity fill (>= S0+4 pool) forced >= 2 waves
+        # per iteration even when the floor fit in one.
+        compact = adaptive and bool(getattr(self.config.search,
+                                            "adaptive_compact", False))
         if adaptive and proxy_runner is not None:
             s0 = self._expected_fleet_slots(proxy_runner)
             if s0 is not None:
                 w_i = max(1, int(np.floor(e_i / s0 + 0.5)))
                 if preset_configs is None:
-                    if (iteration == 1 or self._predictor is None
+                    if compact:
+                        # Pool = floor + reserve: the probe target
+                        # (w_i * C_eff + 0 buffer) lands the batch at
+                        # exactly w_i waves. The never-submitted reserve
+                        # tail stays droppable.
+                        n_sample = e_i + 4
+                    elif (iteration == 1 or self._predictor is None
                             or self._last_c_eff is None):
-                        # Upper bound pool: w_i * S0 + reserve. The probe
-                        # (~30-40min in) truncates the never-submitted tail
-                        # to w_i * C_eff — unsubmitted = zero cost.
-                        n_sample = w_i * s0 + 4
+                        # Upper bound pool: max(e_i, w_i * S0) + reserve.
+                        # The probe (~30-40min in) truncates the
+                        # never-submitted tail to w_i * C_eff + buffer —
+                        # unsubmitted = zero cost.
+                        n_sample = self._adaptive_pool_size(e_i, w_i * s0)
                     else:
-                        # iter >= 2: size directly from the last realized
-                        # concurrency; admission stays active for eviction
-                        # and mid-iteration truncation if the pool shrinks.
-                        n_sample = max(4, w_i * int(self._last_c_eff))
+                        # iter >= 2: size from the last realized
+                        # concurrency but never below the floor — the
+                        # predictor's per-iteration learning guarantee;
+                        # admission stays active for eviction and
+                        # mid-iteration truncation if the pool shrinks.
+                        n_sample = self._adaptive_pool_size(
+                            e_i, w_i * int(self._last_c_eff))
                 adm_kwargs = {
                     "wave_budget": w_i,
                     "expected_slots": s0,
                     "min_configs": 4,
+                    "floor_configs": e_i,
                     "allow_truncate": (self._last_c_eff is None
                                        or self._last_c_eff >= 2),
                 }
+                if compact:
+                    adm_kwargs["admit_buffer_configs"] = 0
                 if preset_configs is None:
-                    print(f"[Iter {iteration}] adaptive: expected {e_i} @ "
-                          f"~{s0} slots -> budget {w_i} wave(s), sampling "
-                          f"{n_sample} (C_eff_prev={self._last_c_eff})")
+                    print(f"[Iter {iteration}] adaptive{' compact' if compact else ''}: "
+                          f"floor {e_i} @ ~{s0} slots -> budget {w_i} wave(s), "
+                          f"sampling {n_sample} (C_eff_prev={self._last_c_eff})")
                 else:
                     print(f"[Iter {iteration}] adaptive: resumed pool of "
                           f"{len(preset_configs)} configs, budget {w_i} "
-                          f"wave(s) (re-probe)")
+                          f"wave(s), floor {e_i} (re-probe)")
 
         if preset_configs is not None:
             new_configs = list(preset_configs)
@@ -712,7 +743,7 @@ class IterativeBootstrapper:
                 n_trunc = len(stats.get("truncated") or [])
                 n_evict = len(stats.get("evicted") or [])
                 c_eff = stats.get("c_eff") or self._last_c_eff
-                print(f"[Iter {iteration}] adaptive: expected {e_i} -> "
+                print(f"[Iter {iteration}] adaptive: floor {e_i} -> "
                       f"budget {w_i} wave(s); pool C_eff={c_eff} -> admitted "
                       f"{len(new_configs)}/{n_pool} "
                       f"(truncated {n_trunc}, evicted {n_evict})")

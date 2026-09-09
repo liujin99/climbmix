@@ -165,12 +165,35 @@ check("local_slots: k=16 on 8 cards -> 0 (oversize idles)",
 
 # ═══════════════════════════════════════════════════════════════════════
 # 3. AdmissionController.decide (pure truncation math + guardrails)
+#    2026-09-09 floor semantics: configs_per_iter = per-iteration MINIMUM;
+#    two tiers — floor (never truncated/evicted) + overshoot (dynamic).
 # ═══════════════════════════════════════════════════════════════════════
 adm = AdmissionController(wave_budget=2, expected_slots=11)
 drops = adm.decide(total_configs=26, n_local=1, running_now=10, local_slots=1)
-check("admission: iter1 pool 26, C_eff=11, budget 2 -> admit 22, drop 4 tail",
-      drops == [22, 23, 24, 25] and len(adm.drop_set) == 4 and adm.c_eff == 11,
+# C_eff=11 -> target = max(4, min(2*11+5, 26)) = 26 -> admit all
+check("admission: iter1 pool 26, C_eff=11, buffer 5 -> admit all (drain fill)",
+      drops == [] and not adm.drop_set and adm.c_eff == 11,
       f"drops={drops}")
+
+# 2026-09-09 regression: prod2 iter1 truncated 26->22 (exact w*C_eff) and
+# idled 9 slots for 2.75h through the batch drain; floor 20 + buffer now
+# admits the whole pool — the 4 former "reserve" configs fill the drain.
+admF = AdmissionController(wave_budget=2, expected_slots=11, floor_configs=20)
+dropsF = admF.decide(total_configs=26, n_local=1, running_now=10, local_slots=1)
+check("admission: floor 20 + buffer rescues the 26->22 drain incident",
+      dropsF == [] and admF.floor_configs == 20 and admF.admit_buffer == 5)
+
+admT = AdmissionController(wave_budget=2, expected_slots=11, floor_configs=20)
+dropsT = admT.decide(total_configs=26, n_local=1, running_now=1, local_slots=1)
+# tight pool: C_eff=2 -> target = max(20, min(2*2+5, 26)) = 20 -> drop 6 tail
+check("admission: tight pool C_eff=2 truncates to exactly the floor",
+      dropsT == [20, 21, 22, 23, 24, 25] and len(admT.drop_set) == 6)
+
+admB = AdmissionController(wave_budget=2, expected_slots=11)
+dropsB = admB.decide(total_configs=60, n_local=1, running_now=10, local_slots=1)
+# C_eff=11 -> target = max(4, min(27, 60)) = 27 -> drop 33 tail
+check("admission: oversized pool still truncates to w*C_eff + buffer",
+      len(dropsB) == 33 and dropsB[0] == 27 and dropsB[-1] == 59)
 
 adm2 = AdmissionController(wave_budget=1, expected_slots=11)
 drops2 = adm2.decide(total_configs=11, n_local=1, running_now=10, local_slots=1)
@@ -218,6 +241,37 @@ check("admission: probe follows first RUNNING clock",
       not adm8.probe_ready(t0 + 60 + 1700, t0)
       and adm8.probe_ready(t0 + 60 + 1800, t0))
 
+# two-tier pure decisions: is_floor / evict_pending / evict_tail
+adm2t = AdmissionController(wave_budget=1, expected_slots=11, floor_configs=10)
+check("floor: tier membership by global index",
+      adm2t.is_floor(0) and adm2t.is_floor(9) and not adm2t.is_floor(10))
+check("floor: defaults to min_configs when not passed",
+      AdmissionController(wave_budget=1, expected_slots=11).floor_configs == 4)
+check("floor: clamps up below min_configs",
+      AdmissionController(wave_budget=1, expected_slots=2, min_configs=4,
+                          floor_configs=2).floor_configs == 4)
+check("evict_pending: overshoot past grace + sibling RUNNING",
+      adm2t.evict_pending(False, 2000.0, 1) is True)
+check("evict_pending: floor exempt even far past grace",
+      adm2t.evict_pending(True, 99999.0, 5) is False)
+check("evict_pending: no sibling running -> patient (queue timeout bounds)",
+      adm2t.evict_pending(False, 99999.0, 0) is False)
+check("evict_tail: overshoot sole-remaining past tail grace",
+      adm2t.evict_tail(False, 1000.0) is True)
+check("evict_tail: floor exempt",
+      adm2t.evict_tail(True, 99999.0) is False)
+check("evict_tail: within grace",
+      adm2t.evict_tail(False, 899.0) is False)
+
+# floor-guaranteed pool sizing (2026-09-09 regression: a drain-poisoned
+# C_eff_prev=2 shrank prod2 iter2's pool to 4; the floor keeps >= e_i)
+check("pool_size: iter1 e=20, w*S0=22 -> 26",
+      IterativeBootstrapper._adaptive_pool_size(20, 22) == 26)
+check("pool_size: iter2 e=10, poisoned C_eff_prev=2 -> floor 10 + 4",
+      IterativeBootstrapper._adaptive_pool_size(10, 2) == 14)
+check("pool_size: floor dominates a small capacity term",
+      IterativeBootstrapper._adaptive_pool_size(20, 12) == 24)
+
 # ═══════════════════════════════════════════════════════════════════════
 # 4. _wait_job: eviction + running accounting
 # ═══════════════════════════════════════════════════════════════════════
@@ -239,17 +293,20 @@ class FakeAPI:
         return ""
 
 
-def bare_wait_job(api, adm, running_now=0):
+def bare_wait_job(api, adm, running_now=0, active=1, is_floor=False,
+                  queue_timeout=30.0):
     ex = object.__new__(RemoteExecutor)
     ex.remote = RemoteConfig(poll_interval_s=0.005,
                              status_print_interval_s=9999.0,
-                             job_timeout_s=30.0, queue_timeout_s=30.0)
+                             job_timeout_s=30.0,
+                             queue_timeout_s=queue_timeout)
     ex.job_api = api
     ex._run_lock = threading.Lock()
     ex._running_now = running_now
     ex._run_samples = []
+    ex._active_lifecycles = active
     ex._admission = adm
-    return ex._wait_job("job-1", 7)
+    return ex._wait_job("job-1", 7, is_floor=is_floor)
 
 
 # eviction: PENDING past grace while a sibling runs
@@ -269,11 +326,12 @@ check("eviction: PENDING past grace + sibling RUNNING -> cancel + raise",
 api_q = FakeAPI([JobStatus.PENDING])
 ex_q = object.__new__(RemoteExecutor)
 ex_q.remote = RemoteConfig(poll_interval_s=0.005, status_print_interval_s=9999.0,
-                           job_timeout_s=30.0, queue_timeout_s=0.4)
+                          job_timeout_s=30.0, queue_timeout_s=0.4)
 ex_q.job_api = api_q
 ex_q._run_lock = threading.Lock()
 ex_q._running_now = 0
 ex_q._run_samples = []
+ex_q._active_lifecycles = 1
 ex_q._admission = ev_adm
 q_err = None
 try:
@@ -289,17 +347,69 @@ api_run = FakeAPI([JobStatus.PENDING, JobStatus.RUNNING,
                    JobStatus.RUNNING, JobStatus.SUCCEEDED])
 ex = object.__new__(RemoteExecutor)
 ex.remote = RemoteConfig(poll_interval_s=0.005, status_print_interval_s=9999.0,
-                         job_timeout_s=30.0, queue_timeout_s=30.0)
+                        job_timeout_s=30.0, queue_timeout_s=30.0)
 ex.job_api = api_run
 ex._run_lock = threading.Lock()
 ex._running_now = 0
 ex._run_samples = []
+ex._active_lifecycles = 1
 ex._admission = run_adm
 st = ex._wait_job("job-2", 8)
 check("accounting: terminal status returned",
       st == JobStatus.SUCCEEDED and ex._running_now == 0)
 check("accounting: RUNNING samples recorded + probe clock noted",
       len(ex._run_samples) >= 2 and run_adm.first_running_at is not None)
+
+# tail-kill: sole remaining lifecycle, PENDING past tail grace -> evicted
+# (over-admission grace disabled so only the tail path can fire)
+tk_adm = AdmissionController(wave_budget=1, expected_slots=2,
+                             pending_grace_s=999.0, tail_grace_s=0.1)
+api_tk = FakeAPI([JobStatus.PENDING])
+tk_evicted = False
+try:
+    bare_wait_job(api_tk, tk_adm, running_now=0, active=1)
+except ConfigEvictedError:
+    tk_evicted = True
+check("tail-kill: sole remaining PENDING past grace -> cancel + raise",
+      tk_evicted and api_tk.cancelled == ["job-1"])
+
+# tail-kill: floor tier exempt -> queue patience bounds the wait instead
+api_tkf = FakeAPI([JobStatus.PENDING])
+tkf_err = None
+try:
+    bare_wait_job(api_tkf, tk_adm, running_now=0, active=1, is_floor=True,
+                  queue_timeout=0.4)
+except Exception as e:
+    tkf_err = type(e).__name__
+check("tail-kill: floor tier stays queued (QueueTimeout, not evicted)",
+      tkf_err == "QueueTimeoutError" and api_tkf.cancelled == ["job-1"])
+
+# tail-kill: siblings still active -> never fires (clock resets on >1)
+api_ns = FakeAPI([JobStatus.PENDING])
+ns_err = None
+try:
+    bare_wait_job(api_ns, tk_adm, running_now=0, active=3, queue_timeout=0.4)
+except Exception as e:
+    ns_err = type(e).__name__
+check("tail-kill: siblings still active -> QueueTimeout, not evicted",
+      ns_err == "QueueTimeoutError" and api_ns.cancelled == ["job-1"])
+
+# honest C_eff: whole-batch median, drain-phase immune (2026-09-09: the
+# last-120 window measured the drain (median 1) and shrank prod2 iter2
+# to a pool of 4)
+def bare_ceff(samples, has_local=False):
+    ex = object.__new__(RemoteExecutor)
+    ex._run_lock = threading.Lock()
+    ex._run_samples = list(samples)
+    return ex._compute_effective_concurrency(has_local)
+
+check("c_eff: steady 3000x10 + drain 330x1 -> 10 (drain immune)",
+      bare_ceff([10] * 3000 + [1] * 330) == 10)
+check("c_eff: short homogeneous batch -> its own concurrency",
+      bare_ceff([3] * 990) == 3)
+check("c_eff: no samples -> None", bare_ceff([]) is None)
+check("c_eff: startup ramp dropped",
+      bare_ceff([1, 1, 1, 1, 8, 8, 8, 8]) == 8)
 
 # ═══════════════════════════════════════════════════════════════════════
 # 5. spec v2 + worker/embed version lockstep
@@ -328,6 +438,31 @@ check("spec: remote_worker SPEC_VERSION in lockstep",
 embed_src = open(os.path.join(REPO, "scripts", "embed_dispatch.py")).read()
 check("spec: embed_dispatch spec_version bumped to 2",
       '"spec_version": 2' in embed_src)
+
+# private eval dir must carry base_checkpoints/{tag} when the base dir
+# has it: --model-type=base (the remote d28 anchor) loads through
+# nanochat load_model("base") -> {base_dir}/base_checkpoints/{tag}.
+# 2026-09-09: the remote anchor exited 1 — make_eval_base_dir linked
+# only mid_checkpoints, so base_eval saw an empty private dir.
+import nanochat_cmds as staged_cmds  # noqa: E402  (the staged copy jobs run)
+_bd = tempfile.mkdtemp(prefix="prod2evalbase_")
+for _sub in ("mid_checkpoints/d28", "base_checkpoints/d28", "tokenizer",
+             "eval_bundle", "eval_stem"):
+    os.makedirs(os.path.join(_bd, _sub), exist_ok=True)
+_eb = staged_cmds.make_eval_base_dir(_bd, tempfile.mkdtemp(prefix="prod2exp_"),
+                                     "d28")
+check("eval_base: base_checkpoints/{tag} linked (anchor model-type=base)",
+      os.path.isdir(os.path.join(_eb, "base_checkpoints", "d28"))
+      and os.path.realpath(os.path.join(_eb, "base_checkpoints", "d28"))
+      == os.path.join(_bd, "base_checkpoints", "d28"))
+check("eval_base: mid_checkpoints/{tag} still linked",
+      os.path.isdir(os.path.join(_eb, "mid_checkpoints", "d28")))
+_bd2 = tempfile.mkdtemp(prefix="prod2evalbase2_")
+os.makedirs(os.path.join(_bd2, "mid_checkpoints", "d20_x7"))
+os.makedirs(os.path.join(_bd2, "tokenizer"))
+_eb2 = staged_cmds.make_eval_base_dir(_bd2, tempfile.mkdtemp(), "d20_x7")
+check("eval_base: mid-only exp unaffected (no base_checkpoints link)",
+      not os.path.exists(os.path.join(_eb2, "base_checkpoints")))
 
 # RemoteConfig roundtrip with the new knob
 rc = RemoteConfig.from_dict({"obs_prefix": "obs://b/p", "backend": "mock",
@@ -403,9 +538,10 @@ with tempfile.TemporaryDirectory(prefix="prod2bs_") as td:
     bs.run_iteration(1, 20, fake)
     c1 = fake.calls[0]
     check("adaptive iter1: presamples w*S0+4 = 26", c1["n"] == 26, f"n={c1['n']}")
-    check("adaptive iter1: admission kwargs (w=2, S0=11, truncate on)",
+    check("adaptive iter1: admission kwargs (w=2, S0=11, floor 20, truncate on)",
           c1["admission"] == {"wave_budget": 2, "expected_slots": 11,
-                              "min_configs": 4, "allow_truncate": True})
+                              "min_configs": 4, "floor_configs": 20,
+                              "allow_truncate": True})
     check("adaptive iter1: dropped 4 -> 22 accumulated",
           len(bs._accumulated_configs) == 22)
     state = json.load(open(os.path.join(td, "search_state.json")))
@@ -418,12 +554,15 @@ with tempfile.TemporaryDirectory(prefix="prod2bs_") as td:
     check("adaptive iter1: predictor fitted (guided iter2 ahead)",
           bs._predictor is not None)
 
-    # iter 2: e=10, S0=11 -> w=1; C_eff_prev=11 -> n_sample = 11 exactly
+    # iter 2: e=10, S0=11 -> w=1; C_eff_prev=11 -> n_sample = max(10,11)+4 = 15
+    # (floor guarantee + overshoot headroom, never the old bare w*C_eff_prev)
     fake2 = FakeAdaptiveRunner(drop_tail=0, c_eff=9)
     bs.run_iteration(2, 10, fake2)
     c2 = fake2.calls[0]
-    check("adaptive iter2: sizes directly from C_eff_prev (1*11=11)",
-          c2["n"] == 11, f"n={c2['n']}")
+    check("adaptive iter2: floor 10 + C_eff_prev 11 + reserve 4 = 15",
+          c2["n"] == 15, f"n={c2['n']}")
+    check("adaptive iter2: floor_configs passed through",
+          c2["admission"]["floor_configs"] == 10)
     check("adaptive iter2: admission still active (eviction guard)",
           c2["admission"] is not None and c2["admission"]["wave_budget"] == 1)
     check("adaptive iter2: allow_truncate follows C_eff_prev >= 2",
@@ -439,6 +578,49 @@ with tempfile.TemporaryDirectory(prefix="prod2bs_") as td:
     bs2.run_iteration(2, 10, fake3b)
     check("adaptive guardrail: C_eff_prev=1 -> allow_truncate=False",
           fake3b.calls[0]["admission"]["allow_truncate"] is False)
+    # 2026-09-09 regression: the poisoned C_eff_prev must not shrink the
+    # pool below the floor (prod2 iter2 sampled 4 with C_eff_prev=2)
+    check("adaptive guardrail: poisoned C_eff_prev=1 -> floor still 10+4=14",
+          fake3b.calls[0]["n"] == 14, f"n={fake3b.calls[0]['n']}")
+
+    # compact profile (ADAPTIVE_COMPACT=1): time-boxed — pool = e_i+4 (no
+    # capacity fill), admit buffer pinned 0. Greedy's S0 fill forced every
+    # iteration to >= 2 waves; compact lands exactly w_i.
+    bs_c = make_bs(os.path.join(td, "state_c.json"))
+    bs_c.config.search.adaptive_compact = True
+    fake_c = FakeAdaptiveRunner(drop_tail=2, c_eff=11)
+    bs_c.run_iteration(1, 20, fake_c)
+    cc1 = fake_c.calls[0]
+    check("compact iter1: pool = e_i+4 = 24 (no S0 fill)",
+          cc1["n"] == 24, f"n={cc1['n']}")
+    check("compact iter1: buffer pinned 0, floor still passed",
+          cc1["admission"] == {"wave_budget": 2, "expected_slots": 11,
+                               "min_configs": 4, "floor_configs": 20,
+                               "allow_truncate": True,
+                               "admit_buffer_configs": 0})
+    check("compact iter1: probe target w*C_eff+0 = 22 -> 22 accumulated",
+          len(bs_c._accumulated_configs) == 22)
+    fake_c2 = FakeAdaptiveRunner(drop_tail=3, c_eff=11)
+    bs_c.run_iteration(2, 10, fake_c2)
+    cc2 = fake_c2.calls[0]
+    check("compact iter2: pool = 14 regardless of C_eff_prev=11",
+          cc2["n"] == 14, f"n={cc2['n']}")
+    check("compact iter2: probe target = C_eff+0 = 11 -> 11 accumulated",
+          len(bs_c._accumulated_configs) == 22 + 11)
+
+    # controller: explicit buffer override vs the slots//2 default
+    adm_buf = AdmissionController(wave_budget=1, expected_slots=11,
+                                  floor_configs=10, admit_buffer_configs=0)
+    check("controller: explicit buffer 0 wins over slots//2",
+          adm_buf.admit_buffer == 0)
+    adm_def = AdmissionController(wave_budget=1, expected_slots=11,
+                                  floor_configs=10)
+    check("controller: default buffer stays slots//2",
+          adm_def.admit_buffer == 5)
+    drops = adm_buf.decide(total_configs=14, n_local=1, running_now=10,
+                           local_slots=1)
+    check("controller: buffer 0 -> admit exactly w*C_eff (11 of 14)",
+          sorted(drops) == [11, 12, 13], f"drops={sorted(drops)}")
 
     # non-adaptive runner (no 'remote' attr): literal behavior, no admission
     class PlainRunner:
@@ -484,6 +666,11 @@ for sh in ("runs/run_climbmix.sh", "runs/lib/target_arm.sh",
 src = open(os.path.join(REPO, "runs", "run_climbmix.sh")).read()
 check("shell: adaptive_configs in FP_SEARCH_PARAMS",
       'adaptive_configs=$ADAPTIVE_CONFIGS' in src)
+check("shell: adaptive_compact in FP_SEARCH_PARAMS",
+      'adaptive_compact=$ADAPTIVE_COMPACT' in src)
+check("shell: ADAPTIVE_COMPACT default 0 + forwarded",
+      'ADAPTIVE_COMPACT="${ADAPTIVE_COMPACT:-0}"' in src
+      and 'ADAPTIVE_ARGS+=(--adaptive-compact)' in src)
 check("shell: TARGET_ARM_MODE not fingerprinted (execution shape)",
       re.search(r'"target_arm_mode=', src) is None)
 check("shell: MERGE_STRATEGY defaults to balanced",

@@ -127,6 +127,12 @@ def main():
                              "w_i = round(e_i / S0), probe-truncate + straggler eviction + "
                              "rolling C_eff (RemoteExecutor; no-op on local runners). "
                              "Semantic: enters the search fingerprint.")
+    parser.add_argument("--adaptive-compact", action="store_true",
+                        help="adaptive sizing, time-boxed profile (needs --adaptive-configs): "
+                             "pool = e_i + reserve (no capacity fill), admit buffer 0 — each "
+                             "iteration lands at exactly w_i waves (~3h/wave) instead of the "
+                             "greedy default filling idle slots with overshoot samples. "
+                             "Semantic: enters the search fingerprint.")
     parser.add_argument("--dirichlet-alpha", type=float, default=None)
 
     # ── Predictor ──
@@ -241,6 +247,7 @@ def main():
             num_iterations=args.num_iterations,
             configs_per_iter=configs_per_iter,
             adaptive_configs=args.adaptive_configs,
+            adaptive_compact=args.adaptive_compact,
             dirichlet_alpha=args.dirichlet_alpha,
         ),
         proxy=proxy_config,
@@ -276,8 +283,14 @@ def main():
           f"(strategy={config.discovery.merge_strategy}, "
           f"K band [{config.discovery.K_enhanced}, {config.discovery.K_max}], "
           f"tau={config.discovery.merge_distance})")
+    if config.search.adaptive_configs:
+        search_note = ("compact: e_i floor, exactly w_i waves"
+                       if config.search.adaptive_compact else
+                       "per-iter minimum, dynamic top-up fills idle slots")
+    else:
+        search_note = ""
     print(f"  Search:     {config.search.num_iterations} iterations, {configs_per_iter} = {sum(configs_per_iter)} configs"
-          + (" (adaptive: expected counts, floats with realized pool)" if config.search.adaptive_configs else ""))
+          + (f" (adaptive: {search_note})" if search_note else ""))
     print(f"  Metric:     {config.val_tasks} ({config.metric_direction})")
     print(f"  Eval:       benchmarks={config.eval_benchmarks}, max_per_task="
           f"{config.eval_max_per_task if config.eval_max_per_task > 0 else 'full'}")
