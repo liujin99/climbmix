@@ -417,11 +417,20 @@ def train_verdict(mean_dt_ms: Optional[float], ws: int) -> str:
         return "FAIL (no timing data)"
     s = mean_dt_ms / 1000.0
     base = 18.2
-    thr = 11000 if ws == 16 else 7000
+    # linear between the calibrated anchors: ws=16 -> 11s, ws=32 -> 7s
+    # (e.g. ws=24 -> 9s). Keeps the margin progression of the anchors
+    # for arbitrary node counts instead of mis-filing ws=24 under the
+    # ws=32 gate.
+    if ws <= 16:
+        thr = 11000
+    elif ws >= 32:
+        thr = 7000
+    else:
+        thr = 11000 - (11000 - 7000) * (ws - 16) / (32 - 16)
     if mean_dt_ms <= thr:
         return (f"PASS — {s:.1f}s/step vs {base}s ws=8 anchor "
                 f"({base / s:.1f}x).")
-    return (f"FAIL — {s:.1f}s/step > {thr / 1000.0}s gate for ws={ws} "
+    return (f"FAIL — {s:.1f}s/step > {thr / 1000.0:.1f}s gate for ws={ws} "
             f"({base / s:.1f}x vs ws=8 anchor).")
 
 
