@@ -43,10 +43,14 @@ rdzv_dump_host_nets
 # the ~10GB of optim shards.
 mkdir -p "$BASE/mid_checkpoints" "$BASE/base_checkpoints/$TAG" \
          "$BASE/tokenizer" "$BASE/probe_data"
-probe_mat_cp "$IN"/d28_0/model_*.pt  "$BASE/base_checkpoints/$TAG" "d28 model" || exit 1
-probe_mat_cp "$IN"/d28_0/meta_*.json "$BASE/base_checkpoints/$TAG" "d28 meta" || exit 1
-probe_mat_cp "$IN"/tokenizer_0/*     "$BASE/tokenizer" "tokenizer" || exit 1
-probe_mat_cp "$IN"/data_0/*.parquet  "$BASE/probe_data" "data shards" || exit 1
+# NOTE: globs MUST be quoted at the call sites — probe_mat_cp takes the
+# PATTERN as one arg and expands it itself. Unquoted, a multi-file glob
+# (tokenizer has 2 files, data has N shards) shifts dst/label by one and
+# the copy targets a FILE ("mkdir: File exists" — run 20260909_141758).
+probe_mat_cp "$IN/d28_0/model_*.pt"  "$BASE/base_checkpoints/$TAG" "d28 model" || exit 1
+probe_mat_cp "$IN/d28_0/meta_*.json" "$BASE/base_checkpoints/$TAG" "d28 meta" || exit 1
+probe_mat_cp "$IN/tokenizer_0/*"     "$BASE/tokenizer" "tokenizer" || exit 1
+probe_mat_cp "$IN/data_0/*.parquet"  "$BASE/probe_data" "data shards" || exit 1
 DATA="$BASE/probe_data"
 echo "[probe C $(hostname)] assets local: d28=$(ls "$BASE/base_checkpoints/$TAG"/model_*.pt 2>/dev/null | head -1) data=$(ls "$BASE/probe_data"/*.parquet 2>/dev/null | wc -l) parquet files"
 

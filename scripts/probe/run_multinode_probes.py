@@ -436,7 +436,7 @@ def train_verdict(mean_dt_ms: Optional[float], ws: int) -> str:
 
 def print_decision_table(a: Optional[Dict], b: Optional[Dict],
                          c: List[Dict], node_count: int, rdzv_mode: str,
-                         ws: int) -> None:
+                         ws: int, c_dir: str = "") -> None:
     print("\n" + "=" * 72)
     print("MULTI-NODE PHASE 0 DECISION TABLE")
     print("=" * 72)
@@ -470,6 +470,27 @@ def print_decision_table(a: Optional[Dict], b: Optional[Dict],
                   f"{b.get('barrier_ms')} ms")
             print(f"B  interconnect verdict ............................ "
                   f"{busbw_verdict(b.get('busbw_gib_s'))}")
+    if not c and os.path.isdir(c_dir):
+        # C ran but every node died BEFORE torchrun's result step — surface
+        # the train_failure markers (run 20260909_141758: empty table, the
+        # failure evidence sat unreported in the download dir)
+        rows = 0
+        for fn in sorted(os.listdir(c_dir)):
+            if "train_failure" not in fn:
+                continue
+            try:
+                first = next(l for l in
+                             open(os.path.join(c_dir, fn),
+                                  errors="replace").read().splitlines()
+                             if l.strip())
+            except (OSError, StopIteration):
+                first = "(empty marker)"
+            print(f"C  {fn} ................................ "
+                  f"FAILED before torchrun: {first[:80]}")
+            rows += 1
+        if not rows:
+            print("C  no train_result and no train_failure files — "
+                  "nodes died before any evidence (check job console)")
     for i, tr in enumerate(c):
         print(f"C  node {i} ({tr.get('hostname')}) rc={tr.get('rc')} "
               f"steps={tr.get('steps_logged')} "
@@ -666,7 +687,8 @@ def main():
         print(f"[B] {json.dumps(b, ensure_ascii=False)}")
         if st != "SUCCEEDED" or not (b or {}).get("init_ok"):
             print(f"[B] HCCL probe failed (status={st}) — stopping before C")
-            print_decision_table(a, b, c, args.node_count, rdzv_mode, ws)
+            print_decision_table(a, b, c, args.node_count, rdzv_mode, ws,
+                                 c_dir=os.path.join(dl_root, "c"))
             return 1
     else:
         print("[B] skipped (--skip-b)")
@@ -749,7 +771,8 @@ def main():
     else:
         print("[C] skipped (pass --with-train to run it)")
 
-    print_decision_table(a, b, c, args.node_count, rdzv_mode, ws)
+    print_decision_table(a, b, c, args.node_count, rdzv_mode, ws,
+                         c_dir=os.path.join(dl_root, "c"))
     return 0
 
 
