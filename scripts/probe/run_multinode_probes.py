@@ -578,7 +578,7 @@ def main():
 
     # ── upload probe scripts -> {prefix}/assets (the job's code dir) ──
     scripts = ["probe_env_dump.sh", "probe_common.sh", "probe_hccl.sh",
-               "probe_hccl.py", "probe_train.sh"]
+               "probe_hccl.py", "probe_train.sh", "probe_train_wrap.py"]
     for s in scripts:
         src = os.path.join(PROBE_DIR, s)
         if not os.path.isfile(src):

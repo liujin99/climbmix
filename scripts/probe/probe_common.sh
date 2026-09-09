@@ -177,6 +177,32 @@ rdzv_tcp_probe() {
   rdzv_log "tcp probe $RDZV_MASTER_ADDR:$RDZV_MASTER_PORT -> $RDZV_TCP_RESULT (rc=$RDZV_TCP_RC ${RDZV_TCP_MS}ms)"
 }
 
+# Best-effort device-plane evidence for HCCL EI0015 postmortems: the
+# pod subnet in the rdzv json is NOT the fabric HCCL talks on. Device
+# RoCE IPs live in /etc/hccn.conf (host file; usually invisible inside
+# the container, but free to try) and npu-smi (bundled in some images).
+# The EI0015 "rank num != rank list size" signature seen on 6.x/7.x
+# pods implies duplicate/isolated device IPs -- this dump names them
+# when the container can see them. Never fatal, always rc 0.
+rdzv_dump_host_nets() {
+  local f
+  for f in /etc/hccn.conf /etc/ascend/ascend_install.info; do
+    if [ -f "$f" ]; then
+      echo "---- $f ----"
+      cat "$f" 2>/dev/null || true
+    fi
+  done
+  if command -v npu-smi >/dev/null 2>&1; then
+    echo "---- npu-smi info ----"
+    npu-smi info 2>/dev/null | head -40 || true
+  fi
+  if command -v ip >/dev/null 2>&1; then
+    echo "---- ip -4 addr ----"
+    ip -4 addr 2>/dev/null | grep -E '^[0-9]+:|inet ' || true
+  fi
+  return 0
+}
+
 rdzv_resolve() {
   local mode="${PROBE_RDZV_MODE:-auto}"
   case "$mode" in

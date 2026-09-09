@@ -33,6 +33,9 @@ BOOTLOG="$OUT/boot_$(hostname).log"
 exec > >(tee -a "$BOOTLOG") 2>&1
 export HCCL_CONNECT_TIMEOUT="${HCCL_CONNECT_TIMEOUT:-600}"
 
+# device-plane evidence (best-effort, into the boot log)
+rdzv_dump_host_nets
+
 # ── 1) assets: input mounts -> nanochat layout ──
 ln -sfn "$IN/d28_0"      "$BASE/base_checkpoints/$TAG"
 ln -sfn "$IN/tokenizer_0" "$BASE/tokenizer"
@@ -78,7 +81,9 @@ for d in datasets dotenv=python-dotenv fastapi filelock huggingface_hub \
   }
 done
 
-# ── 3) rendezvous + train ──
+# ── 3) rendezvous + train (wrapper breadcrumbs: a hung non-master
+#        node is otherwise invisible between import and the first
+#        collective traceback) ──
 rdzv_resolve || {
   echo "[probe C] FATAL: rendezvous failed on $(hostname)" \
        > "$OUT/train_failure_$(hostname).log"
@@ -92,7 +97,7 @@ export WANDB_MODE=disabled
 LOG="$OUT/mid_train_$(hostname).log"
 cd "$NANOCHAT"
 
-torchrun $(rdzv_torchrun_argv) -m scripts.mid_train -- \
+torchrun $(rdzv_torchrun_argv) "$CODE/probe_train_wrap.py" \
   --num-iterations="$STEPS" \
   --lr-scale=1.0 \
   --warmup-ratio=0.0 \

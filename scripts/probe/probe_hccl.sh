@@ -22,6 +22,9 @@ rdzv_resolve || {
 # the job until the driver's runtime timeout cancels it.
 export HCCL_CONNECT_TIMEOUT="${HCCL_CONNECT_TIMEOUT:-600}"
 
+# device-plane evidence for EI0015 postmortems (best-effort)
+rdzv_dump_host_nets > "$OUT/host_nets_$(hostname).log" 2>&1 || true
+
 cd "$CODE"
 exec torchrun $(rdzv_torchrun_argv) "$CODE/probe_hccl.py" \
   > "$OUT/hccl_torchrun_$(hostname).log" 2>&1
