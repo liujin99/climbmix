@@ -980,6 +980,33 @@ r = subprocess.run(
 check("dispatch: base_eval_check refuses multi-node",
       r.returncode != 0 and "single-node" in r.stdout + r.stderr)
 
+# Full main() walk with a mock backend + a fabricated launch_env: the
+# multi-node resolution (node_count from launch_env, base_check guard,
+# load-optimizer cross-check, the resolution print) must complete BEFORE
+# any use of base_check — the 2026-09-10 smoke hit UnboundLocalError at
+# exactly that spot (checks above never enter main()'s body).
+_mn_td = tempfile.mkdtemp(prefix="prod2disp_")
+with open(os.path.join(_mn_td, "launch_env.json"), "w") as f:
+    json.dump({"EXP_NAME": "x", "NUM_NPU": "8",
+               "NANOCHAT_BASE_DIR": os.path.join(_mn_td, "base"),
+               "NANOCHAT_DIR": os.path.join(_mn_td, "nc"),
+               "TARGET_ARM_NODES": "4", "TARGET_LOAD_OPTIMIZER": "0"}, f)
+with open(os.path.join(_mn_td, "remote_config.json"), "w") as f:
+    json.dump({"obs_prefix": "obs://b/p", "backend": "mock",
+               "storage_kind": "local",
+               "storage_root": os.path.join(_mn_td, "fakeobs")}, f)
+r = subprocess.run(
+    [sys.executable, os.path.join(REPO, "scripts",
+                                  "dispatch_target_arm.py"),
+     "--arm", "climb", "--output-dir", _mn_td],
+    capture_output=True, text=True, timeout=120)
+_out = r.stdout + r.stderr
+check("dispatch: main() passes multi-node resolution (no UnboundLocalError)",
+      "UnboundLocalError" not in _out
+      and "multi-node arm: node_count=4" in _out
+      and "mixed data not ready" in _out,
+      _out[-300:])
+
 for sh in ("runs/run_climbmix.sh", "runs/lib/target_arm.sh",
            "scripts/diagnostics/prod2_watch.sh"):
     r = subprocess.run(["bash", "-n", os.path.join(REPO, sh)],

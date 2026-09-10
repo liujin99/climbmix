@@ -469,6 +469,9 @@ def main() -> int:
     remote.npu_per_job = int(launch_env.get("NUM_NPU") or 8)
     remote.local_parallel = False
 
+    arm = args.arm
+    base_check = arm == "base_eval_check"
+
     # ── multi-node resolution (CLI > env > launch_env) ──
     node_count = (args.node_count if args.node_count is not None
                   else int(os.environ.get("TARGET_ARM_NODES") or 0)
@@ -495,9 +498,6 @@ def main() -> int:
         print(f"  [{args.arm}] multi-node arm: node_count={node_count} "
               f"(ws={node_count * 8}), load_optimizer={load_optimizer}, "
               f"timeout {job_timeout_h:.0f}h")
-
-    arm = args.arm
-    base_check = arm == "base_eval_check"
 
     # ── per-arm mutex + early exits ──
     os.makedirs(output_dir, exist_ok=True)
