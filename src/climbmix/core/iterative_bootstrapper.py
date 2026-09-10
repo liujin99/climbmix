@@ -95,6 +95,12 @@ class IterativeBootstrapper:
         # adaptive runs admit w_i * C_eff, not the literal e_i, so
         # _reconstruct_iteration_results must split by these. Persisted.
         self._realized_configs: List[int] = []
+        # Warm-start provenance (docs/reuse_design.md §4.2): set when the
+        # run's search_state.json was seeded by scripts/inject_history.py
+        # with points measured by EARLIER runs (pool/K/protocol verified
+        # there). Echoed on every re-save so it survives the whole run —
+        # the audit trail for "where did iteration 1's configs come from".
+        self._history_seed: Optional[Dict[str, Any]] = None
 
     def _is_better(self, score_a: float, score_b: float) -> bool:
         if self.metric_direction == "maximize":
@@ -139,6 +145,7 @@ class IterativeBootstrapper:
             "pending": self._pending,
             "realized_configs_per_iter": self._realized_configs,
             "last_c_eff": self._last_c_eff,
+            "history_seed": self._history_seed,
         }
         atomic_write_json(self.state_path, state)
         pend = ""
@@ -227,9 +234,19 @@ class IterativeBootstrapper:
             self._last_c_eff = int(c_eff) if c_eff else None
             self._last_completed_iter = state["last_completed_iter"]
             self._pending = state.get("pending")
+            # Warm-start provenance (docs/reuse_design.md §4.2): tolerant
+            # get — pre-injection states simply lack it.
+            self._history_seed = state.get("history_seed")
         except (KeyError, TypeError, ValueError):
             print(f"[Search] State file malformed, starting fresh: {self.state_path}")
             return 0
+        if self._history_seed:
+            hs = self._history_seed
+            pool_part = (f", pool_sha256={str(hs.get('pool_sha256'))[:12]}"
+                         if hs.get("pool_sha256") else "")
+            print(f"[Search] Warm-start seed: {hs.get('n_points')} history "
+                  f"points from {hs.get('source_runs')} "
+                  f"(injected {hs.get('injected_at')}{pool_part})")
         print(f"[Search] State loaded ← {self.state_path} (iter {self._last_completed_iter}, "
               f"{len(self._accumulated_configs)} configs)")
         return self._last_completed_iter

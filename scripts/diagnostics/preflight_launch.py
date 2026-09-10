@@ -262,11 +262,16 @@ def main():
     # ── 5. audit 短路 ──────────────────────────────────────────────
     print("── 5. arm audit files ──")
     if args.run_dir:
+        # Any arm incl. custom ones (docs/reuse_design.md §4.4) —
+        # target_arm_<name>.json with a path-safe name.
+        import re as _re
+        arm_files = sorted(
+            f for f in os.listdir(args.run_dir)
+            if _re.fullmatch(r"target_arm_[A-Za-z0-9_-]+\.json", f))
         found = 0
-        for arm in ("random", "climb", "base_eval_check"):
-            p = os.path.join(args.run_dir, f"target_arm_{arm}.json")
-            if not os.path.isfile(p):
-                continue
+        for af in arm_files:
+            arm = af[len("target_arm_"):-len(".json")]
+            p = os.path.join(args.run_dir, af)
             found += 1
             try:
                 d = json.load(open(p))

@@ -129,7 +129,15 @@ DEPTH=28  bash runs/train_base_model.sh   # d28 target checkpoint
 # Step 2: End-to-end validation first (minimal data, ~minutes)
 bash runs/speedrun_climbmix.sh
 
-# Step 3: Run full pipeline — d20 proxy search + d28 target + report (NPU)
+# Step 3: Production experiments — quadmix-style stage scripts
+# (run_<stage>_only = 从该阶段开始; 主入口三态: 从零/续跑=重跑同命令/热启动)
+# Each is self-contained: edit the env block at the top, then ./run it.
+#   LAUNCH=0 ./runs/xxx.sh  = dry-run (validate + print, no execution)
+bash runs/run_search_arms.sh     # 主实验 (d20 搜索 + 两臂; HISTORY_RUN=<旧run> = 热启动)
+bash runs/run_arm_only.sh        # 只跑臂 (自定义配比 WEIGHTS / 赢家重训 / 已有臂重发)
+bash runs/run_eval_only.sh       # 只评测 (base 锚点; 未来 d20 re-eval)
+bash runs/run_report_only.sh     # 只出报告 (分数重算 sidecar + 任意两臂 CP4 对比)
+# 原始入口 (上述脚本的底层引擎, 全参数 env 驱动):
 bash runs/run_climbmix.sh
 ```
 

@@ -1,7 +1,8 @@
-"""Prepare random baseline dataset for CLIMB validation.
+"""Prepare a baseline-arm dataset for CLIMB validation.
 
-Paper (Appendix C.1): "Random: randomly select data for language model
-training, where each cluster is assigned an equal and uniform weight."
+Default = the paper's Random baseline (Appendix C.1): "randomly select data
+for language model training, where each cluster is assigned an equal and
+uniform weight."
 
 So the baseline is NOT a uniform draw over documents — that would weight
 clusters by their natural size. It is the SAME mixture-weighted selection
@@ -17,6 +18,11 @@ with the weights pinned to uniform alpha_k = 1/K:
     (~1.9B-token quota per cluster); our smaller pools can hit them, and
     mirroring the CLIMB arm is the deviation-free choice (loudly logged).
   - same token budget cap as the CLIMB arm (--target-tokens)
+
+--weights (docs/reuse_design.md §4.4) generalizes this to ANY fixed ratio
+(comma list / JSON array / optimal_mixture_weights.json) — e.g. a
+hand-designed heuristic baseline, or re-prepping a previous run's winner
+mixture for a target-model retrain with changed training params.
 
 Cluster labels come from the search stage's cluster_cache.npz (final_labels,
 pool doc order == ShardMetadataManager order). A length mismatch fails
@@ -59,9 +65,46 @@ from climbmix.sampling.data_selector import select_data_by_mixture
 from climbmix.utils.token_estimate import parse_token_count
 
 
+def _parse_weights(spec: str, K: int) -> np.ndarray:
+    """Custom mixture weights for a baseline arm (docs/reuse_design.md §4.4).
+
+    Accepts a comma list ("0.25,0.25,0.25,0.25"), a JSON array file, or an
+    optimal_mixture_weights.json dict ({"C0": w0, ...} — cluster labels
+    sorted numerically). Returns the normalized K-vector; uniform = the
+    paper's random baseline (default when --weights is absent).
+    """
+    if os.path.isfile(spec):
+        with open(spec) as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            try:
+                items = sorted(
+                    data.items(),
+                    key=lambda kv: int(str(kv[0]).lstrip("Cc")))
+            except ValueError:
+                raise SystemExit(
+                    "ERROR: --weights dict keys must be C0..C{k-1} "
+                    "(optimal_mixture_weights.json format)")
+            vec = [float(v) for _, v in items]
+        else:
+            vec = [float(v) for v in data]
+    else:
+        vec = [float(x) for x in spec.split(",") if x.strip() != ""]
+    if len(vec) != K:
+        raise SystemExit(
+            f"ERROR: --weights has {len(vec)} entries but the cluster cache "
+            f"has K={K} — dimension mismatch")
+    arr = np.array(vec, dtype=np.float64)
+    if not np.all(np.isfinite(arr)) or np.any(arr < 0) or arr.sum() <= 0:
+        raise SystemExit("ERROR: --weights must be finite, >= 0, sum > 0")
+    return arr / arr.sum()
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Equal-cluster-weight random baseline (paper App. C.1)")
+        description="Baseline-arm STEM shards from cluster weights "
+                    "(default: equal 1/K, paper App. C.1 random baseline; "
+                    "--weights: any fixed ratio, docs/reuse_design.md §4.4)")
     parser.add_argument("--data-dir", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--cluster-cache", required=True,
@@ -73,6 +116,10 @@ def main():
                         help="Token budget, same cap as the CLIMB arm's "
                              "--target-tokens (0 = all available; suffixes "
                              "2B/10M/500K supported)")
+    parser.add_argument("--weights", default="",
+                        help="comma list, JSON array file, or "
+                             "optimal_mixture_weights.json (dict C0..C{k-1}); "
+                             "default = uniform 1/K (paper random baseline)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-npu", type=int, default=8)
     args = parser.parse_args()
@@ -101,12 +148,21 @@ def main():
     K = len(np.unique(labels[labels >= 0]))
     target_tokens = args.target_tokens or int(token_counts.sum())
 
-    print(f"\n[Random] Equal-weight baseline: K={K} clusters, "
-          f"alpha_k=1/{K}, target_tokens={target_tokens:,}")
+    if args.weights:
+        weights_vec = _parse_weights(args.weights, K)
+        mode = "custom fixed-ratio baseline (docs/reuse_design.md §4.4)"
+    else:
+        weights_vec = np.full(K, 1.0 / K, dtype=np.float64)
+        mode = "equal-weight baseline (paper App. C.1 random)"
 
-    uniform = MixtureWeights(weights=np.full(K, 1.0 / K, dtype=np.float64))
+    print(f"\n[Random] {mode}: K={K} clusters, "
+          f"target_tokens={target_tokens:,}")
+    print(f"[Random] planned weights: "
+          + ", ".join(f"{w:.4f}" for w in weights_vec))
+
+    mixture = MixtureWeights(weights=weights_vec)
     selected, _ = select_data_by_mixture(
-        labels, uniform, token_counts=token_counts,
+        labels, mixture, token_counts=token_counts,
         target_tokens=target_tokens, seed=args.seed,
     )
 
@@ -116,23 +172,23 @@ def main():
     cluster_tokens = np.bincount(sel_labels, weights=sel_tokens,
                                  minlength=K).tolist()
     avail_docs = np.bincount(labels[labels >= 0], minlength=K).tolist()
-    quota_tokens = target_tokens // K
+    quota_tokens = (weights_vec * target_tokens).astype(np.int64).tolist()
 
-    print(f"[Random] Per-cluster plan (quota={quota_tokens:,} tokens each):")
+    print(f"[Random] Per-cluster plan (quota = w_k x target_tokens):")
     shortfall = []
     for k in range(K):
-        short = cluster_tokens[k] < quota_tokens * 0.999
+        short = cluster_tokens[k] < quota_tokens[k] * 0.999
         if short:
             shortfall.append(k)
         marker = "  <- SHORTFALL (took all docs, no duplication)" if short else ""
         print(f"  [{k:>2d}] avail {avail_docs[k]:>9,} docs "
-              f"({cluster_tokens[k] if short else quota_tokens:>12,} tok) "
+              f"({cluster_tokens[k] if short else quota_tokens[k]:>12,} tok) "
               f"-> took {cluster_docs[k]:>9,} docs{marker}")
     if shortfall:
         print(f"[Random] NOTE: {len(shortfall)}/{K} clusters cannot fill their "
-              f"1/K quota (same policy as the CLIMB arm: take all, no "
+              f"planned quota (same policy as the CLIMB arm: take all, no "
               f"duplication, no redistribution) — effective weights deviate "
-              f"from uniform for those clusters")
+              f"from plan for those clusters")
     n = len(selected)
     print(f"[Random] Selected {n:,} docs, "
           f"{int(sum(cluster_tokens)):,} tokens "
@@ -194,7 +250,7 @@ def main():
             "n_train_shards": n_shards, "val_docs": val_n,
             "rg_size": rg_size, "num_npu": args.num_npu, "seed": args.seed,
             "K": K, "target_tokens": target_tokens,
-            "planned_weights": [1.0 / K] * K,
+            "planned_weights": [float(w) for w in weights_vec],
             "effective_doc_shares": [d / n for d in cluster_docs],
             "cluster_docs": cluster_docs,
             "cluster_tokens": cluster_tokens,

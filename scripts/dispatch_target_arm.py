@@ -82,6 +82,8 @@ from climbmix.remote.job_api import JobStatus, TransientSubmitError  # noqa: E40
 from climbmix.pipeline.nanochat_cmds import (  # noqa: E402
     build_target_mid_train_cmd, build_target_eval_cmd)
 from climbmix.remote.remote_executor import RemoteConfig, RemoteExecutor  # noqa: E402
+from climbmix.sampling.single_pass import (  # noqa: E402
+    check_single_pass, measure_train_tokens, read_total_batch_size)
 
 
 # ── helpers ──────────────────────────────────────────────────────────────
@@ -438,6 +440,11 @@ def main() -> int:
                         "(fail if the asset is missing)")
     p.add_argument("--retry-failed", action="store_true",
                    help="re-attempt remote even if a prior dispatch failed")
+    p.add_argument("--total-batch-size", type=int, default=None,
+                   help="single-pass guard override (default: read from the "
+                        "local d28 base ckpt's meta_*.json)")
+    p.add_argument("--max-epochs", type=float, default=1.02,
+                   help="single-pass guard threshold (default 1.02)")
     p.add_argument("--wait-cluster-min", type=float, default=120.0,
                    help="random arm: max minutes to wait for the cluster "
                          "cache + balanced profile (default 120)")
@@ -621,6 +628,34 @@ def main() -> int:
             raise SystemExit(
                 f"✗ [{arm}] mixed data not ready (no .done in {data_dir}) — "
                 f"the main script will prep it and re-dispatch / fall back")
+
+        # Single-pass (epoch<=1) guard, BEFORE submitting a multi-hour job:
+        # nanochat's loader wraps silently when the mixture runs out, so
+        # TARGET_STEPS x total_batch_size must not exceed the measured pool
+        # (src/climbmix/sampling/single_pass.py). run_climbmix.sh guards the
+        # same condition on its side — this copy covers the independently
+        # launched dispatch process (nohup ... --arm random).
+        tbs = args.total_batch_size or read_total_batch_size(
+            os.path.join(nanochat_base_dir, "base_checkpoints",
+                         f"d{target_depth}"))
+        if not tbs:
+            raise SystemExit(
+                f"✗ [{arm}] cannot resolve total_batch_size for the "
+                f"single-pass guard (no meta_*.json in "
+                f"{nanochat_base_dir}/base_checkpoints/d{target_depth}) — "
+                f"pass --total-batch-size")
+        try:
+            pool_tokens = measure_train_tokens(data_dir)
+            info = check_single_pass(
+                int(launch_env.get("TARGET_STEPS") or "1000"),
+                tbs, pool_tokens,
+                stem_ratio=float(launch_env.get("STEM_RATIO") or "0.7"),
+                max_epochs=args.max_epochs, context=f"{arm} arm")
+        except (ValueError, FileNotFoundError) as e:
+            raise SystemExit(f"✗ {e}")
+        print(f"  [{arm}] single-pass OK: {info['epochs_x100'] / 100:.2f} "
+              f"epoch (consume {info['consume_tokens']:,} <= pool "
+              f"{pool_tokens:,} tokens)", flush=True)
 
     # ── executor: publishes the worker bundle + nanochat code, and hands
     # us the backend's job_api / obs / worker-path convention (identical
