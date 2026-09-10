@@ -193,18 +193,21 @@ speedrun 不变。
   概念;冷启动反而更贴字面语义。WSD 退火的 lr/warmdown 全部继承自
   预训练 meta(user_config),不受影响;冷启动的 bias correction 与
   Muon 零动量对两臂完全对称。
-- **Phase 1.5(2026-09-10):多节点 eval**。Phase 1 最初保守地把 eval
-  留在 node 0 单节点 8-rank("与锚点同口径");代码审计证明该顾虑不
-  成立:base_eval 的 per-sample 跨步切分(`my_indices = range(rank,
-  len(data), world_size)`,core_eval.py:344/441)+ 全长 correct/nlls
-  张量 all_reduce(SUM) 聚合,每个样本恰好被评一次,均值与 world size
-  无关(残余差异仅浮点求和顺序 ~1e-7,远小于二项 SE ~0.01)。故 eval
-  torchrun 与训练同拓扑(8×node_count rank,rdzv 端口 = 训练端口+1),
-  ~4× 提速且利用非主节点闲置卡;模型文件由全局 rank 0 写入跨节点共享
-  的输出挂载(探针 C 实证),各节点私有 `_eval_base[_node{r}]` 可读;
-  node 0 独占 CSV/checkpoint/result.json,ckpt 上传移至 eval 后。base
-  锚点(base_eval_check)保持单节点 8 卡(eval-only 作业,其口径由不变
-  性保证与 32 卡臂可比)。
+- **Phase 1.5(2026-09-10,当日回退):多节点 eval 不可行——平台无跨节
+  点文件可见性**。曾计划让 eval torchrun 与训练同拓扑(8×node_count
+  rank,~4× 提速);world-size 不变性本身成立(base_eval 的 per-sample
+  跨步切分 `my_indices = range(rank, len(data), world_size)`,
+  core_eval.py:344/441 + 全长 correct/nlls 张量 all_reduce(SUM),每样本
+  恰好被评一次,残余差异仅浮点求和顺序 ~1e-7)。但前提"模型文件跨节点
+  可读"被 4 节点冒烟(run 0910_154644)证伪:训练 checkpoint 由全局
+  rank 0 写入**节点本地**的 nanochat_base,而平台输出挂载为节点本地盘
+  + 单向上行 OBS 同步(探针 A 20260908 两次作业、每节点实测
+  `NOT-visible (saw 1/2 after 90s)`;容器无 OBS SDK)——探针 C 的
+  "4 节点分片汇于一处"实为各节点 train_result 上传同一 OBS 前缀后的
+  聚合假象,节点 1-3 建出空 `_eval_base_node{r}` 后
+  FileNotFoundError。回退方案:eval 保持 node 0 单节点 8-rank(与锚点
+  同口径,prod2 验证过的路径),非主节点训练后上传日志即退出(提前归
+  还 24 张卡),训练仍 4 节点(主要收益 ~3h 保留)。
 
 ## 已核对一致(正向审计)
 

@@ -23,17 +23,21 @@ Flow (single-node, spec node_count=1 — today's form):
 Multi-node (spec v3 node_count>1, the Phase-1 d28 target arms): the SAME
 worker runs on EVERY node of the job. Each node resolves its rendezvous
 (platform MASTER_* env or the k8s StatefulSet DNS the job runs as) and
-retargets the torchrun launcher prefixes (nanochat_cmds); the argv after
-"-m" stays pinned by the spec. Roles: every node trains AND evals — the
-eval torchrun spans all 8*node_count ranks (Phase 1.5; base_eval's
-per-sample striding + all_reduce aggregation is world-size invariant, so
-scores match the 8-rank form while ~node_count x faster). Each node uses
-its own private _eval_base[_node{r}] dir (the work mount is cross-node
-shared) and uploads mid_train[_node{r}].log + eval[_node{r}].log. Node 0
-additionally owns the eval CSV, the checkpoint upload and result.json
-(uploaded after eval so non-master ranks do not idle at the eval
-rendezvous); node r>0 exits with its combined rc. The job succeeds only
-if every node exits 0.
+retargets the TRAIN torchrun launcher prefix (nanochat_cmds); the argv
+after "-m" stays pinned by the spec. Roles: every node trains, but only
+node 0 evals. The trained model exists ONLY on node 0 — save_checkpoint's
+rank-0 write lands in that node's local nanochat_base — and there is no
+cross-node path to it: the platform output mount is per-node local with
+one-way local->OBS sync (probe A 20260908, both probe jobs: "NOT-visible
+(saw 1/2 after 90s)" on every node) and containers carry no OBS SDK.
+The all-nodes eval of Phase 1.5 (2026-09-10) died on exactly this in the
+4-node smoke run 0910_154644: nodes 1-3 built empty _eval_base_node{r}
+farms and FileNotFoundError'd — reverted the same day. Nodes r>0 upload
+mid_train[_node{r}].log and exit right after train (their cards go back
+to the pool during node 0's eval). Node 0 runs the spec's ORIGINAL
+single-node (8-rank, --standalone) eval and owns the eval CSV, the
+checkpoint upload and result.json. The job succeeds only if every node
+exits 0.
 
 Progress visibility: a daemon thread streams the IN-PROGRESS mid_train.log
 and eval.log to {result_uri} every log_stream_s seconds (spec field, default
@@ -336,30 +340,16 @@ def main() -> int:
         s["mid_train_cmd"] = nanochat_cmds.retarget_torchrun_multinode(
             s["mid_train_cmd"], node_count, node_rank,
             master_addr, master_port)
-        # Eval joins ALL nodes too (Phase 1.5): base_eval's per-sample
-        # striding + all_reduce aggregation is world-size invariant
-        # (nanochat core_eval.py evaluate_task / evaluate_generation_task),
-        # so ws = 8*node_count evals are score-identical to 8-rank ones
-        # while ~node_count x faster and using the idle non-master cards.
-        # Port +1: the train torchrun's TCPStore may sit in TIME_WAIT;
-        # a fresh port is deterministic on every node (same spec).
-        s["eval_cmd"] = nanochat_cmds.retarget_torchrun_multinode(
-            s["eval_cmd"], node_count, node_rank,
-            master_addr, master_port + 1)
+        # The eval cmd is NOT retargeted: only node 0 runs it (see the
+        # header docstring — the model file cannot cross nodes on this
+        # platform), and node 0's copy is the spec's original single-node
+        # 8-rank --standalone invocation.
         print(f"[worker] multi-node job: node {node_rank}/{node_count}, "
               f"master {master_addr}:{master_port} "
-              f"(eval rdzv port {master_port + 1})", flush=True)
+              f"(eval on node 0)", flush=True)
     train_log_name = ("mid_train.log" if node_rank == 0
                       else f"mid_train_node{node_rank}.log")
-    eval_log_name = ("eval.log" if node_rank == 0
-                     else f"eval_node{node_rank}.log")
-    # Private eval base dir per NODE: work_dir sits on the cross-node
-    # shared output mount (Phase-0 probe A), and make_eval_base_dir
-    # rmtree's + rebuilds its dir — four concurrent rebuilds of one path
-    # would race. Node 0 keeps the canonical name (claim_eval_csv, CSV
-    # discovery); non-master nodes get their own suffix.
-    eval_base_subdir = ("_eval_base" if node_rank == 0
-                        else f"_eval_base_node{node_rank}")
+    eval_log_name = "eval.log"
 
     # Live progress: stream the in-progress logs to the result prefix
     # while the stages run (0/absent disables — final uploads only).
@@ -489,17 +479,27 @@ def main() -> int:
                     stop_stream()
                     return mid_rc
                 return finish(mid_rc)
+            if node_count > 1 and node_rank != 0:
+                # Non-master node: train was this node's LAST stage. The
+                # trained model exists only on node 0 (rank-0 save) and
+                # no cross-node path can deliver it here (probe A
+                # 20260908: the output mount is per-node local, one-way
+                # to OBS), so there is nothing for this node in eval.
+                # Land the train log and release the cards back to the
+                # pool while node 0 runs the 8-rank eval.
+                try:
+                    storage.upload_file(os.path.join(work, train_log_name),
+                                        f"{result_uri}/{train_log_name}")
+                except Exception:
+                    traceback.print_exc()  # log delivery is best-effort
+                stop_stream()
+                return 0
 
         # Eval in a PRIVATE base dir (symlink farm — identical to local).
-        # Multi-node: EVERY node runs the retargeted eval (Phase 1.5) —
-        # the all_reduce rendezvous requires all node_count x nproc ranks;
-        # a node skipping eval would hang the rest at init_process_group
-        # until timeout. The model file is readable on every node: train's
-        # save_checkpoint writes it from global rank 0 into the shared
-        # output mount (Phase-0 probe C: shards from all 4 nodes in one
-        # dir), and each node's private eval_base just symlinks that dir.
-        eval_base = nanochat_cmds.make_eval_base_dir(
-            base, work, tag, subdir=eval_base_subdir)
+        # Single-node semantics even in multi-node jobs: only node 0
+        # reaches here, the model is in ITS base dir, and the spec's
+        # eval_cmd is the original unmodified single-node invocation.
+        eval_base = nanochat_cmds.make_eval_base_dir(base, work, tag)
         env = nanochat_cmds.build_subprocess_env(
             s["nanochat_dir"], base,
             device_ids=s.get("visible_devices") or [0],
@@ -519,17 +519,9 @@ def main() -> int:
                 except Exception:
                     traceback.print_exc()  # log delivery is best-effort
 
-        if node_count > 1 and node_rank != 0:
-            # Non-master node: eval was this node's last stage. The CSV
-            # (rank-0-only writer), result.json and the checkpoint upload
-            # are master-owned — a second writer would clobber them. Exit
-            # code = combined rc: the multi-node job succeeds only when
-            # EVERY node exits 0.
-            return 0 if (mid_rc == 0 and eval_rc == 0) else (mid_rc or eval_rc)
-
         # Node 0 (or any single-node run): land the artifacts. The
-        # checkpoint upload sits AFTER eval so the non-master ranks do
-        # not idle at the eval rendezvous during a GB-scale upload; the
+        # checkpoint upload sits AFTER eval so the eval starts on a quiet
+        # machine (no GB-scale upload competing for the mount); the
         # mid_rc==0 guard keeps eval-failure paths from losing the
         # checkpoint (an eval-only retry needs it).
         if not eval_only and s.get("upload_checkpoint", True) \

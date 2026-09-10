@@ -343,13 +343,14 @@ def download_result_json(obs, result_uri: str) -> Optional[Dict]:
 
 def land_logs(obs, result_uri: str, output_dir: str, arm: str,
               node_count: int = 1) -> None:
-    """Land the master's mid_train.log/eval.log (as before) plus every
-    non-master node's mid_train_node{r}.log and eval_node{r}.log when the
-    arm ran multi-node (Phase 1.5: all nodes join the eval torchrun)."""
+    """Land the master's mid_train.log/eval.log plus every non-master
+    node's mid_train_node{r}.log when the arm ran multi-node. Nodes r>0
+    exit right after train (eval is node-0 only: the model file cannot
+    cross nodes — per-node output mounts, probe A 20260908), so they
+    produce no eval logs."""
     names = ["mid_train.log", "eval.log"] + [
-        f"{stem}_node{r}.log"
-        for r in range(1, max(1, node_count))
-        for stem in ("mid_train", "eval")]
+        f"mid_train_node{r}.log"
+        for r in range(1, max(1, node_count))]
     for name in names:
         src = f"{result_uri.rstrip('/')}/{name}"
         if name == "mid_train.log":
@@ -404,7 +405,10 @@ def main() -> int:
     p = argparse.ArgumentParser(
         description="dispatch a d28 target arm (or base anchor) as a remote job")
     p.add_argument("--arm", required=True,
-                   choices=["random", "climb", "base_eval_check"])
+                   help="'random' | 'climb' | 'base_eval_check' | any custom "
+                        "name [A-Za-z0-9_-]+ (docs/reuse_design.md §4.4: "
+                        "fixed-ratio baseline / winner retrain — requires "
+                        "--data-dir pointing at a pre-mixed dir with .done)")
     p.add_argument("--remote-config", default="",
                    help="RemoteConfig JSON (default: $OUTPUT_DIR/remote_config.json)")
     p.add_argument("--output-dir", default="",
@@ -439,6 +443,16 @@ def main() -> int:
                          "cache + balanced profile (default 120)")
     p.add_argument("--cluster-poll-s", type=float, default=60.0)
     args = p.parse_args()
+
+    # Custom arms (docs/reuse_design.md §4.4): any name beyond the three
+    # known ones flows through the generic climb-like path (lock/.done/
+    # audit/tag/OBS target_arms/<name>/). The name lands in file paths and
+    # job names — restrict it to path-safe characters.
+    if args.arm not in ("random", "climb", "base_eval_check") \
+            and not re.fullmatch(r"[A-Za-z0-9_-]+", args.arm):
+        raise SystemExit(
+            f"✗ custom --arm '{args.arm}' must match [A-Za-z0-9_-]+ "
+            f"(it becomes file names, model tags and OBS paths)")
 
     if args.node_count is not None:
         _validate_node_count(args.node_count, "--node-count")

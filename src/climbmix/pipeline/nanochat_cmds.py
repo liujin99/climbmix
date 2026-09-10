@@ -474,10 +474,12 @@ def make_eval_base_dir(
     things it WRITES ({base_eval}/ CSV, {report}/) are private real dirs
     inside exp_dir.
 
-    subdir: the private dir's name under exp_dir. Multi-node workers pass
-    a per-node suffix (_eval_base_node{r}) — exp_dir can sit on the
-    cross-node shared output mount, and this function rmtree's + rebuilds
-    its target, so concurrent nodes must not share one path.
+    subdir: the private dir's name under exp_dir. Multi-node workers once
+    passed a per-node suffix (_eval_base_node{r}, Phase 1.5 2026-09-10) —
+    reverted the same day when the 4-node smoke showed the model file
+    cannot cross nodes (per-node output mounts), so eval is node-0 only
+    and always uses the canonical name. The param stays for callers that
+    want an isolated farm at a custom path.
     """
     eval_base = os.path.join(exp_dir, subdir)
     # Rebuild from scratch on every eval attempt: a previously crashed
