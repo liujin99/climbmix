@@ -484,6 +484,19 @@ check("retarget: module tail byte-identical to the spec's argv",
       _mn[6:] == _mn_base[_mn_base.index("-m"):])
 check("retarget: single-node argv keeps --standalone until retargeted",
       "--standalone" in _mn_base and "--standalone" not in _mn)
+# Phase 1.5: the EVAL argv retargets identically (its --standalone is
+# dropped; the worker passes master_port+1 — train's TCPStore may sit in
+# TIME_WAIT when eval starts).
+_ev_base = build_target_eval_cmd(
+    model_tag="d28_x", eval_benchmarks="stem", eval_max_per_task="-1",
+    device_batch_size="16", core_batch_size="8", nproc_per_node=8)
+_ev = retarget_torchrun_multinode(_ev_base, 4, 3, "10.3.0.1", 29501)
+check("retarget: eval argv (--standalone dropped, port+1, rank)",
+      _ev[:6] == ["torchrun", "--nnodes=4", "--node_rank=3",
+                  "--master_addr=10.3.0.1", "--master_port=29501",
+                  "--nproc_per_node=8"]
+      and "--standalone" not in _ev
+      and _ev[6:] == _ev_base[_ev_base.index("-m"):])
 for _bad in (["python3", "-m", "x"],
              ["torchrun", "-m", "x"],
              ["torchrun", "--standalone", "-m", "x"]):
@@ -669,29 +682,46 @@ with tempfile.TemporaryDirectory(prefix="prod2mn_") as mn_td:
           and "--master_addr=127.0.0.1" in rec_n0
           and "--master_port=29511" in rec_n0
           and "--standalone" not in rec_n0.split("=== call ===")[0])
-    check("worker sim: node0 eval stays single-node 8-rank",
+    # Phase 1.5: the eval call ALSO retargets (all nodes join the eval
+    # torchrun; port = train port + 1 to dodge TIME_WAIT).
+    check("worker sim: node0 eval retargeted too (port+1, no standalone)",
           rec_n0.count("=== call ===") == 2
-          and "--standalone" in rec_n0.split("=== call ===")[1]
-          and "--nnodes" not in rec_n0.split("=== call ===")[1])
+          and "--nnodes=2" in rec_n0.split("=== call ===")[1]
+          and "--node_rank=0" in rec_n0.split("=== call ===")[1]
+          and "--master_port=29512" in rec_n0.split("=== call ===")[1]
+          and "--standalone" not in rec_n0.split("=== call ===")[1])
     res_json = json.load(open(res_local))
     check("worker sim: master owns result.json (train+eval rc 0)",
           res_json["mid_train_rc"] == 0 and res_json["eval_rc"] == 0
           and res_json["csv"] is None)  # stub eval writes no CSV
+    n0_ckpt = os.path.join(mn_root, "b", "p", "arms", "x", "result",
+                           "mid_checkpoint", "model_000100.pt")
+    check("worker sim: master ckpt landed after eval (post-eval upload)",
+          os.path.isfile(n0_ckpt))
+    with open(res_local) as f:
+        res_before_n1 = f.read()
 
     os.remove(argv_rec)
     r_n1 = run_worker(mn_spec(2), 1)
     check("worker sim: multi-node node1 exit 0", r_n1.returncode == 0,
           r_n1.stdout[-400:] + r_n1.stderr[-400:])
     rec_n1 = open(argv_rec).read()
-    check("worker sim: node1 train only, retargeted rank 1",
-          rec_n1.count("=== call ===") == 1 and "--node_rank=1" in rec_n1
-          and "--nnodes=2" in rec_n1)
-    check("worker sim: node1 does NOT touch master's result.json",
-          json.load(open(res_local))["eval_rc"] == 0)
-    node1_log = os.path.join(mn_root, "b", "p", "arms", "x", "result",
-                             "mid_train_node1.log")
-    check("worker sim: node1 uploads its own mid_train_node1.log",
-          os.path.isfile(node1_log))
+    check("worker sim: node1 train + eval both retargeted rank 1",
+          rec_n1.count("=== call ===") == 2 and "--node_rank=1" in rec_n1
+          and "--nnodes=2" in rec_n1
+          and "--master_port=29511" in rec_n1.split("=== call ===")[0]
+          and "--master_port=29512" in rec_n1.split("=== call ===")[1])
+    # node 1 must not touch master-owned artifacts: result.json stays
+    # byte-identical to node 0's copy.
+    with open(res_local) as f:
+        check("worker sim: node1 does NOT touch master's result.json",
+              f.read() == res_before_n1)
+    node1_train_log = os.path.join(mn_root, "b", "p", "arms", "x", "result",
+                                   "mid_train_node1.log")
+    node1_eval_log = os.path.join(mn_root, "b", "p", "arms", "x", "result",
+                                  "eval_node1.log")
+    check("worker sim: node1 uploads own train + eval logs",
+          os.path.isfile(node1_train_log) and os.path.isfile(node1_eval_log))
     master_log = os.path.join(mn_root, "b", "p", "arms", "x", "result",
                               "mid_train.log")
     check("worker sim: master's mid_train.log present",
@@ -731,6 +761,15 @@ os.makedirs(os.path.join(_bd2, "tokenizer"))
 _eb2 = staged_cmds.make_eval_base_dir(_bd2, tempfile.mkdtemp(), "d20_x7")
 check("eval_base: mid-only exp unaffected (no base_checkpoints link)",
       not os.path.exists(os.path.join(_eb2, "base_checkpoints")))
+# Phase 1.5: per-node subdir — concurrent multi-node workers must not
+# share one rmtree'd path on the cross-node shared work mount.
+_eb3 = staged_cmds.make_eval_base_dir(
+    _bd, tempfile.mkdtemp(prefix="prod2exp_"), "d28",
+    subdir="_eval_base_node1")
+check("eval_base: per-node subdir honored (same farm, own path)",
+      os.path.basename(_eb3) == "_eval_base_node1"
+      and os.path.realpath(os.path.join(_eb3, "mid_checkpoints", "d28"))
+      == os.path.join(_bd, "mid_checkpoints", "d28"))
 
 # RemoteConfig roundtrip with the new knob
 rc = RemoteConfig.from_dict({"obs_prefix": "obs://b/p", "backend": "mock",

@@ -14,6 +14,10 @@ test_output_*/
 temp/
 result/
 
+# Company-asset experiment data hand-carried from the intranet server for
+# local analysis (repo is PUBLIC — data/models NEVER go into git)
+archive/
+
 *.parquet
 *.npz
 *.npy

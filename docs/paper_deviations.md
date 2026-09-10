@@ -193,6 +193,18 @@ speedrun 不变。
   概念;冷启动反而更贴字面语义。WSD 退火的 lr/warmdown 全部继承自
   预训练 meta(user_config),不受影响;冷启动的 bias correction 与
   Muon 零动量对两臂完全对称。
+- **Phase 1.5(2026-09-10):多节点 eval**。Phase 1 最初保守地把 eval
+  留在 node 0 单节点 8-rank("与锚点同口径");代码审计证明该顾虑不
+  成立:base_eval 的 per-sample 跨步切分(`my_indices = range(rank,
+  len(data), world_size)`,core_eval.py:344/441)+ 全长 correct/nlls
+  张量 all_reduce(SUM) 聚合,每个样本恰好被评一次,均值与 world size
+  无关(残余差异仅浮点求和顺序 ~1e-7,远小于二项 SE ~0.01)。故 eval
+  torchrun 与训练同拓扑(8×node_count rank,rdzv 端口 = 训练端口+1),
+  ~4× 提速且利用非主节点闲置卡;模型文件由全局 rank 0 写入跨节点共享
+  的输出挂载(探针 C 实证),各节点私有 `_eval_base[_node{r}]` 可读;
+  node 0 独占 CSV/checkpoint/result.json,ckpt 上传移至 eval 后。base
+  锚点(base_eval_check)保持单节点 8 卡(eval-only 作业,其口径由不变
+  性保证与 32 卡臂可比)。
 
 ## 已核对一致(正向审计)
 

@@ -458,6 +458,7 @@ def make_eval_base_dir(
     exp_dir: str,
     model_tag: str,
     log=print,
+    subdir: str = "_eval_base",
 ) -> str:
     """Private NANOCHAT_BASE_DIR for one experiment's eval subprocess.
 
@@ -472,8 +473,13 @@ def make_eval_base_dir(
     Everything the eval READS is symlinked to the real shared data; the two
     things it WRITES ({base_eval}/ CSV, {report}/) are private real dirs
     inside exp_dir.
+
+    subdir: the private dir's name under exp_dir. Multi-node workers pass
+    a per-node suffix (_eval_base_node{r}) — exp_dir can sit on the
+    cross-node shared output mount, and this function rmtree's + rebuilds
+    its target, so concurrent nodes must not share one path.
     """
-    eval_base = os.path.join(exp_dir, "_eval_base")
+    eval_base = os.path.join(exp_dir, subdir)
     # Rebuild from scratch on every eval attempt: a previously crashed
     # eval may have left a partial CSV or download in the private dirs.
     shutil.rmtree(eval_base, ignore_errors=True)

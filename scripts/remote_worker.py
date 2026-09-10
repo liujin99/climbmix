@@ -23,12 +23,17 @@ Flow (single-node, spec node_count=1 — today's form):
 Multi-node (spec v3 node_count>1, the Phase-1 d28 target arms): the SAME
 worker runs on EVERY node of the job. Each node resolves its rendezvous
 (platform MASTER_* env or the k8s StatefulSet DNS the job runs as) and
-retargets the torchrun launcher prefix (nanochat_cmds); the training argv
-after "-m" stays pinned by the spec. Roles: every node trains; node 0
-additionally uploads the checkpoint, runs eval (single-node 8-rank), and
-owns result.json + mid_train.log; node r>0 exits with its train rc after
-uploading mid_train_node{r}.log. The job succeeds only if every node
-exits 0.
+retargets the torchrun launcher prefixes (nanochat_cmds); the argv after
+"-m" stays pinned by the spec. Roles: every node trains AND evals — the
+eval torchrun spans all 8*node_count ranks (Phase 1.5; base_eval's
+per-sample striding + all_reduce aggregation is world-size invariant, so
+scores match the 8-rank form while ~node_count x faster). Each node uses
+its own private _eval_base[_node{r}] dir (the work mount is cross-node
+shared) and uploads mid_train[_node{r}].log + eval[_node{r}].log. Node 0
+additionally owns the eval CSV, the checkpoint upload and result.json
+(uploaded after eval so non-master ranks do not idle at the eval
+rendezvous); node r>0 exits with its combined rc. The job succeeds only
+if every node exits 0.
 
 Progress visibility: a daemon thread streams the IN-PROGRESS mid_train.log
 and eval.log to {result_uri} every log_stream_s seconds (spec field, default
@@ -331,16 +336,37 @@ def main() -> int:
         s["mid_train_cmd"] = nanochat_cmds.retarget_torchrun_multinode(
             s["mid_train_cmd"], node_count, node_rank,
             master_addr, master_port)
+        # Eval joins ALL nodes too (Phase 1.5): base_eval's per-sample
+        # striding + all_reduce aggregation is world-size invariant
+        # (nanochat core_eval.py evaluate_task / evaluate_generation_task),
+        # so ws = 8*node_count evals are score-identical to 8-rank ones
+        # while ~node_count x faster and using the idle non-master cards.
+        # Port +1: the train torchrun's TCPStore may sit in TIME_WAIT;
+        # a fresh port is deterministic on every node (same spec).
+        s["eval_cmd"] = nanochat_cmds.retarget_torchrun_multinode(
+            s["eval_cmd"], node_count, node_rank,
+            master_addr, master_port + 1)
         print(f"[worker] multi-node job: node {node_rank}/{node_count}, "
-              f"master {master_addr}:{master_port}", flush=True)
+              f"master {master_addr}:{master_port} "
+              f"(eval rdzv port {master_port + 1})", flush=True)
     train_log_name = ("mid_train.log" if node_rank == 0
                       else f"mid_train_node{node_rank}.log")
+    eval_log_name = ("eval.log" if node_rank == 0
+                     else f"eval_node{node_rank}.log")
+    # Private eval base dir per NODE: work_dir sits on the cross-node
+    # shared output mount (Phase-0 probe A), and make_eval_base_dir
+    # rmtree's + rebuilds its dir — four concurrent rebuilds of one path
+    # would race. Node 0 keeps the canonical name (claim_eval_csv, CSV
+    # discovery); non-master nodes get their own suffix.
+    eval_base_subdir = ("_eval_base" if node_rank == 0
+                        else f"_eval_base_node{node_rank}")
 
     # Live progress: stream the in-progress logs to the result prefix
     # while the stages run (0/absent disables — final uploads only).
     stream_names = ["mid_train.log", "eval.log", "embed.log"]
-    if train_log_name not in stream_names:
-        stream_names.append(train_log_name)
+    for log_name in (train_log_name, eval_log_name):
+        if log_name not in stream_names:
+            stream_names.append(log_name)
     stop_stream = start_log_streamer(
         storage, work, result_uri,
         float(s.get("log_stream_s", LOG_STREAM_S)), tuple(stream_names))
@@ -450,55 +476,75 @@ def main() -> int:
                              os.path.join(work, train_log_name),
                              cwd=s["nanochat_dir"], env=env)
             res["mid_train_rc"] = mid_rc
-            if node_count > 1 and node_rank != 0:
-                # Non-master node: training was this node's ENTIRE job.
-                # result.json is master-owned (a second writer would
-                # clobber it); the own-log upload is the only artifact.
-                # Exit code = train rc: the multi-node job only succeeds
-                # when EVERY node exits 0, and a master-side failure
-                # (torchrun teardown) already reports through node 0.
-                lp = os.path.join(work, train_log_name)
-                if os.path.isfile(lp):
-                    try:
-                        storage.upload_file(lp, f"{result_uri}/{train_log_name}")
-                    except Exception:
-                        traceback.print_exc()  # log delivery is best-effort
-                stop_stream()
-                return mid_rc
             if mid_rc != 0:
-                storage.upload_file(os.path.join(work, train_log_name),
-                                    f"{result_uri}/{train_log_name}")
+                # torch elastic teardown makes a train failure visible on
+                # EVERY node, so nobody proceeds to the eval rendezvous —
+                # no straggler hangs at init_process_group.
+                try:
+                    storage.upload_file(os.path.join(work, train_log_name),
+                                        f"{result_uri}/{train_log_name}")
+                except Exception:
+                    traceback.print_exc()  # log delivery is best-effort
+                if node_count > 1 and node_rank != 0:
+                    stop_stream()
+                    return mid_rc
                 return finish(mid_rc)
-            if s.get("upload_checkpoint", True):
-                ckpt_dir = os.path.join(base, "mid_checkpoints", tag)
-                print(f"[worker] uploading mid checkpoint -> "
-                      f"{result_uri}/mid_checkpoint", flush=True)
-                storage.upload_dir(ckpt_dir, f"{result_uri}/mid_checkpoint")
-                res["checkpoint_uploaded"] = True
 
         # Eval in a PRIVATE base dir (symlink farm — identical to local).
-        eval_base = nanochat_cmds.make_eval_base_dir(base, work, tag)
+        # Multi-node: EVERY node runs the retargeted eval (Phase 1.5) —
+        # the all_reduce rendezvous requires all node_count x nproc ranks;
+        # a node skipping eval would hang the rest at init_process_group
+        # until timeout. The model file is readable on every node: train's
+        # save_checkpoint writes it from global rank 0 into the shared
+        # output mount (Phase-0 probe C: shards from all 4 nodes in one
+        # dir), and each node's private eval_base just symlinks that dir.
+        eval_base = nanochat_cmds.make_eval_base_dir(
+            base, work, tag, subdir=eval_base_subdir)
         env = nanochat_cmds.build_subprocess_env(
             s["nanochat_dir"], base,
             device_ids=s.get("visible_devices") or [0],
             base_dir_override=eval_base,
             extra_env=s.get("env") or None)
-        eval_rc = run_cmd(s["eval_cmd"], os.path.join(work, "eval.log"),
+        eval_rc = run_cmd(s["eval_cmd"], os.path.join(work, eval_log_name),
                           cwd=s["nanochat_dir"], env=env)
         res["eval_rc"] = eval_rc
         # stages done — the post-stage uploads below are authoritative
         stop_stream()
+
+        for log_name in (train_log_name, eval_log_name):
+            lp = os.path.join(work, log_name)
+            if os.path.isfile(lp):
+                try:
+                    storage.upload_file(lp, f"{result_uri}/{log_name}")
+                except Exception:
+                    traceback.print_exc()  # log delivery is best-effort
+
+        if node_count > 1 and node_rank != 0:
+            # Non-master node: eval was this node's last stage. The CSV
+            # (rank-0-only writer), result.json and the checkpoint upload
+            # are master-owned — a second writer would clobber them. Exit
+            # code = combined rc: the multi-node job succeeds only when
+            # EVERY node exits 0.
+            return 0 if (mid_rc == 0 and eval_rc == 0) else (mid_rc or eval_rc)
+
+        # Node 0 (or any single-node run): land the artifacts. The
+        # checkpoint upload sits AFTER eval so the non-master ranks do
+        # not idle at the eval rendezvous during a GB-scale upload; the
+        # mid_rc==0 guard keeps eval-failure paths from losing the
+        # checkpoint (an eval-only retry needs it).
+        if not eval_only and s.get("upload_checkpoint", True) \
+                and res["mid_train_rc"] == 0:
+            ckpt_dir = os.path.join(base, "mid_checkpoints", tag)
+            print(f"[worker] uploading mid checkpoint -> "
+                  f"{result_uri}/mid_checkpoint", flush=True)
+            storage.upload_dir(ckpt_dir, f"{result_uri}/mid_checkpoint")
+            res["checkpoint_uploaded"] = True
 
         csv_path = nanochat_cmds.claim_eval_csv(work, tag, eval_base,
                                                 eval_rc=eval_rc)
         if csv_path is not None:
             res["csv"] = os.path.basename(csv_path)
             storage.upload_file(csv_path, f"{result_uri}/{res['csv']}")
-
-        for log_name in ("mid_train.log", "eval.log"):
-            lp = os.path.join(work, log_name)
-            if os.path.isfile(lp):
-                storage.upload_file(lp, f"{result_uri}/{log_name}")
 
         if mid_rc == 0 and eval_rc == 0:
             return finish(0)
@@ -507,6 +553,22 @@ def main() -> int:
     except Exception as e:
         res["error"] = f"{type(e).__name__}: {e}"
         traceback.print_exc()
+        # A crash between train success and the post-eval upload must not
+        # lose the trained checkpoint — an eval-only retry on the landed
+        # mid_checkpoint is far cheaper than retraining (or the local
+        # 10h fallback). Best-effort: the crash may be storage-related.
+        if not eval_only and s.get("upload_checkpoint", True) \
+                and res["mid_train_rc"] == 0 and not res["checkpoint_uploaded"]:
+            try:
+                ckpt_dir = os.path.join(base, "mid_checkpoints", tag)
+                storage.upload_dir(ckpt_dir, f"{result_uri}/mid_checkpoint")
+                res["checkpoint_uploaded"] = True
+            except Exception:
+                traceback.print_exc()
+        # result.json is master-owned: a non-master finish() would clobber
+        # node 0's copy on OBS (last-writer-wins).
+        if node_count > 1 and node_rank != 0:
+            return 3
         return finish(3)
 
 

@@ -12,7 +12,10 @@ the master's cards stay free for the k=8 local search slot.
 Multi-node (Phase 1, TARGET_ARM_NODES>1, default from launch_env): the
 arm job is submitted with node_count=N (power of 2 only — d28's AdamW
 reduce_scatter asserts shape[0] % world_size == 0). Every node runs the
-worker; node 0 owns eval (single-node 8-rank) + result.json. Because
+worker; every node trains AND evals (Phase 1.5 — the eval torchrun spans
+8*N ranks; base_eval's per-sample striding + all_reduce is world-size
+invariant, so scores match the 8-rank form while ~N x faster). Node 0
+owns the eval CSV + checkpoint upload + result.json. Because
 ws=8*N != 8, the d28 8-shard optimizer cannot load: mid_train gets
 --load-optimizer=0 (cold optimizer — derived, cross-checked against the
 fingerprinted TARGET_LOAD_OPTIMIZER from launch_env so a stale-fingerprint
@@ -341,9 +344,12 @@ def download_result_json(obs, result_uri: str) -> Optional[Dict]:
 def land_logs(obs, result_uri: str, output_dir: str, arm: str,
               node_count: int = 1) -> None:
     """Land the master's mid_train.log/eval.log (as before) plus every
-    non-master node's mid_train_node{r}.log when the arm ran multi-node."""
+    non-master node's mid_train_node{r}.log and eval_node{r}.log when the
+    arm ran multi-node (Phase 1.5: all nodes join the eval torchrun)."""
     names = ["mid_train.log", "eval.log"] + [
-        f"mid_train_node{r}.log" for r in range(1, max(1, node_count))]
+        f"{stem}_node{r}.log"
+        for r in range(1, max(1, node_count))
+        for stem in ("mid_train", "eval")]
     for name in names:
         src = f"{result_uri.rstrip('/')}/{name}"
         if name == "mid_train.log":
