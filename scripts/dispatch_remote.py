@@ -47,8 +47,14 @@ try:
     from climbmix.core.types import CLIMBConfig, MixtureConfig, MixtureWeights
     from climbmix.utils.token_estimate import parse_token_count
 except ImportError:
-    sys.path.insert(0, os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), '..', 'src'))
+    # Bare-shell fallback: repo src + vendored backend (climbmix-ma) — the
+    # remote stack imports climbmix_ma lazily at backend resolution, and a
+    # manual dispatch without PYTHONPATH dies on ModuleNotFoundError.
+    for _p in ("src", "climbmix-ma"):
+        _d = os.path.normpath(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", _p))
+        if os.path.isdir(_d) and _d not in sys.path:
+            sys.path.insert(0, _d)
     from climbmix.core.types import CLIMBConfig, MixtureConfig, MixtureWeights
     from climbmix.utils.token_estimate import parse_token_count
 

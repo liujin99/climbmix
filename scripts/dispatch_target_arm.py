@@ -66,7 +66,13 @@ import time
 from typing import Dict, List, Optional
 
 REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
+# src + vendored backend (climbmix-ma) — a bare-shell manual dispatch has
+# neither on sys.path: the prod2 anchor re-send (2026-09-09) died on
+# ModuleNotFoundError: climbmix_ma before reaching any real work.
+for _p in ("src", "climbmix-ma"):
+    _d = os.path.join(REPO_ROOT, _p)
+    if os.path.isdir(_d) and _d not in sys.path:
+        sys.path.insert(0, _d)
 
 from climbmix.core.types import CLIMBConfig, DeviceConfig  # noqa: E402
 from climbmix.remote.job_api import JobStatus, TransientSubmitError  # noqa: E402

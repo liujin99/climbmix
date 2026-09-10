@@ -151,10 +151,14 @@ ClimbMix 通过 **proxy 搜索** 寻找最优 STEM 数据混合配比。核心�
    nll_z = -(nll - mean(nll)) / (std(nll) + ε)    # 取负: NLL 越低越好 → z 越高越好
 
 2. SNR 权重
-   σ²_noise  = 0.25 / K                          # 二项噪声方差上界 (p=0.5 最差情况)
-   σ²_between = var(acc) + ε                      # config 间真实 accuracy 方差
+   σ²_noise  = 0.25 / (K × 0.75²)              # 二项噪声方差上界 (p=0.5), centered 单位
+   σ²_between = var(acc) + ε                      # config 间真实 accuracy 方差 (centered 单位)
    f = 1 - σ²_noise / σ²_between                  # 信号占比, 可为负
    w = max(w_floor, min(1, max(0, (1+f)/2)))      # accuracy 权重, clamp 到 [w_floor, 1]
+
+   # 单位注意 (2026-09-10 修复): 存储的 per-benchmark acc 是 CENTERED
+   # ((raw - 0.25)/0.75), 噪声项必须同除 0.75², 否则噪声低估 1.78×、
+   # w 偏高 (prod2 实测: mmlu_stem f +0.195 → -0.43, w 0.597 → 0.287)。
 
 3. 加权评分
    score_b = w × acc_z + (1-w) × nll_z

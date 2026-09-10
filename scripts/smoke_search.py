@@ -87,8 +87,13 @@ class SyntheticTruth:
         u = self.utility(w)
         acc, nll = {}, {}
         for b in STEM_BENCHMARK_LABELS:
-            acc[b] = float(np.clip(
+            raw = float(np.clip(
                 self.base[b] + self.slope[b] * u + rng.normal(0.0, self.sigma[b]), 0.0, 1.0))
+            # Contract: stored per-benchmark accs are CENTERED ((raw-0.25)/0.75)
+            # — parse_eval_results stores the eval CSV's Centered column, and
+            # _compute_scores' binomial noise floor is expressed in the same
+            # units. Emitting raw here understated the floor by 1.78x.
+            acc[b] = (raw - 0.25) / 0.75
             nll[b] = float(self.nll_c[b] - self.nll_d[b] * u + rng.normal(0.0, 0.05))
         return acc, nll
 

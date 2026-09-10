@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """prod2 fix verification — balanced partition / structure gate / acc-only
-fallback / no-signal guard / from_dict natural sort.
+fallback / no-signal guard / from_dict natural sort / f centered-unit noise
+floor / cp4 NLL fallback / dispatch climbmix-ma bootstrap.
 
 Standalone (repo convention: no pytest infra). Run:
     python3 scripts/diagnostics/test_prod2_fixes.py
@@ -219,6 +220,75 @@ bs4._search_full_design_space = lambda: (called2.__setitem__("design", True)
 sel = bs4._select_final_mixture()
 check("selection: all-task f<0 -> guard fires despite R2>0",
       bs4._selection_mode == "no_signal_best_measured" and not called2["design"])
+
+# ── 6. f noise floor in centered units (prod2 2026-09-09 unit bug) ────────
+# accs are centered ((raw-0.25)/0.75); the binomial floor 0.25/K is raw —
+# it must be rescaled by /0.75**2 or noise is understated 1.78x and w
+# inflates on noise-dominated benchmarks (mmlu_stem f flipped sign).
+cfg6 = CLIMBConfig(val_tasks=["mmlu_stem"])
+bs6 = IterativeBootstrapper(cfg6, cluster_tokens, cluster_labels)
+# var = 1e-4 (centered units) — mmlu_stem K=3545: old f = +0.29, corrected
+# f = -0.25 — the sign flip is the regression signal.
+bs6._accumulated_per_benchmark = [
+    ({"mmlu_stem": v}, {}) for v in (0.0396, 0.0196, 0.0396, 0.0196)
+]
+bs6._accumulated_configs = [
+    MixtureConfig(mixture_weights=MixtureWeights(weights=np.array([0.5, 0.5])))
+    for _ in range(4)
+]
+bs6._compute_scores()
+_var6 = np.var([0.0396, 0.0196, 0.0396, 0.0196])
+_f6_expected = 1.0 - (0.25 / 3545 / 0.75 ** 2) / (_var6 + 1e-12)
+_f6 = bs6._task_f["mmlu_stem"]
+check("f: noise floor rescaled to centered units (/0.75^2)",
+      abs(_f6 - _f6_expected) < 1e-9,
+      f"f={_f6:.4f} expected={_f6_expected:.4f}")
+check("f: mmlu-scale variance flips sign once corrected (old +0.29)",
+      _f6 < 0.0, f"f={_f6:.4f}")
+
+# ── 7. cp4_report: STEM NLL nan -> per-task N-weighted fallback ───────────
+import importlib.util  # noqa: E402
+_spec = importlib.util.spec_from_file_location(
+    "cp4_report_fixtest",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "cp4_report.py"))
+cp4 = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(cp4)
+with tempfile.TemporaryDirectory() as td:
+    csv_path = os.path.join(td, "eval_x.csv")
+    with open(csv_path, "w") as f:
+        f.write("Task, Accuracy, Centered, NLL\n")
+        f.write("STEM, , 0.175165, nan\n")
+        f.write("arc_easy, 0.752525, 0.670034, 2.270158\n")
+        f.write("arc_challenge, 0.458200, 0.277600, 3.100000\n")
+        f.write("mmlu_stem, 0.292500, 0.056700, nan\n")
+    parsed = cp4.parse_eval_csv(csv_path)
+    _exp7 = (2.270158 * 2376 + 3.100000 * 1172) / (2376 + 1172)
+    check("cp4: STEM NLL nan -> per-task N-weighted mean",
+          parsed["stem_nll"] is not None
+          and abs(parsed["stem_nll"] - _exp7) < 1e-9,
+          f"got={parsed['stem_nll']} expected={_exp7:.4f}")
+    check("cp4: stem centered parsed alongside", parsed["stem"] == 0.175165)
+    csv2 = os.path.join(td, "eval_ok.csv")
+    with open(csv2, "w") as f:
+        f.write("STEM, , 0.100000, 2.500000\n")
+        f.write("arc_easy, 0.700000, 0.600000, 2.200000\n")
+    parsed2 = cp4.parse_eval_csv(csv2)
+    check("cp4: finite STEM NLL passes through unchanged",
+          parsed2["stem_nll"] == 2.5)
+    csv3 = os.path.join(td, "eval_dead.csv")
+    with open(csv3, "w") as f:
+        f.write("STEM, , 0.100000, nan\n")
+        f.write("arc_easy, 0.700000, 0.600000, nan\n")
+    parsed3 = cp4.parse_eval_csv(csv3)
+    check("cp4: no finite per-task NLL -> None (report skips)",
+          parsed3["stem_nll"] is None)
+
+# ── 8. dispatch scripts bootstrap vendored climbmix-ma ────────────────────
+for _script in ("dispatch_target_arm.py", "dispatch_remote.py"):
+    _src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "..", _script)).read()
+    check(f"dispatch bootstrap: {_script} self-adds climbmix-ma to sys.path",
+          '"climbmix-ma"' in _src and "sys.path" in _src)
 
 # ── summary ───────────────────────────────────────────────────────────────
 print()

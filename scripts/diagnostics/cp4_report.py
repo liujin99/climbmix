@@ -55,6 +55,10 @@ def parse_eval_csv(path):
 
     与 nanochat_cmds.parse_eval_results 同语义: 列 0=任务名, 1=raw acc
     (STEM 行为空), 2=centered, 3=nll; CORE 行跳过; 不可解析行跳过。
+
+    STEM 行的 NLL 是 nan 时 (nanochat 的聚合对任何 per-task 缺失都产生
+    nan — mmlu_stem 0-shot 无 gold span), 退化为有限 per-task NLL 的
+    N 加权均值 (2026-09-10 CP4 两臂都打出 nan, 但 per-task 全部健康)。
     """
     out = {"stem": None, "stem_nll": None, "tasks": {}}
     if not path or not os.path.isfile(path):
@@ -76,6 +80,18 @@ def parse_eval_csv(path):
             if centered is None:
                 continue
             out["tasks"][name] = {"raw": raw, "centered": centered, "nll": nll}
+    if out["stem_nll"] is None or not math.isfinite(out["stem_nll"]):
+        pairs = [(t["nll"], BENCHMARK_SIZES.get(name, 0))
+                 for name, t in out["tasks"].items()
+                 if t["nll"] is not None and math.isfinite(t["nll"])]
+        if pairs:
+            tot_n = sum(n for _, n in pairs)
+            if tot_n > 0:
+                out["stem_nll"] = sum(v * n for v, n in pairs) / tot_n
+            else:
+                out["stem_nll"] = sum(v for v, _ in pairs) / len(pairs)
+        else:
+            out["stem_nll"] = None
     return out
 
 

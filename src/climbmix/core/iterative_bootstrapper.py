@@ -294,7 +294,12 @@ class IterativeBootstrapper:
                 nll_z = np.full(len(nlls), np.nan)
 
             K = BENCHMARK_SIZES.get(b, 1000)
-            sigma2_noise = 0.25 / K
+            # accs are CENTERED ((raw - 0.25) / 0.75): the raw-unit binomial
+            # floor p(1-p)/K (conservative max 0.25/K) must be rescaled into
+            # centered units by /0.75**2, or noise is understated by 1.78x
+            # and w inflates on noise-dominated benchmarks (prod2 2026-09-09:
+            # mmlu_stem f +0.195 -> -0.43, w 0.597 -> 0.287 once fixed).
+            sigma2_noise = 0.25 / (K * 0.75 ** 2)
             sigma2_between = float(accs[valid].var()) + 1e-12
             f = 1.0 - sigma2_noise / sigma2_between
             w = max(self.w_floor, min(1.0, max(0.0, (1.0 + f) / 2.0)))
