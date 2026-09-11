@@ -21,3 +21,28 @@
   `python3 scripts/diagnostics/test_prod2_fixes.py` (standalone, no pytest),
   plus legacy suites under `/tmp/opencode/test_*.py`.
 - Run `python3 scripts/check_repo_secrets.py` before every push.
+
+## Dual-session commit discipline (two agents share ONE working tree)
+
+- **Always `git add <explicit paths>`** — never `git add -A` / `-u` /
+  directory-level adds: they sweep the OTHER session's uncommitted hunks
+  into your commit (already happened twice: e5c4c5f committed a mid-state,
+  c169896 had to hotfix the missing module).
+- **Verify before committing**: `git diff --cached --stat` must list ONLY
+  files this session intends to change.
+- **Commit small & fast**: land a change once it's tested — minimize the
+  dirty window the other session can accidentally sweep.
+- **Shared files** (runs/run_climbmix.sh, scripts/dispatch_target_arm.py,
+  src/climbmix/pipeline/target_runner.py, src/climbmix/utils/fingerprint.py,
+  …): check `git status` for the other session's dirty edits BEFORE
+  editing; coordinate through the user when both need the same file.
+- **New .py on an executable path** must be classified the same commit:
+  add to `utils/fingerprint.py` `GLOBAL_EXCLUDE` (observability/launcher
+  tools) or its stage's file set — an unclassified new module shifts BOTH
+  stage fingerprints.
+- **WIP claims (hook-enforced)**: while a file is in flight, list it in
+  `.git/wip_claims/<session>.list` (repo-relative, one per line) and
+  commit with `AGENT_ID=<session>` — the pre-commit hook blocks commits
+  sweeping files claimed by another session (unidentified committers are
+  blocked on ANY claim; deliberate cross-claims go through the user or
+  `--no-verify`). Clear your claim file after landing.
