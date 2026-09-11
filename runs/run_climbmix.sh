@@ -55,29 +55,31 @@ TARGET_DEPTH="${TARGET_DEPTH:-28}"
 # Token caps for data selection (full pool ≈ 100B tokens / 116M docs — NOT capped means
 # every proxy exp would select the whole pool; that's the default 0, so always set these).
 # Proxy: PROXY_TARGET_TOKENS 是搜索小实验的预算真源 (步数由它派生, 见下方推导块)。
-# 默认 500Mi = 524,288,000 = 1000 步 × 524,288 (d20 tbs) — 与历史搜索 (1000 步)
-# 完全连续, warm-start 注入的历史点分数可直接混用; 池 = 预算/0.7 ≈ 749M ≥ 消耗
-# 524M → 恒单遍 (epoch≈0.7)。论文 proxy 消耗 ~800M, 我们 524M = 65%
-# (documented deviation, scoring_metric_design §12.3)。
+# 真实 total_batch_size 来自 ckpt meta (2026-09-11 服务器实测): d20 与 d28 都是
+# 1,048,576 — mid_train 从预训练 meta 继承 tbs, 历史上假设的 "d20 = 524,288" 是
+# 回退值误当真值 (它导致 prod2 proxy 实测 3-4 epoch wrap, loader 日志已证)。
+# 默认 1000Mi = 1,048,576,000 = 1000 步 × 1,048,576 — 与 prod2 搜索步数连续;
+# 池 = 预算/0.7 (mix 定尺寸修复后) ≈ 1.43×消耗 → 单遍 (epoch≈0.7)。
+# 论文 proxy 消耗 ~800M, 我们 1000Mi ≈ 131% (documented deviation,
+# scoring_metric_design §12.3; 800M → 762 步 = 论文等量)。
 # Target: TARGET_TOKENS 是唯一真源 (退火预算), 步数由它派生 (见下方推导块),
 # 池子=预算/STEM_RATIO, 消耗=预算 → 恒单遍 (epoch≈0.7)。
-PROXY_TARGET_TOKENS="${PROXY_TARGET_TOKENS:-500Mi}"
-TARGET_TOKENS="${TARGET_TOKENS:-2B}"
+PROXY_TARGET_TOKENS="${PROXY_TARGET_TOKENS:-1000Mi}"
+TARGET_TOKENS="${TARGET_TOKENS:-1000Mi}"
 
 # TARGET_STEPS 派生 (单一真源): steps = TARGET_TOKENS / total_batch_size (d28 ckpt meta)。
 # 消耗 ≈ 预算、池子 = 预算/STEM_RATIO ≈ 1.43×消耗 → 恒单遍 (epoch≈0.7, 守卫恒过)。
 # TARGET_STEPS 不再是用户旋钮: 外部设置 = 遗留配置, 就地报错 (防静默指纹漂移)。
 # 臂级复用 (run_arm_only.sh) 用同一 CLI 派生; 直接 dispatch 的"同数据改步数"走
 # env 优先级, 由 single-pass 守卫把关。
-# 历史精确复现: prod1/prod2 的 2000 步 = TARGET_TOKENS=2097152000 (= 2000Mi)。
+# 历史复现: prod1/prod2 实际跑的是 1000 步 (tbs 1,048,576) = TARGET_TOKENS=1000Mi。
 if [ -n "${TARGET_STEPS:-}" ]; then
     echo "✗ TARGET_STEPS=${TARGET_STEPS} is no longer a knob — it is DERIVED from TARGET_TOKENS."
-    echo "  unset TARGET_STEPS and set the budget instead (TARGET_TOKENS=2B → 1907 steps @ 1,048,576)."
-    echo "  legacy 2000-step pair = TARGET_TOKENS=2097152000."
+    echo "  unset TARGET_STEPS and set the budget instead (TARGET_TOKENS=1000Mi → 1000 steps @ 1,048,576)."
     exit 1
 fi
 if [ "${TARGET_TOKENS}" = "0" ]; then
-    echo "✗ TARGET_TOKENS=0 ('all available') is invalid for target arms — set an explicit budget (e.g. 2B)."
+    echo "✗ TARGET_TOKENS=0 ('all available') is invalid for target arms — set an explicit budget (e.g. 1000Mi)."
     exit 1
 fi
 TARGET_STEPS="$(python3 scripts/derive_target_steps.py \
@@ -89,10 +91,10 @@ echo "  TARGET_STEPS derived from TARGET_TOKENS=$TARGET_TOKENS -> $TARGET_STEPS 
 # PROXY_NUM_ITERATIONS 派生 (与 TARGET_STEPS 同规则): 搜索小实验步数由
 # PROXY_TARGET_TOKENS 派生 — token 预算是唯一真源 (说 token 直观, 说 steps 不直观)。
 # 外部设置 = 遗留配置, 就地报错; 需要更强/更省的搜索信号时改预算即可
-# (800Mi → 1526 步 = 论文 proxy 消耗量级; 400M → 762 步)。
+# (800M → 762 步 = 论文 proxy 消耗量级; 400M → 381 步)。
 if [ -n "${PROXY_NUM_ITERATIONS:-}" ]; then
     echo "✗ PROXY_NUM_ITERATIONS=${PROXY_NUM_ITERATIONS} is no longer a knob — it is DERIVED from PROXY_TARGET_TOKENS."
-    echo "  unset it and set the budget instead (PROXY_TARGET_TOKENS=500Mi → 1000 steps @ 524,288)."
+    echo "  unset it and set the budget instead (PROXY_TARGET_TOKENS=1000Mi → 1000 steps @ 1,048,576)."
     exit 1
 fi
 PROXY_NUM_ITERATIONS="$(python3 scripts/derive_target_steps.py \
@@ -107,7 +109,7 @@ from climbmix.utils.token_estimate import parse_token_count
 t = parse_token_count(sys.argv[1])
 paper = 800_000_000
 print(f"  ⚠ proxy 信号强度: 每实验消耗 {t:,} tokens ≈ 论文 proxy ~800M 的 {t/paper:.0%}")
-print("    调强度只改预算: 400M → 762 步 (更省) / 800M → 1525 步 (论文等量)")
+print("    调强度只改预算: 400M → 381 步 (更省) / 800M → 762 步 (论文等量)")
 PYEOF
 CONFIGS_PER_ITER="${CONFIGS_PER_ITER:-20,10,5}"
 # prod2 B++: 期望列表语义 — ADAPTIVE_CONFIGS=1 时 configs_per_iter 视为

@@ -21,7 +21,9 @@ TARGET_TOKENS="${TARGET_TOKENS:-20B}"        # 大规模 STEM 预算 (唯一真�
 STEM_RATIO="${STEM_RATIO:-0.7}"
 WEIGHTS="${WEIGHTS:-}"                       # 空 = $RUN_DIR/optimal_mixture_weights.json (搜索输出的 α*)
 OUT_DIR="${OUT_DIR:-}"                       # 空 = result/<run名>_final
-MAX_CLIMBMIX_SHARDS="${MAX_CLIMBMIX_SHARDS:-50}"  # 通用数据分片上限; 预算大时不足会大声报错 (通用文档将被重复)
+MAX_CLIMBMIX_SHARDS="${MAX_CLIMBMIX_SHARDS:-150}"  # 通用数据分片上限; 真实分片 ~85K docs/片
+                                                 # (2026-09-11 实测), 20B 预算需 ~127 片;
+                                                 # 不足会大声报错 (通用文档将被重复)
 ALLOW_GENERAL_REPEAT="${ALLOW_GENERAL_REPEAT:-0}" # 1=显式接受通用文档重复 (通用池是硬约束时的权衡; 见 mix 预检)
 LAUNCH="${LAUNCH:-1}"                        # 0=干跑
 MEASURE="${MEASURE:-1}"                      # 1=实测产出 token 并写 manifest

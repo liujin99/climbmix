@@ -53,7 +53,11 @@ STEM_RATIO = 0.7
 BATCH_PER_FILE = 10000
 MIN_CLIMBMIX_SHARDS = 3
 MAX_CLIMBMIX_SHARDS = 50
-CLIMBMIX_DOCS_PER_SHARD = 500000
+# Measured 2026-09-11 on the real HF ClimbMix shards (server probe): 84,992-86,016
+# docs per file (index_to_filename range shard_06540-06542, ~2,940 chars/doc).
+# The historical 500,000 was wrong by ~6x — it made calc_climbmix_count request
+# 6x too FEW shards, so the general draw cycled (repeated docs) at real scale.
+CLIMBMIX_DOCS_PER_SHARD = 85000
 
 
 def count_stem_docs(stem_train_files):
@@ -343,8 +347,19 @@ def main():
         sys.exit(1)
 
     stem_train_count = len(stem_train_files)
-    num_output_files = args.num_output_files or stem_train_count
+    stem_docs = count_stem_docs(stem_train_files)
     batch_per_file = detect_shard_size(stem_train_files)
+    # Pool sizing (fixed 2026-09-11): mix total docs = STEM docs / stem_ratio so
+    # the pool carries the FULL selection plus its general complement — the
+    # documented "pool = budget / stem_ratio, epoch ~ stem_ratio" semantics.
+    # The historical default (num_output_files = stem_train_count) kept the
+    # doc count at the selection size, so the pool was only ~budget x 0.98 and
+    # the training LOADER wrapped (measured 3-4 epochs in prod2 proxy exps).
+    # FLOOR (not ceil): the STEM draw = ratio x total must stay UNDER the
+    # supply or the mix preflight (supply + 5-sigma margin) fails.
+    default_output_files = max(
+        1, stem_docs // int(batch_per_file * STEM_RATIO))
+    num_output_files = args.num_output_files or default_output_files
 
     stem_docs = count_stem_docs(stem_train_files)
     needed_shards = calc_climbmix_count(stem_docs, STEM_RATIO, args.max_climbmix_shards)

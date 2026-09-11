@@ -116,12 +116,19 @@ def derive_num_iterations(target_tokens: int, total_batch_size: int) -> int:
 
     TARGET_TOKENS is the single source of truth for the annealing budget:
     the pool is selected at TARGET_TOKENS (STEM) diluted 1/stem_ratio with
-    general data, and consumption = steps x total_batch_size ~= the same
-    budget — so the run is single-pass (epoch ~= stem_ratio = 0.7) BY
-    CONSTRUCTION and the guard always passes on derived values. An
-    explicit TARGET_STEPS override (same-data/different-steps reuse
-    experiments) bypasses the derivation and is checked by
-    check_single_pass instead.
+    general data (mix sizing = STEM docs / stem_ratio, fixed 2026-09-11 —
+    the old sizing kept the pool at ~budget x 0.98 and the loader wrapped,
+    3-4 epochs in prod2), and consumption = steps x total_batch_size ~=
+    the same budget — so the run is single-pass (epoch ~ stem_ratio = 0.7)
+    BY CONSTRUCTION and the guard passes on derived values, with ~30%
+    headroom absorbing dust-cluster selection shortfall (paper's
+    take-all-no-redistribution policy). An explicit TARGET_STEPS override
+    (same-data/different-steps reuse experiments) bypasses the derivation
+    and is checked by check_single_pass instead.
+
+    NOTE total_batch_size comes from the ckpt's meta_*.json — mid_train
+    INHERITS it from the pretrain meta (both d20 and d28 measure
+    1,048,576 on the server, 2026-09-11). Never assume a value.
     """
     if target_tokens <= 0:
         raise ValueError(

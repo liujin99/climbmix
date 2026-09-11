@@ -212,7 +212,7 @@ check("target_runner: guard called after mixture prep",
 # ── 7. derive_num_iterations: TARGET_TOKENS as the single source of truth ─
 check("derive: 2B / 1,048,576 -> 1907 steps",
       derive_num_iterations(2_000_000_000, 1_048_576) == 1907)
-check("derive: 1B / 524,288 (proxy-shaped) -> 1907 steps",
+check("derive: 1B / 524,288 (legacy-assumed proxy tbs) -> 1907 steps",
       derive_num_iterations(1_000_000_000, 524_288) == 1907)
 check("derive: budget < one step -> 1 (guard then rules it out)",
       derive_num_iterations(1_000, 1_048_576) == 1)
@@ -268,7 +268,7 @@ check("shell: TARGET_STEPS derivation block present",
       "no longer a knob" in src and
       "invalid for target arms" in src)
 check("shell: TARGET_TOKENS defined before derivation",
-      src.index('TARGET_TOKENS="${TARGET_TOKENS:-2B}"')
+      src.index('TARGET_TOKENS="${TARGET_TOKENS:-1000Mi}"')
       < src.index("derive_target_steps.py"))
 
 # real invocations of the two launch-time abort branches (the config block
@@ -304,9 +304,12 @@ check("arm-reuse: external TARGET_STEPS aborts at launch",
       (r.stdout + r.stderr).strip()[:100])
 
 # ── 9. proxy single-knob: PROXY_NUM_ITERATIONS derived from budget ────
-check("Mi parse: 500Mi = 524,288,000 (1000 steps x d20 tbs)",
+check("Mi parse: 500Mi = 524,288,000 (binary magnitude)",
       parse_token_count("500Mi") == 524_288_000)
-check("Mi parse: 2000Mi = prod1/prod2 exact 2000-step budget",
+check("Mi parse: 1000Mi = exactly 1000 steps @ real tbs 1,048,576 "
+      "(d20 AND d28 — prod1/prod2 step-continuous)",
+      parse_token_count("1000Mi") == 1_048_576_000)
+check("Mi parse: 2000Mi = 2,097,152,000 (2000-step magnitude)",
       parse_token_count("2000Mi") == 2_097_152_000)
 check("Mi parse: 2Ki/1.5Gi binary magnitudes",
       parse_token_count("2Ki") == 2048
@@ -322,24 +325,28 @@ except ValueError:
 
 check("proxy: knob default removed (value now derived)",
       'PROXY_NUM_ITERATIONS="${PROXY_NUM_ITERATIONS:-1000}"' not in src)
-check("proxy: budget default 500Mi (= 1000 steps, history-continuous)",
-      'PROXY_TARGET_TOKENS:-500Mi' in src)
+check("proxy: budget default 1000Mi (= 1000 steps @ real tbs, "
+      "prod2 step-continuous)",
+      'PROXY_TARGET_TOKENS:-1000Mi' in src)
 check("proxy: derivation block present",
       "PROXY_NUM_ITERATIONS derived from PROXY_TARGET_TOKENS" in src and
       "DERIVED from PROXY_TARGET_TOKENS" in src)
 
 with tempfile.TemporaryDirectory() as base:
-    for d, tbs in (("d28", 1_048_576), ("d20", 524_288)):
+    # REAL server metas (2026-09-11): both d20 and d28 carry tbs 1,048,576 —
+    # mid_train inherits tbs from the pretrain meta; 524,288 is only the
+    # missing-key fallback (the false assumption behind prod2's 3-4 epoch wrap).
+    for d, tbs in (("d28", 1_048_576), ("d20", 1_048_576)):
         dd = os.path.join(base, "base_checkpoints", d)
         os.makedirs(dd)
         with open(os.path.join(dd, "meta_x.json"), "w") as f:
             json.dump({"total_batch_size": tbs}, f)
     r = subprocess.run(
         [sys.executable, os.path.join(REPO, "scripts/derive_target_steps.py"),
-         "--target-tokens", "500Mi",
+         "--target-tokens", "1000Mi",
          "--ckpt-dir", os.path.join(base, "base_checkpoints", "d20")],
         capture_output=True, text=True, timeout=60)
-    check("proxy: CLI 500Mi @ 524,288 -> exactly 1000 (warm-start continuity)",
+    check("proxy: CLI 1000Mi @ real d20 tbs 1,048,576 -> exactly 1000",
           r.returncode == 0 and r.stdout.strip() == "1000",
           (r.stdout + r.stderr).strip()[:100])
     r = subprocess.run(["bash", sh],
@@ -502,6 +509,45 @@ check("proxy: guard wired after mixture prep, before mid_train",
       < prs.index("self._guard_single_pass(")
       < prs.index("mid_cmd = self._build_mid_train_cmd"),
       "search path now guarded like the target stage")
+
+# ── 13. pool sizing / shard constant / remote guard wiring (2026-09-11) ─
+# Three prod2-era data-face bugs, all server-verified (paper_deviations D16):
+#   (a) mix total docs = STEM docs (pool ~ budget x 0.98, NOT /ratio) — the
+#       loader wrapped 3-4 epochs (mid_train.log epoch lines);
+#   (b) CLIMBMIX_DOCS_PER_SHARD 500K vs real ~85K (6x) — general download
+#       under-provisioned, the cycling draw repeated docs;
+#   (c) the remote executor bypassed the guard entirely (prod search path!).
+for name, path in (("proxy", "src/climbmix/pipeline/proxy_runner.py"),
+                   ("target", "src/climbmix/pipeline/target_runner.py")):
+    rsrc = open(os.path.join(REPO, path)).read()
+    check(f"{name}: pool sized at STEM docs / stem_ratio (floor, not len)",
+          "stem_docs // int(detected_batch * self.stem_ratio)" in rsrc
+          and "num_output_files = len(stem_train_files)" not in rsrc)
+check("mix CLI: default output sized at STEM / ratio",
+      "stem_docs // int(batch_per_file * STEM_RATIO)" in mix_src
+      and "default_output_files" in mix_src)
+check("mix: ClimbMix shard constant = 85K (measured 2026-09-11)",
+      "CLIMBMIX_DOCS_PER_SHARD = 85000" in mix_src)
+check("mix: 85K constant actually drives the shard-count math",
+      mix.CLIMBMIX_DOCS_PER_SHARD == 85000
+      and mix.calc_climbmix_count(1_000_000, 0.7) == 6          # ceil(428.6K/85K)
+      and mix.calc_climbmix_count(10_000_000, 0.7) == 50)       # 51 -> cap binds
+re_src = open(os.path.join(
+    REPO, "src/climbmix/remote/remote_executor.py")).read()
+check("remote: guard wired between mixture prep and upload "
+      "(the path prod2/prod3 actually take)",
+      re_src.index("self._prepare_mixture_data(")
+      < re_src.index("self._guard_single_pass(")
+      < re_src.index("self._upload_dir(mixture_data_dir"),
+      "fleet experiments were guardless before this")
+check("lss: shard cap 150 (20B needs ~127 at 85K docs/shard)",
+      'MAX_CLIMBMIX_SHARDS:-150' in lsrc)
+
+# sizing math, floor semantics: draw must stay UNDER the STEM supply
+check("sizing: floor keeps the STEM draw under supply (5-sigma safe)",
+      all(0.7 * ((n // int(b * 0.7)) * b) <= n
+          for n, b in ((503_500, 10_000), (710_000, 10_000),
+                       (43_000, 10_000), (99, 10_000), (1_260_000, 10_000))))
 
 print()
 if FAILED:

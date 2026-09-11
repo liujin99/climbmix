@@ -1111,6 +1111,15 @@ class RemoteExecutor(ProxyRunner):
                 self._prepare_mixture_data(
                     mixture_config, experiment_id, mixture_data_dir,
                     nproc_per_node=self.remote.npu_per_job)
+                # Same single-pass guard as the local path (ProxyRunner calls
+                # it right after _prepare_mixture_data) — without this, every
+                # REMOTE experiment (the whole fleet in prod2/prod3) bypassed
+                # the guard and a wrapped mixture would ship to the job as a
+                # legitimately-scored search point (prod2: 3-4 epochs,
+                # loader-confirmed in mid_train.log).
+                self._guard_single_pass(
+                    experiment_id, mixture_data_dir,
+                    mixed=self.stem_ratio < 1.0 and bool(self.general_data_dir))
                 self._upload_dir(mixture_data_dir, mix_uri)
             # The OBS copy is the source of truth for the job; free local disk.
             shutil.rmtree(mixture_data_dir, ignore_errors=True)

@@ -102,3 +102,27 @@ score = Σ_b [w_b·acc_z + (1-w_b)·nll_z]，w 由各 bench SNR 决定。实测 
 3. **d20 对推理 acc 结构性全盲**（gsm8k/math/gpqa 全在 chance），NLL 补盲设计被数据验证有效。
 4. **零成本改进可得**：修 f 单位 bug 即可提升每点 SNR（w 自动从噪声 acc 转向 NLL）。
 5. 运维上：远程并行臂 ~6h（非 13h）→ 24h 预算里搜索可占 ~17h（compact ~5 波 ≈ 55 点）。
+
+---
+
+## 附录（2026-09-11 追记）：proxy/臂数据面事后勘误
+
+发射后离线审计（零 NPU，`paper_deviations.md` D16 全文）发现的三个数据面事实，
+**不影响本文件的对比结论**（两臂/各 config 对称受灾，Δ 与排名仍有效），但影响
+绝对水平与论文可比性：
+
+1. **proxy 全部 30 点在 ~2.5-4 epoch 上训练**（loader 日志直证：exp_0000 尾部
+   `epoch: 3`、exp_0001 `epoch: 4`）。根因：mid_train 从 ckpt meta 继承
+   total_batch_size = 1,048,576（d20/d28 同值），而 2026-08-28 的单遍校准把
+   回退值 524,288 当真值 → 消耗实为 1000 步 × 1.048B vs 池 335-560M。
+   且各 config 短缺程度不同（尘簇权重大的池更小 → epoch 更高），搜索分数带
+   一个 config 相关的 epoch 混杂。
+2. **target 臂通用文档重复 ~1.5×**：ClimbMix 真实分片 ~85K docs/片，常量
+   误记 500K（6×）→ 下载欠配；需求 378K vs 供给 256K。
+3. **mix 池定尺寸 bug**：mix 总 doc 数 = STEM 选点数 → 池 ≈ 预算×0.98，
+   从未达到声称的 预算/0.7 —— 这是"单遍构造"从未成立的第二根因。
+
+修复（commit 见 2026-09-11）：steps = TOKENS/tbs（单参数）、mix 池 = STEM/0.7、
+分片常量 85K、single-pass 守卫接通 remote 路径。**prod3 注意**：本 run 的 30 个
+历史分数若注入 warm-start，是在 3-4 epoch regime 下测的；新点将是 0.7 epoch
+regime——两 regime 分数不可交换，注入决策需要显式拍板（重新测 vs 接受混杂）。

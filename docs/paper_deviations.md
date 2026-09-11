@@ -21,12 +21,13 @@
 | D7 | Random 基线小簇策略 | 未记载(其规模天然不会遇到:800B/21 簇/40B 预算 → 每簇配额 ~1.9B) | 簇配额不足 → 全取、不复制、不重分配(与 CLIMB 臂同一函数同一策略,两臂对称退化) | App. C.1 只定义等权 1/K;小池必须补一个策略且两臂一致 |
 | D8 | 优化目标 | 下游任务验证集 accuracy(PIQA/ARC_E/HellaSwag) | SNR 加权 acc+NLL z-score(6 个 STEM benchmark) | 难 benchmark 上 accuracy 是二项噪声;见 scoring_metric_design.md |
 | D9 | 通用数据混合 | 无(纯簇内配比) | 70% STEM + 30% ClimbMix(anti-forgetting) | 我们是从小 base 起步的 mid-training 场景(参照 MAI-Thinking-1 / Apple Intelligence) |
-| D10 | Proxy/Target 规模 | proxy 350M ≈800M tokens;target 1B/40B tokens | proxy d20(435M scaling)1000 步 ≈524M;target d28(~1.5B scaling)1000 步 ≈1B | 算力;详细换算见 scoring_metric_design.md §12。token 口径为论文的 65%/2.5%,但退火预算相对 base 论文 +0.4%(40B/10T) vs 我们 +33~50%(1B/2-3B)——场景不同(小 base mid-training) |
+| D10 | Proxy/Target 规模 | proxy 350M ≈800M tokens;target 1B/40B tokens | proxy d20(435M scaling)1000 步 = 1000Mi ≈1.048B;target d28(~1.5B scaling)1000 步 = 1000Mi | 算力;详细换算见 scoring_metric_design.md §12。token 口径为论文的 131%/2.6%,但退火预算相对 base 论文 +0.4%(40B/10T) vs 我们 +33~50%(1B/2-3B)——场景不同(小 base mid-training)。2026-09-11 勘误:旧记 524M/65% 基于错误 tbs(见 D16) |
 | D11 | token 计量 | 精确 tokenize(池统计) | chars/4 估算(元数据预计算列) | 池扫描免 tokenize;配比/配额的近似 |
 | D12 | 评测子采样 | 全量 | speedrun 100 题/任务(fixed shuffle seed 1337,跨实验可比较);生产 -1 全量 | speedrun 时间预算;生产无偏差 |
 | D13 | 剪枝规则 | 簇平均质量 < 3.0 即剪(fasttext,§2.1/§3.1) | 平均阈值 + **单列下限** hybrid:任一质量列的簇均值 < `PRUNE_COLUMN_FLOOR`(生产默认 2.0,0=关)即剪 | 平均线漏检"格式干净但知识贫瘠"的簇(2026-08-31 20-分片画像:69/1000 簇过均线但 knowledge_value 1.8-2.0;6.6% docs / 仅 1.5% tokens);标签未校验故取保守档 2.0,见细节 D13 |
 | D14 | 宏簇构造 | 距离合并到固定 K_enhanced(主实验 21 超簇;D.4:K_final 15/21/30 不敏感,15 最优) | **prod2 起默认 `MERGE_STRATEGY=balanced`:容量约束平衡划分到恰好 K_ENHANCED 个宏簇**(distance 仍可选对照) | 本池嵌入空间 = 单一致密连续流形(99% tokens)+ 13 格式孤岛:距离合并在任何 (K,τ) 下都链式塌成巨簇(K=14/21/24/32 实测留 99.0/98.5/98.3/97.5%,去掉 floor 塌到 K=3/99.9%,912/912 次合并全部合法)——搜索空间退化为 ~1 个旋钮(prod1 根因#1);balanced 用 K1000 层已验证的 k-means 机制,构造性保证 max token share ≤ (1+slack)/K;代价:宏簇是连续体的容量切片而非纯主题(语义由 balanced_profile.json 的 fine→anchor cosine 审计)。prod2 = balanced + K=15(对齐 D.4 最优) |
 | D15 | 目标臂优化器状态 | 未记载(论文以外部 base 为冻结起点,无优化器延续概念) | 单节点臂加载 d28 预训练 8-shard 优化器(prod1 行为);多节点臂(TARGET_ARM_NODES=4,ws=32)**冷启动**(`--load-optimizer=0`) | 8-shard moments 在 ws≠8 形状对不上(AdamW reduce_scatter 断言,run 601cdb67),非可选项;两臂同语义(本地兜底同步冷启动),`target_load_optimizer` 进 target 指纹;语义上与论文口径一致(外部 base 本就无优化器状态可载) |
+| D16 | 单遍退火 | consumption ≤ mixture(单遍语义) | prod1/prod2 实测 **~2.5-4 epoch wrap**(loader 日志直证);2026-09-11 修复:steps=TOKENS/tbs + mix 池=预算/0.7 → 构造性单遍 epoch≈0.7 | 三重叠加:tbs 误设(回退值 524,288 当真值,真实 meta 1,048,576)+ mix 定尺寸 bug(池=预算×0.98 非 /0.7)+ ClimbMix 分片常量错 6×(500K vs 实测 85K);详见细节 D16 |
 
 ## 细节与出处
 
@@ -107,10 +108,41 @@ tokens 不可比)。改用 merge-distance elbow 定 K_ENHANCED=14(最大跳变
 
 ### D10 训练规模
 论文 proxy ≈800M tokens(45 GPU-h,由 6400 GPU-h target 反推,§C.4)、target
-1B/40B。我们 proxy 524M(1000 步)、target ~1B(1000 步 × ~1M batch,TARGET_TOKENS=1B
-STEM cap)——token 口径为论文的 65%/2.5%(base 池 ~2-3B vs 论文 10T,场景不同;
-d28 scaling 修正为 ~1.5B,2026-09-04,meta auto-detect)。完整推导见
-scoring_metric_design.md §12。
+1B/40B。我们 proxy 1000Mi(1000 步 × 1,048,576 = 1.048B,= 论文的 131%)、
+target 1000Mi(1000 步,TARGET_TOKENS=1000Mi STEM cap)——token 口径为论文的
+131%/2.6%(base 池 ~2-3B vs 论文 10T,场景不同;d28 scaling 修正为 ~1.5B,
+2026-09-04,meta auto-detect)。完整推导见 scoring_metric_design.md §12。
+**勘误(2026-09-11)**:此前记载的 "proxy 524M(=论文 65%)" 基于错误假设的
+tbs 524,288——那是 mid_train 的 meta 缺键回退值,真实 d20 meta 为 1,048,576
+(服务器实测),proxy 实际每实验消耗 1.048B。
+
+### D16 单遍语义的 mix 定尺寸修复与 prod1/prod2 wrap 史实(2026-09-11)
+论文为单遍退火(consumption ≤ mixture)。我们的 mix 定尺寸 bug 使该语义
+在 prod1/prod2 从未成立,2026-09-11 修复:
+
+- **根因 1(tbs 误设)**:mid_train 的 `total_batch_size` 从预训练 meta 继承
+  (d20/d28 均 1,048,576,服务器实测);2026-08-28 的单遍校准把回退值
+  524,288 当真值 → "400M cap → 池 571M ≥ 消耗 524M 单遍 ✓" 整条推导失效:
+  真实消耗 1000 步 × 1.048B。
+- **根因 2(mix 定尺寸)**:`num_output_files = len(stem_train_files)` 使
+  mix 总 doc 数 = STEM 选点数 → 池 ≈ 预算 × 0.98(70% STEM + 30% 更短的
+  通用文档),而非声称的 预算/0.7 ≈ 1.43×。修复:三处(proxy_runner /
+  target_runner / mix CLI)改为 `ceil(STEM docs / stem_ratio / batch)`。
+- **实证(prod2_k15bal,loader 日志直读)**:proxy exp_0000 尾部 `epoch: 3`、
+  exp_0001 `epoch: 4`——全部 30 个 proxy 点在 ~2.5-4 epoch 上训练(守卫
+  复核 exp_0000 报 3.12,分毫不差);exp 池 335-560M vs 消耗 1.048B。
+  各 config 短缺程度不同(尘簇权重大的 config 池更小 → epoch 更高),
+  即搜索分数还带着一个 config 相关的 epoch 混杂。
+- **general 重复(独立问题,已由供给预检堵住)**:ClimbMix 真实分片
+  ~85K docs/片(84,992-86,016 实测),`CLIMBMIX_DOCS_PER_SHARD` 历史上
+  错记 500K(6×)→ 下载片数欠配 → 通用侧 endless 抽取循环。prod2 规模:
+  proxy 侧需求 151K ≤ 供给 256K 无重复(恰好);target 臂需求 378K vs
+  供给 256K → 通用文档重复 ~1.5×(比例完好、内容重复;两臂同等待遇,
+  climb-vs-random 对比仍有效,但绝对水平受污染)。
+- **修复后的语义**(single-knob + 新定尺寸):steps = TARGET_TOKENS/tbs,
+  池 = TARGET_TOKENS/0.7 → 构造性单遍 epoch≈0.7,守卫余量 ~30% 吸收尘簇
+  短缺(论文的 take-all 不再分配策略同款)。守卫已补接 remote 执行路径
+  (此前只接本地路径,而生产搜索全走 remote)。
 
 ### D13 剪枝规则(2026-08-31)
 论文用 fasttext 分类器簇均值 < 3.0 剪枝。我们保留均值阈值

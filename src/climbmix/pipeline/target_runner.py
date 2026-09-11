@@ -289,7 +289,14 @@ class TargetRunner:
             )
 
             detected_batch = mix_mod.detect_shard_size(stem_train_files)
-            num_output_files = len(stem_train_files)
+            # Pool = STEM docs / stem_ratio (full selection + general complement)
+            # so training consumption ~ budget stays under 1 epoch by design.
+            # The old len(stem_train_files) sizing kept the pool at the
+            # selection's doc count (~budget x 0.98) — the loader wrapped.
+            # FLOOR (not ceil): the STEM draw = ratio x total must stay UNDER
+            # the supply or the mix preflight (supply + 5-sigma margin) fails.
+            num_output_files = max(
+                1, stem_docs // int(detected_batch * self.stem_ratio))
             mix_mod.mix_data(
                 stem_temp_dir, climb_files, mixture_data_dir,
                 num_output_files, detected_batch, num_npu=nproc,
