@@ -115,7 +115,7 @@ check "pool cache inherited (copied, not regenerated)" $?
 check "cluster_info_cache.json inherited too (cache hit needs BOTH files)" $?
 grep -q "✓ 池一致 (key=${POOL_KEY}, 2 个分片)" "$TMP/ws_ok.log"
 check "pool identity: content-level key match" $?
-grep -q "✓ 4 个语义参数全部一致" "$TMP/ws_ok.log"
+grep -q "✓ 4 个测量层参数全部一致" "$TMP/ws_ok.log"
 check "immutable-layer diff: source launch_env vs current defaults" $?
 
 # slot semantics: plan "6,4" with history 6 → includes-history reading (no prepend)
@@ -192,6 +192,34 @@ HISTORY_RUN="$HIST_IMM" EXP_NAME=ws_imm LAUNCH=0 DATA_DIR="$TMP/pool" \
 check "immutable-layer mismatch refused with per-key detail" $?
 grep -q "不可复用\|可比性存疑" "$TMP/ws_imm.log"
 check "mismatch message explains the consequence" $?
+
+# arm-layer mismatch → warn (NOT refuse): TARGET_* only affects the new
+# run's d28 arms, never the historical d20 search-point scores (prod2
+# launched with TARGET_TOKENS=1B before the 2B default landed)
+HIST_ARM="$TMP/hist_arm"; cp -r "$HIST" "$HIST_ARM"
+python3 -c "
+import json
+p = '$HIST_ARM/launch_env.json'; d = json.load(open(p))
+d['TARGET_TOKENS'] = '1B'; d['TARGET_STEPS'] = '1000'
+d['TARGET_BASE_CKPT'] = '/home/ma-user/work/nanochat_model_dir/base_checkpoints/d28'
+d['TARGET_LR_SCALE'] = '1.0'; d['TARGET_WARMUP'] = '0.0'
+d['TARGET_WARMDOWN'] = '0.9'; d['MID_DEVICE_BATCH_SIZE'] = '1'
+json.dump(d, open(p, 'w'))"
+HISTORY_RUN="$HIST_ARM" EXP_NAME=ws_arm LAUNCH=0 DATA_DIR="$TMP/pool" \
+    ./runs/run_extend_search.sh \
+    > "$TMP/ws_arm.log" 2>&1
+check "arm-layer budget mismatch (1B vs 2B) passes with warning" $? "$(tail -3 "$TMP/ws_arm.log")"
+grep -q "⚠ TARGET_TOKENS: 源=1B  当前=2B (臂层" "$TMP/ws_arm.log"
+check "arm-layer warn names the key and both values" $?
+grep -q "1 个臂层警告" "$TMP/ws_arm.log"
+check "arm warns counted in the summary line" $?
+if grep -q "TARGET_STEPS" "$TMP/ws_arm.log"; then FAILED=1; fi
+check "derived TARGET_STEPS not compared (knob TARGET_TOKENS is)" $?
+if grep -q "TARGET_BASE_CKPT" "$TMP/ws_arm.log"; then FAILED=1; fi
+check "TARGET_BASE_CKPT synthesized from NANOCHAT_BASE_DIR+TARGET_DEPTH (no false positive)" $?
+if grep -q "✗" "$TMP/ws_arm.log"; then FAILED=1; fi
+check "no refusal lines in arm-layer-only mismatch" $?
+rm -rf result/ws_arm_current
 [ ! -e result/ws_imm_current/search_state.json ] || rm -rf result/ws_imm_current
 
 # missing cluster_info_cache.json in source → loud warning

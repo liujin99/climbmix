@@ -206,8 +206,13 @@ except (OSError, ValueError):
 }
 
 # 训练/评测语义参数核验: 源 run 发射时的参数 (launch_env.json) vs
-# 当前发射参数。路径/执行形状键排除; DATA_DIR/GENERAL_DATA_DIR 单列
-# (路径不同仅警告 — 内容终审由上面的池 key 把关)。
+# 当前发射参数。三级分诊:
+#   测量层 (拒绝): 池/K/STEM_RATIO/PROXY_*/EVAL_* — 决定历史 d20 分数
+#   臂层 (警告): TARGET_*/MID_* — 只影响新 run 的 d28 臂, 不影响搜索点
+#                (赢家换预算重训 §4.4 = 复用搜索点 + 不同臂预算, 合法)
+#   派生层 (跳过): TARGET_STEPS/TARGET_LOAD_OPTIMIZER — 从旋钮算出的值,
+#                旋钮本身已比对, 比派生值是重复计数
+# DATA_DIR/GENERAL_DATA_DIR 单列 (路径不同仅警告 — 内容终审由池 key 把关)。
 verify_immutable_layer() {
     echo "  训练/评测参数核验 (源 run 发射参数 vs 当前):"
     local params_tmp
@@ -221,34 +226,56 @@ if not os.path.isfile(src_path):
     sys.exit(0)
 src = json.load(open(src_path))
 cur = dict(l.rstrip('\n').split('=', 1) for l in open(params_path) if '=' in l)
-# 硬核验: 语义键 (训练/评测协议) — 不等即拒
+# 派生层: 从旋钮算出来的值, 不直接比对 (旋钮在下面对比)
+DERIVED = {"TARGET_STEPS",            # = TARGET_TOKENS / total_batch_size
+           "TARGET_LOAD_OPTIMIZER"}   # = f(TARGET_ARM_NODES)
+# 臂层: 只影响新 run 的 d28 臂训练, 不影响历史 d20 搜索点分数
+ARM = {"TARGET_TOKENS", "TARGET_BASE_CKPT", "TARGET_LR_SCALE",
+       "TARGET_WARMUP", "TARGET_WARMDOWN", "MID_DEVICE_BATCH_SIZE"}
+# 执行形状 / 身份 / 路径键 — 不比对 (路径类由池 key 终审)
 SKIP = {"EXP_NAME", "OUTPUT_DIR", "NUM_NPU", "NPU_PER_EXP",
         "CLIMBMIX_DIR", "NANOCHAT_DIR", "NANOCHAT_BASE_DIR",
         "TARGET_ARM_NODES", "HF_ENDPOINT", "REMOTE_D28_ASSET_URI",
         "DATA_DIR", "GENERAL_DATA_DIR"}
 # 警告级: 数据路径 — 路径不同内容可能相同, 终审在池 key
 WARN = {"DATA_DIR", "GENERAL_DATA_DIR"}
-mismatch, warns, checked = [], [], 0
+# 当前侧补全不在 EDIT 块的派生键 (TARGET_BASE_CKPT 在 run_climbmix.sh
+# 体内派生, 解析器看不见 → 合成同公式避免误报)
+if "TARGET_BASE_CKPT" in src and not cur.get("TARGET_BASE_CKPT"):
+    nb, td = cur.get("NANOCHAT_BASE_DIR", ""), cur.get("TARGET_DEPTH", "28")
+    cur["TARGET_BASE_CKPT"] = f"{nb}/base_checkpoints/d{td}" if nb else ""
+mismatch, arm_warns, warns, checked = [], [], [], 0
 for k, src_v in sorted(src.items()):
-    if k in SKIP and k not in WARN:
+    if k in DERIVED or (k in SKIP and k not in WARN):
         continue
     cur_v = cur.get(k, "")
     if k in WARN:
         if str(src_v) != str(cur_v):
             warns.append((k, src_v, cur_v))
         continue
+    if k in ARM:
+        if str(src_v) != str(cur_v):
+            arm_warns.append((k, src_v, cur_v))
+        continue
     checked += 1
     if str(src_v) != str(cur_v):
         mismatch.append((k, src_v, cur_v))
 for k, src_v, cur_v in mismatch:
     print(f"    ✗ {k}: 源={src_v}  当前={cur_v or '(默认)'}")
+for k, src_v, cur_v in arm_warns:
+    print(f"    ⚠ {k}: 源={src_v}  当前={cur_v or '(默认)'} (臂层 — 只影响新 run 的 d28 臂, 搜索点不受影响)")
 for k, src_v, cur_v in warns:
     print(f"    ⚠ {k}: 源={src_v}  当前={cur_v or '(默认)'} (路径不同, 由池 key 终审)")
 if mismatch:
-    print(f"    ✗ {len(mismatch)}/{checked} 个语义参数不一致 — 历史点在新配置下的测量")
+    print(f"    ✗ {len(mismatch)}/{checked} 个测量层参数不一致 — 历史点在新配置下的测量")
     print("      可比性存疑 (docs/reuse_design.md §2 不可变层)。修正后再来, 或确认有意为之")
     sys.exit(1)
-print(f"    ✓ {checked} 个语义参数全部一致" + (f" (+{len(warns)} 个路径警告)" if warns else ""))
+msg = f"    ✓ {checked} 个测量层参数全部一致"
+if arm_warns:
+    msg += f" (+{len(arm_warns)} 个臂层警告: 新 run 的臂与源 run 的臂跨配置不可比)"
+if warns:
+    msg += f" (+{len(warns)} 个路径警告)"
+print(msg)
 PY
     rm -f "$params_tmp"
 }
