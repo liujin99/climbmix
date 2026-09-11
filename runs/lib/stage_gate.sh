@@ -279,6 +279,11 @@ run_stage_gate() {
                     "was_complete=$was_complete" \
                     "old_fingerprint=$(cat "$stale/.fingerprint")"
             fi
+        elif python3 -c "import json,sys; sys.exit(0 if json.load(open('$OUTPUT_DIR/search_state.json')).get('history_seed') else 1)" 2>/dev/null; then
+            # Warm-start seed (runs/run_search_from_history.sh + inject_history
+            # 的产物): 有意预放的种子目录 — 不归档。下面的统一写入会补上
+            # 新指纹 (种子目录本就没有旧指纹可比对)。
+            echo "  Warm-start seed detected (history_seed in search_state) — keeping seed, writing fresh fingerprints"
         else
             was_complete=false
             _is_complete "$OUTPUT_DIR" && was_complete=true

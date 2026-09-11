@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ═══════════════════════════════════════════════════════════════════════
-#  cp4_report.py — CP4 最终对比报告 (climb vs random vs base 锚点)
+#  cp4_report.py — CP4 最终对比报告 (所有臂 vs base 锚点, 全景)
 #
 #  用法:
 #    python3 scripts/diagnostics/cp4_report.py [RUN_DIR]
@@ -9,22 +9,24 @@
 #        --base-expected 0.1738 --json cp4_verdict.json
 #
 #  输入 (RUN_DIR 下, 与 dispatch_target_arm.py 落地文件名一致):
-#    eval_climb.csv / eval_random.csv  — 两臂 6 基准评测 CSV
-#    eval_base_remote.csv              — 远端 d28 锚点 (可选)
+#    eval_<arm>.csv     — 每个臂一份 (climb / random / 自定义臂);
+#                         全部自动发现, 有几个比几个
+#    eval_base_remote.csv — 远端 d28 锚点 (可选)
 #
 #  CSV 行格式 (base_eval.py:537-550): label, raw_acc, centered_acc, nll
 #    per-task 行:  arc_easy, 0.6123, 0.4831, 1.234
 #    STEM 聚合行:  STEM, , 0.1738, 1.10   ← raw 列为空
 #    centered = (acc − baseline)/(1 − baseline)  [0=随机, 1=满分]
 #
-#  报告内容:
+#  报告内容 (对照臂 --ref, 默认 random = "搜索是否有价值"的基线):
 #    1. 锚点校验: |远端 base stem − 本地期望| 分级 (PASS≤0.002 / WARN≤SE / FAIL)
-#       — FAIL 说明远端评测管线有偏, 两臂对比不可信, 优先排查
-#    2. 主指标: stem_metric (centered, 搜索目标) climb vs random
-#       Δ ± √2·SE (SE=0.006 为 prod1 经验单次评测噪声), z + 单侧 p
-#    3. 每基准表: raw acc 对比 + 二项 SE (BENCHMARK_SIZES) + 每基准 z
-#    4. 符号检验: climb 赢几个基准, 精确二项 p (无分布假设)
-#    5. 分级判定: WINS(significant≥95% / likely≥90%) / not significant / LOSES
+#       — FAIL 说明远端评测管线有偏, 臂间对比不可信, 优先排查
+#    2. 主指标: 所有臂的 stem_metric (centered, 搜索目标), 按分数排序;
+#       各臂 vs ref: Δ ± √2·SE (SE=0.006 为 prod1 经验单次评测噪声), z + 单侧 p
+#    3. 每基准表: 所有臂 raw acc ± 二项 SE (BENCHMARK_SIZES) 并排
+#    4. 聚合 + 符号检验: 各臂 vs ref 的 raw 均值 Δ + z; 赢几个基准, 精确二项 p
+#    5. 判定: 排名 + 各臂 vs ref 分级 (WINS significant≥95% / likely≥90% /
+#       not significant / LOSES)
 #
 #  只读, stdlib-only, 缺文件容错 (显示 pending 而非报错)。
 # ═══════════════════════════════════════════════════════════════════════
@@ -95,6 +97,20 @@ def parse_eval_csv(path):
     return out
 
 
+def discover_arms(run_dir):
+    """eval_<arm>.csv 全发现 (锚点 eval_base_remote.csv 除外) → 臂名列表."""
+    arms = set()
+    try:
+        names = os.listdir(run_dir)
+    except OSError:
+        return []
+    for n in names:
+        if (n.startswith("eval_") and n.endswith(".csv")
+                and n != "eval_base_remote.csv"):
+            arms.add(n[len("eval_"):-len(".csv")])
+    return sorted(arms)
+
+
 def _f(s):
     try:
         return float(s)
@@ -124,11 +140,25 @@ def sign_test_p(wins, n):
     return tail / (2 ** n)
 
 
+def _tag(z):
+    """Δ 的显著性分级标签 (z = Δ / SE_Δ, 单侧)."""
+    if z >= 2.0:
+        return "WINS**"
+    if z >= 1.65:
+        return "WINS*"
+    if z <= -2.0:
+        return "LOSES**"
+    if z <= -1.65:
+        return "LOSES*"
+    return "·"
+
+
 def main():
-    ap = argparse.ArgumentParser(description="CP4 final report: climb vs random")
+    ap = argparse.ArgumentParser(
+        description="CP4 final report: all arms vs base anchor")
     ap.add_argument("run_dir", nargs="?", default="result/prod2_k15bal_current")
-    ap.add_argument("--arm-a", default="climb")
-    ap.add_argument("--arm-b", default="random")
+    ap.add_argument("--ref", default="random",
+                    help="对照臂 (Δ/z/p 与判定的参照; 默认 random)")
     ap.add_argument("--base-expected", type=float, default=0.1738,
                     help="本地 base (d28) stem_metric 期望值")
     ap.add_argument("--se", type=float, default=0.006,
@@ -138,35 +168,68 @@ def main():
     ap.add_argument("--json", default="", help="可选: 机读 verdict 输出路径")
     args = ap.parse_args()
 
-    a_path = os.path.join(args.run_dir, f"eval_{args.arm_a}.csv")
-    b_path = os.path.join(args.run_dir, f"eval_{args.arm_b}.csv")
-    base_path = os.path.join(args.run_dir, "eval_base_remote.csv")
+    verdict = {"run_dir": args.run_dir, "anchor": None, "ref": None,
+               "arms": None, "pairwise_vs_ref": None, "sign_test": None,
+               "ranking": None, "verdict": None}
 
-    print("═" * 62)
-    print(f"  CP4 report — {args.run_dir}  ({args.arm_a} vs {args.arm_b})")
-    print("═" * 62)
-
-    a = parse_eval_csv(a_path)
-    b = parse_eval_csv(b_path)
-    verdict = {"run_dir": args.run_dir, "anchor": None, "arms": None,
-               "sign_test": None, "verdict": None}
-    if a is None or b is None:
-        for label, path, data in ((args.arm_a, a_path, a),
-                                  (args.arm_b, b_path, b)):
-            if data is None:
-                print(f"  [·] {path} — not found (arm not finished yet?)")
-        print("  → nothing to compare. CP4 fires after BOTH arms land.")
+    arms = discover_arms(args.run_dir)
+    if not arms:
+        print("═" * 62)
+        print(f"  CP4 report — {args.run_dir}")
+        print("═" * 62)
+        print(f"  [·] no eval_<arm>.csv under {args.run_dir}")
+        print("  → nothing to compare. CP4 fires after arms land.")
         if args.json:
             _dump_json(args.json, verdict)
         return 0
 
+    ref = args.ref if args.ref in arms else arms[0]
+    if ref != args.ref:
+        print(f"  (ref '{args.ref}' not among landed arms — "
+              f"falling back to '{ref}')")
+
+    # 解析 + stem (STEM 行缺失时回退 per-benchmark 均值)
+    parsed, stems, no_stem = {}, {}, []
+    for a in arms:
+        d = parse_eval_csv(os.path.join(args.run_dir, f"eval_{a}.csv"))
+        if d is None:
+            print(f"  [·] eval_{a}.csv — not found (arm not finished yet?)")
+            continue
+        parsed[a] = d
+        s = d["stem"] if d["stem"] is not None else _mean_centered(d)
+        if s is None:
+            no_stem.append(a)
+        else:
+            stems[a] = s
+    if not stems:
+        print("  [!] no usable stem score in any arm — abort")
+        return 1
+    for a in no_stem:
+        print(f"  [!] {a}: no usable stem score — excluded from comparison")
+    if ref not in stems:
+        ref = sorted(stems)[0]
+        print(f"  (ref has no usable stem — ref := {ref})")
+
+    ranked = sorted(stems, key=lambda a: -stems[a])          # 分数降序
+    others = [a for a in ranked if a != ref]                 # vs ref 的臂
+    se_delta = math.sqrt(2.0) * args.se
+
+    print("═" * 62)
+    print(f"  CP4 report — {args.run_dir}  "
+          f"({len(ranked)} arms; ref = {ref})")
+    print("═" * 62)
+    verdict["ref"] = ref
+    verdict["arms"] = {a: {"stem": stems[a],
+                           "stem_nll": parsed[a]["stem_nll"]}
+                       for a in ranked}
+
     # ── 1. 锚点校验 ─────────────────────────────────────────────────
     print("── 1. base anchor (remote eval pipeline check) ──")
-    base = parse_eval_csv(base_path)
+    base = parse_eval_csv(os.path.join(args.run_dir, "eval_base_remote.csv"))
     if base is None:
-        print(f"  [·] {base_path} — not found (skipped; optional arm)")
+        print("  [·] eval_base_remote.csv — not found (skipped; optional)")
         print("      NOTE: without the anchor a systematic eval bias would "
-              "shift BOTH arms equally — the Δ comparison stays valid,")
+              "shift ALL arms equally — the Δ comparisons stay valid,")
         print("      but absolute levels (e.g. vs prod1) are unverified.")
     else:
         d = (base["stem"] - args.base_expected) if base["stem"] is not None else None
@@ -189,105 +252,117 @@ def main():
                   f"comparison below)")
             verdict["anchor"] = {"stem": base["stem"], "delta": d, "tag": tag}
 
-    # ── 2. 主指标: stem_metric ─────────────────────────────────────
-    print(f"── 2. headline: stem_metric (centered, the search objective) ──")
-    if a["stem"] is None or b["stem"] is None:
-        print("  [!] STEM row missing in at least one arm CSV — "
-              "falling back to recomputed mean over per-benchmark rows")
-    a_stem = a["stem"] if a["stem"] is not None else _mean_centered(a)
-    b_stem = b["stem"] if b["stem"] is not None else _mean_centered(b)
-    if a_stem is None or b_stem is None:
-        print("  [!] no usable stem score in both arms — abort")
-        return 1
-    delta = a_stem - b_stem
-    se_delta = math.sqrt(2.0) * args.se
-    z = delta / se_delta if se_delta > 0 else 0.0
-    p = norm_sf(z)
-    print(f"  {args.arm_a:<8} {a_stem:.4f}")
-    print(f"  {args.arm_b:<8} {b_stem:.4f}")
-    print(f"  Δ = {delta:+.4f}  (SE √2×{args.se:.3f} = {se_delta:.4f}, "
-          f"z = {z:+.2f}, one-sided p = {p:.3f})")
-    verdict["arms"] = {"a": a_stem, "b": b_stem, "delta": delta,
-                       "z": z, "p_one_sided": p}
+    # ── 2. 主指标: stem_metric (所有臂, vs ref) ─────────────────────
+    print("── 2. headline: stem_metric (centered, the search objective) ──")
+    print(f"  {'arm':<14} {'stem':>7}  {'Δvs ref':>8}  {'z':>6}  {'p':>5}  tag")
+    pw = {}
+    for a in ranked:
+        if a == ref:
+            print(f"  {a:<14} {stems[a]:>7.4f}  {'(ref)':>8}")
+            continue
+        delta = stems[a] - stems[ref]
+        z = delta / se_delta if se_delta > 0 else 0.0
+        p = norm_sf(z)
+        print(f"  {a:<14} {stems[a]:>7.4f}  {delta:>+8.4f}  {z:>+6.2f}  "
+              f"{p:>5.3f}  {_tag(z)}")
+        pw[a] = {"delta": delta, "z": z, "p_one_sided": p, "tag": _tag(z)}
+    if not others:
+        print("  (only the ref arm has a usable score — nothing to compare yet)")
+    print(f"  (SE_Δ = √2×{args.se:.3f} = {se_delta:.4f}; "
+          f"tags: WINS** z≥2 (~95% one-sided), WINS* z≥1.65 (~90%), "
+          f"· noise; LOSES* / LOSES** mirror)")
+    verdict["pairwise_vs_ref"] = pw
 
-    # ── 3. 每基准表 (raw acc + 二项 SE) ────────────────────────────
-    print("── 3. per-benchmark (raw accuracy, binomial SE) ──")
-    common = [t for t in STEM_LABELS
-              if t in a["tasks"] and t in b["tasks"]]
-    missing = [t for t in STEM_LABELS if t not in common]
-    hdr = (f"  {'benchmark':<15} {'N':>5}  {args.arm_a[:7]:>7} "
-           f"{args.arm_b[:7]:>7}  {'Δraw':>8}  {'SE_Δ':>7}  {'z':>6}")
+    # ── 3. 每基准表 (所有臂 raw acc ± 二项 SE) ─────────────────────
+    print("── 3. per-benchmark (raw accuracy ± binomial SE) ──")
+    all_tasks = [t for t in STEM_LABELS
+                 if any(t in d["tasks"] for d in parsed.values())]
+    hdr = (f"  {'benchmark':<15} {'N':>5}  "
+           + " ".join(f"{a[:11]:>17}" for a in ranked))
     print(hdr)
     print("  " + "-" * (len(hdr) - 2))
-    wins = 0
     per_bench = []
-    for t in common:
-        ar = a["tasks"][t]["raw"]
-        br = b["tasks"][t]["raw"]
+    for t in all_tasks:
         n = BENCHMARK_SIZES.get(t)
-        se_a = binom_se(ar, n)
-        se_b = binom_se(br, n)
-        if ar is not None and br is not None and ar != br:
-            wins += 1 if ar > br else 0
-        row = {"benchmark": t, "n": n, "a_raw": ar, "b_raw": br}
-        if None not in (ar, br, se_a, se_b):
-            d = ar - br
-            sd = math.sqrt(se_a ** 2 + se_b ** 2)
-            zb = d / sd if sd > 0 else 0.0
-            print(f"  {t:<15} {n:>5}  {ar:>7.4f} {br:>7.4f}  "
-                  f"{d:>+8.4f}  {sd:>7.4f}  {zb:>+6.2f}")
-            row.update({"delta": d, "se_delta": sd, "z": zb})
-        else:
-            print(f"  {t:<15} {str(n):>5}  {_fmt(ar):>7} {_fmt(br):>7}"
-                  f"  {'—':>8}")
-        per_bench.append(row)
-    if missing:
-        print(f"  (not scored on both arms: {', '.join(missing)})")
+        cells, raws = [], {}
+        for a in ranked:
+            r = parsed[a]["tasks"].get(t, {}).get("raw") if a in parsed else None
+            se = binom_se(r, n)
+            raws[a] = r
+            cells.append(f"{r:.4f}±{se:.4f}" if None not in (r, se) else "—")
+        print(f"  {t:<15} {str(n):>5}  " + " ".join(f"{c:>17}" for c in cells))
+        per_bench.append({"benchmark": t, "n": n, "raw": raws})
+    absent = [t for t in STEM_LABELS if t not in all_tasks]
+    if absent:
+        print(f"  (not scored on any arm: {', '.join(absent)})")
 
-    # ── 4. 聚合 raw 均值 + 符号检验 ────────────────────────────────
-    print("── 4. aggregate & sign test ──")
-    pairs = [r for r in per_bench
-             if r.get("delta") is not None and r.get("se_delta") is not None]
-    if pairs:
-        n_b = len(pairs)
-        mean_d = sum(r["delta"] for r in pairs) / n_b
-        se_mean = math.sqrt(sum(r["se_delta"] ** 2 for r in pairs)) / n_b
-        z_mean = mean_d / se_mean if se_mean > 0 else 0.0
-        # 注: centered=(acc−b)/(1−b), 4 选一基准 b=0.25 → SE 放大 ≤1.33×,
-        # raw 空间的 z 是保守下界。
-        print(f"  equal-weight raw mean Δ = {mean_d:+.4f} "
-              f"(binomial SE {se_mean:.4f}, z {z_mean:+.2f}, "
-              f"p {norm_sf(z_mean):.3f}) — conservative (centered "
-              f"scales SE ≤1.33×)")
-    if common:
-        st = sign_test_p(wins, len(common))
-        print(f"  sign test: {args.arm_a} wins {wins}/{len(common)} "
-              f"benchmarks, exact one-sided p = {st:.3f}")
-        verdict["sign_test"] = {"wins": wins, "n": len(common), "p": st}
-    for arm_name, data in ((args.arm_a, a), (args.arm_b, b)):
-        if data["stem_nll"] is not None:
-            print(f"  {arm_name} stem NLL (secondary): "
-                  f"{data['stem_nll']:.4f}")
+    # ── 4. 聚合 raw 均值 + 符号检验 (各臂 vs ref) ──────────────────
+    print(f"── 4. aggregate & sign test (vs ref = {ref}) ──")
+    st = {}
+    for a in others:
+        pairs = []
+        wins = n_cmp = 0
+        for t in all_tasks:
+            ra = parsed[a]["tasks"].get(t, {}).get("raw")
+            rb = parsed[ref]["tasks"].get(t, {}).get("raw")
+            if ra is None or rb is None:
+                continue
+            n = BENCHMARK_SIZES.get(t)
+            sa, sb = binom_se(ra, n), binom_se(rb, n)
+            n_cmp += 1
+            wins += 1 if ra > rb else 0
+            if None not in (sa, sb):
+                pairs.append((ra - rb, math.sqrt(sa ** 2 + sb ** 2)))
+        line = f"  {a}: "
+        if pairs:
+            n_p = len(pairs)
+            mean_d = sum(d for d, _ in pairs) / n_p
+            se_mean = math.sqrt(sum(s * s for _, s in pairs)) / n_p
+            z_mean = mean_d / se_mean if se_mean > 0 else 0.0
+            # 注: centered=(acc−b)/(1−b), 4 选一基准 b=0.25 → SE 放大 ≤1.33×,
+            # raw 空间的 z 是保守下界。
+            line += (f"raw mean Δ {mean_d:+.4f} (binomial SE {se_mean:.4f}, "
+                     f"z {z_mean:+.2f}, p {norm_sf(z_mean):.3f}); ")
+        line += f"wins {wins}/{n_cmp} benchmarks, exact one-sided p = {sign_test_p(wins, n_cmp):.3f}"
+        print(line)
+        st[a] = {"wins": wins, "n": n_cmp, "p": sign_test_p(wins, n_cmp)}
+    verdict["sign_test"] = st
+    nlls = [f"{a} {parsed[a]['stem_nll']:.4f}" for a in ranked
+            if parsed[a]["stem_nll"] is not None]
+    if nlls:
+        print(f"  stem NLL (secondary): {' / '.join(nlls)}")
 
     # ── 5. 判定 ────────────────────────────────────────────────────
     print("── 5. verdict ──")
-    anchor_bad = verdict.get("anchor", {}).get("tag") if isinstance(
+    lines = []
+    anchor_tag = verdict.get("anchor", {}).get("tag") if isinstance(
         verdict.get("anchor"), dict) else None
-    if anchor_bad == "FAIL":
-        v = "STOP — anchor FAIL: remote eval pipeline biased, comparison untrustworthy"
-    elif delta > 0 and z >= 2.0:
-        v = f"{args.arm_a.upper()} WINS — significant (z={z:+.2f}, ~95% one-sided)"
-    elif delta > 0 and z >= 1.65:
-        v = f"{args.arm_a.upper()} WINS — likely (z={z:+.2f}, ~90% one-sided)"
-    elif delta < 0 and z <= -2.0:
-        v = f"{args.arm_b.upper()} WINS — significant (z={z:+.2f}, ~95% one-sided)"
-    elif delta < 0 and z <= -1.65:
-        v = f"{args.arm_b.upper()} WINS — likely (z={z:+.2f}, ~90% one-sided)"
-    else:
-        v = (f"INCONCLUSIVE — Δ={delta:+.4f} within noise "
-             f"(|z|={abs(z):.2f} < 1.65); treat as no significant difference")
-    print(f"  ► {v}")
-    verdict["verdict"] = v
+    if anchor_tag == "FAIL":
+        lines.append("STOP — anchor FAIL: remote eval pipeline biased, "
+                     "comparison untrustworthy")
+    if len(ranked) > 1:
+        lines.append("ranking: "
+                     + " › ".join(f"{a} {stems[a]:.4f}" for a in ranked))
+    for a in others:
+        d, z = pw[a]["delta"], pw[a]["z"]
+        if z >= 2.0:
+            v = f"{a.upper()} WINS vs {ref} — significant (z={z:+.2f}, ~95% one-sided)"
+        elif z >= 1.65:
+            v = f"{a.upper()} WINS vs {ref} — likely (z={z:+.2f}, ~90% one-sided)"
+        elif z <= -2.0:
+            v = f"{a.upper()} LOSES vs {ref} — significant (z={z:+.2f})"
+        elif z <= -1.65:
+            v = f"{a.upper()} LOSES vs {ref} — likely (z={z:+.2f})"
+        else:
+            v = (f"{a} vs {ref}: INCONCLUSIVE — Δ={d:+.4f} within noise "
+                 f"(|z|={abs(z):.2f} < 1.65); treat as no significant difference")
+        lines.append(v)
+    if not lines:
+        lines.append(f"only {ref} has landed — re-run after more arms finish")
+    for v in lines:
+        print(f"  ► {v}")
+    verdict["ranking"] = ranked
+    verdict["verdict"] = lines
     print(f"  reference: prod1 climb {PROD1['climb']:.4f} / random "
           f"{PROD1['random']:.4f} (Δ {PROD1['climb'] - PROD1['random']:+.4f}), "
           f"local base {PROD1['base']:.4f}")

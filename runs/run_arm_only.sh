@@ -11,7 +11,7 @@
 #                      失败重试场景; 前次 SUCCEEDED 的臂会被 .done 跳过)
 #
 #  用法: 编辑下方 EDIT 块 → ./runs/run_arm_only.sh
-#  对比: run_report_only.sh ARM_A=<臂名> ARM_B=climb
+#  训完自动出 CP4 全景报告 (run 内所有臂, 对照默认 random; 臂没落地自动跳过)
 # ═══════════════════════════════════════════════════════════════════
 set -euo pipefail
 
@@ -48,6 +48,7 @@ fi
 
 CLIMBMIX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$CLIMBMIX_DIR"
+source "$CLIMBMIX_DIR/runs/lib/auto_report.sh"
 RUN_DIR="${RUN_DIR#"$CLIMBMIX_DIR"/}"
 
 echo "═══ arm only: ${ARM_NAME} @ ${RUN_DIR} ═══"
@@ -161,9 +162,13 @@ if [ "$LAUNCH" != "1" ]; then
     echo
     echo "[dry-run] 将执行:"
     echo "  python3 scripts/dispatch_target_arm.py --arm ${ARM_NAME} --output-dir ${RUN_DIR}$( [ "$RETRY_FAILED" = "1" ] && echo ' --retry-failed' )"
+    echo "  训完自动出全景对比报告 (run 内所有臂, 对照默认 random)"
     exit 0
 fi
 
-exec python3 scripts/dispatch_target_arm.py \
+# 非 exec — dispatch 结束后要出自动全景报告 (dispatch 失败时 set -e 直接退出, 不报告)
+python3 scripts/dispatch_target_arm.py \
     --arm "$ARM_NAME" --output-dir "$RUN_DIR" \
     "${EXTRA[@]+"${EXTRA[@]}"}"
+
+auto_cp4_report "$RUN_DIR"

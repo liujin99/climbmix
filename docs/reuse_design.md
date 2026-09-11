@@ -39,7 +39,7 @@ OBS 内部分两区，判据 = 生产者 + 再生成本 + 生命周期不同：
 
 现状缺口：OBS 上有全部重资产、却没有最关键的轻资产（search_state/eval CSV 是 master 产物，从不离开磁盘）。`archive/` 区补这个洞。归档动作目前手动（`obsutil cp`），自动化待做（见 §7）。
 
-**OBS 前缀必须按 run 隔离**：`REMOTE_OBS_PREFIX` 末尾必须带 run 名（如 `…/prod/climbmix/prod3`）。原因：exp id 每 run 从 0 重编，跨 run 共用前缀时——搜索 exp 混合数据是先删后传（remote_executor `_run_remote_experiment`），旧 run 的 OBS 记录会被摧毁；臂数据用 `upload_dir_if_missing`（存在即跳过），新 run 可能直接用旧 run 的混合数据训练（静默正确性事故）。preflight 校验待加（§7；`run_search_arms.sh` 入口已强制）。
+**OBS 前缀必须按 run 隔离**：`REMOTE_OBS_PREFIX` 末尾必须带 run 名（如 `…/prod/climbmix/prod3`）。原因：exp id 每 run 从 0 重编，跨 run 共用前缀时——搜索 exp 混合数据是先删后传（remote_executor `_run_remote_experiment`），旧 run 的 OBS 记录会被摧毁；臂数据用 `upload_dir_if_missing`（存在即跳过），新 run 可能直接用旧 run 的混合数据训练（静默正确性事故）。preflight 校验待加（§7；`run_search.sh` 入口已强制）。
 
 ---
 
@@ -54,9 +54,10 @@ OBS 内部分两区，判据 = 生产者 + 再生成本 + 生命周期不同：
 
 **复用凭证 = 不可变层一致**。操作层面的校验手段：
 
+- **池身份（内容级，第一前提）**：K 相同 ≠ 池相同——权重向量活在簇空间里，两个不同池各自聚成 K=15，同一权重指代的是不同文档集合。池身份 = `pool_embedding_cache_key`（sha256 of 全部分片名+大小、嵌入模型、截断长度、采样数，`utils/embed_cache.py`——与 pool-keyed 缓存同源，每个 run 的 search.log 都记录过）。`run_extend_search.sh` 发射前自动核验：源 key（search.log 记录）vs 当前 key（现场扫 DATA_DIR 计算），不等**拒绝发射**；源无 search.log 时退回 DATA_DIR 路径级比对（不等亦拒绝）。局限（与指纹同级）：同名同大小的内容替换检测不到。
 - **K（池维度）**：注入工具硬校验 + `_load_state` 已有的 n_clusters 守卫（不匹配 → 丢弃状态重新开始）。
-- **池内容**：新 run 的 `cluster_cache.npz` **必须从旧 run 复制，不重新生成**（cluster 重生成有随机性，参数相同池子也可能不同）。注入工具对 `--pool` 指定的 cache 计算 sha256 记入种子溯源块。
-- **训练/eval 配置**：由新 run 自己的指纹机制守住（改了配置 = 新指纹 = 全新实验，注入自然失效）。跨配置引用历史点属于操作员责任，发射谱（§8）里有检查清单。
+- **池内容**：新 run 的 `cluster_cache.npz` **必须从旧 run 复制，不重新生成**（cluster 重生成有随机性，参数相同池子也可能不同）。注入工具对 `--pool` 指定的 cache 计算 sha256 记入种子溯源块；缓存继承 = 双文件（`cluster_cache.npz` + `cluster_info_cache.json`，缺一会触发重新聚类）。
+- **训练/eval 配置**：`run_extend_search.sh` 自动 diff 源 run 的 `launch_env.json` 语义键 vs 当前发射参数（env 覆盖 > run_climbmix.sh EDIT 块默认值），不一致逐键列出并拒绝；`DATA_DIR`/`GENERAL_DATA_DIR` 路径不同仅警告（内容终审由池 key 把关）。
 
 **数据模型：raw 与 derived 分离**。`search_state.json` 里的 `accumulated_per_benchmark`（每任务原始 acc/NLL）是**不可变事实**；`accumulated_scores` 是 raw × 评分公式的**派生物**，可随公式版本重算（这正是 rescore 存在的理由；prod2 的 w 单位 bug 教训）。
 
@@ -122,7 +123,7 @@ python3 scripts/inject_history.py \
 
 bootstrapper 改动（最小）：`_save_state`/`_load_state` 增加 `history_seed` 字段往返；`_load_state` 看到种子时大声打印来源。种子在后续每次 `_save_state` 中原样保留。
 
-**发射预算语义**：`CONFIGS_PER_ITER` 的第 1 槽位 = 历史点数。prod3 想要"30 历史 + 60 新点" → `CONFIGS_PER_ITER="30,20,10"`（iter1 由种子占据，iter2/3 各采 20/10 新点）。发射线即真实总预算，无隐藏账。
+**发射预算语义**：`CONFIGS_PER_ITER` 永远 = **本 run 自己的轮次计划**。热启动时历史点是"地基"不算轮次：`run_extend_search.sh` 自动把历史数补进底层列表头（地基占 iter1）并打印预算分解。prod3 想要"30 历史 + 30 新点" → `CONFIGS_PER_ITER="20,10"`（新实验第 1 轮 20、第 2 轮 10）→ 壳内规范化为底层 `30,20,10` 并打印 `总实验数 = 30 历史 + 30 新 = 60`。兼容写法：第 1 槽恰好等于历史数时视为"含历史"写法，不重复补。中断续跑同一命令同一写法（壳从 state 的 `history_seed` 识别注入型 run 并自动补槽）。注意：手动谱直接跑 `run_climbmix.sh` 没有壳的规范化，必须写含历史的完整列表。
 
 ### 4.3 re-eval（换/补基准集，`scripts/re_eval_history.py`，待实现）
 
@@ -162,21 +163,23 @@ NANOCHAT_REPO=$NANOCHAT_DIR python3 scripts/mix_general_data.py \
   --climbmix-dir $GENERAL_DATA_DIR --stem-ratio 0.7 --num-workers 8 --num-npu 8
 ```
 
-**③ 发射：`dispatch_target_arm.py --arm <name>`（开放任意名）**——`--arm` 不再限死三选一，任何 `[A-Za-z0-9_-]+` 的名字走通用臂路径（锁/`.done`/audit/tag/OBS `target_arms/<name>/` 全部按名字泛化；random 的选点等待和 base_eval_check 的单节点约束只对这两个名字生效）：
+**③ 发射：`runs/run_arm_only.sh`（臂阶段入口；底层 `dispatch_target_arm.py --arm <name>` 开放任意名）**——`--arm` 不再限死三选一，任何 `[A-Za-z0-9_-]+` 的名字走通用臂路径（锁/`.done`/audit/tag/OBS `target_arms/<name>/` 全部按名字泛化；random 的选点等待和 base_eval_check 的单节点约束只对这两个名字生效）：
 
 ```bash
-# 固定比例基线臂
-python3 scripts/dispatch_target_arm.py --arm fixratio_v1 \
-  --data-dir result/<run>/fixratio_mixed
+# 固定比例基线臂 (壳自动: 选点 → 混合 → dispatch)
+ARM_NAME=fixratio_v1 WEIGHTS="0.2,0.2,0.3,..." bash runs/run_arm_only.sh
 
-# 赢家重训：换训练参数 —— CLI 环境变量优先于 launch_env.json（load_launch_env 既有语义）
-TARGET_STEPS=3000 MID_DEVICE_BATCH_SIZE=1 python3 scripts/dispatch_target_arm.py \
-  --arm winner_v2 --data-dir result/<run>/winner_mixed
+# 赢家重训：换训练参数 —— 预算 = TARGET_TOKENS 单参数（1.5B 目标模型按
+# token 预算配置；步数自动派生，TARGET_STEPS 非旋钮）。TARGET_TOKENS 覆盖
+# 必须走壳（壳层发现 TOKENS ≠ run 快照时重派生步数再传 dispatch；裸跑
+# dispatch 读的是快照里的派生步数，只设 TOKENS 不会改变训练长度）：
+ARM_NAME=winner_v2 WEIGHTS=result/<run>/optimal_mixture_weights.json \
+TARGET_TOKENS=3B MID_DEVICE_BATCH_SIZE=1 bash runs/run_arm_only.sh
 ```
 
 **复用语义**：臂混合数据走 `upload_dir_if_missing`（同配比 + 同池 → 同 OBS 地址 → 存在即跳过 = 复用混合数据，省重新混合）；这正是把跨 run 前缀碰撞的"地雷"反转成复用特性的前提——前提是 §1 的 per-run 前缀规则先落地。
 
-**报告**：`cp4_report.py` 已有 `--arm-a/--arm-b`，custom 臂今天就能做成对比较（如 `--arm-a fixratio_v1 --arm-b climb`）；单报告 N 臂全景泛化进待办。
+**报告**：壳尾部自动出 CP4 全景报告（`auto_cp4_report`，`runs/lib/auto_report.sh`）——自动发现 run 内所有 `eval_<arm>.csv`，有几个臂比几个（对照臂 `--ref` 默认 random = "搜索是否有价值"的基线）：排名 + 各臂 vs ref 的 Δ/z/p + 每基准 raw 表 + 符号检验；无臂 CSV 时明确跳过。`run_report_only.sh` 已删除（报告需求由臂尾部自动 + 直接跑 `cp4_report.py [RUN_DIR]` 覆盖；rescore 保留为 `scripts/rescore_search.py` 直跑——注入工具内部共用同一条重算路径）。
 
 ---
 
@@ -206,38 +209,39 @@ TARGET_STEPS=3000 MID_DEVICE_BATCH_SIZE=1 python3 scripts/dispatch_target_arm.py
 
 ## 7. 待办（不阻塞复用主线）
 
-- ~~preflight 校验 `REMOTE_OBS_PREFIX` 末尾含 run 名~~（已由 `run_search_arms.sh` 启动校验覆盖；preflight 层——直接跑 `run_climbmix.sh` 的路径——仍待加）；
+- ~~preflight 校验 `REMOTE_OBS_PREFIX` 末尾含 run 名~~（已由 `run_search.sh` 启动校验覆盖；preflight 层——直接跑 `run_climbmix.sh` 的路径——仍待加）；
 - `mark_completed` 尾部自动上传精选产物 → `{prefix}/archive/<run>/` + `MANIFEST.json`；
 - re-eval 工具实现（§4.3，等 mmlu 上游）；
-- `cp4_report.py` 单报告 N 臂全景（今天用 `--arm-a/--arm-b` 成对比较）；
 - `_save_state` 增补 `pool_cache_sha256`（当前由注入工具写入 `history_seed` 承担）。
 
 ---
 
 ## 8. prod3 发射谱（复用 prod2 的 30 点）
 
-**一键方式**（nanochat 式状态驱动，一个命令覆盖三态）：
+**一键方式**（入口即意图：全新实验 / 复用热启动 分开两个 sh）：
 
 ```bash
-# run_search_arms.sh 按目标目录状态自动分派:
-#   无 search_state.json + 无 HISTORY_RUN  → 从零
-#   无 search_state.json + HISTORY_RUN=<旧run> → 热启动 (校验+继承池+注入)
-#   已有 search_state.json (种子或真实进度) → 续跑 (重跑同命令, 不重注入)
-HISTORY_RUN=result/prod2_k15bal_20260909_200323 EXP_NAME=prod3 \
-  ./runs/run_search_arms.sh                 # 编辑文件顶部 EDIT 块后直接跑
-LAUNCH=0 ./runs/run_search_arms.sh          # 干跑: 校验+注入+打印发射线
+# 全新实验 (不用历史): runs/run_search.sh (重跑同命令 = 续跑)
+# 复用历史热启动:     runs/run_extend_search.sh — EDIT 块填 HISTORY_RUN
+#   (留空运行 = 列出所有可用历史 run 及其点数)
+HISTORY_RUN=result/prod2_k15bal_20260909_200323 \
+  ./runs/run_extend_search.sh          # 编辑文件顶部 EDIT 块后直接跑
+LAUNCH=0 ./runs/run_extend_search.sh   # 干跑: 校验+注入+打印发射线, 不发射
+# CONFIGS_PER_ITER = 新实验自己的轮次计划 (历史=地基, 不算轮次):
+#   "20,10" = 新实验第 1 轮 20 个 + 第 2 轮 10 个新 d20;
+#   历史 30 点作地基 → 总实验数 60, 其中要跑的 30 (干跑打印预算分解)
 ```
 
-壳内自动完成（即下面的手动谱）：源 run 完整性检查 → **K 一致性预检**（balanced_profile 的 K_final vs K_ENHANCED，不一致直接拒绝）→ 复制池缓存（继承，不重新聚类）→ inject_history（池 K 硬校验 + 当前公式重算 + 溯源）→ **槽位核对**（CONFIGS_PER_ITER 第 1 槽 vs 历史点数，不符大声警告）→ 调 run_climbmix.sh（可选并行预发 random 臂）。
+壳内自动完成（即下面的手动谱）：源 run 完整性检查 → **K 一致性预检**（balanced_profile 的 K_final vs K_ENHANCED，不一致直接拒绝；HISTORY_RUN 缺省时列出可用源 + 点数 + 池 K + 池 key + 可复用性标注）→ **池身份核验**（源 search.log 的池 key vs 现场扫 DATA_DIR 算的 key，不等拒绝；无 search.log 回退路径级比对）→ 复制池缓存（**双文件** `cluster_cache.npz` + `cluster_info_cache.json` — climb_pipeline 缓存命中条件，缺任一个会触发重新聚类 = 历史点作废）→ inject_history（池 K 硬校验 + 当前公式重算 + 溯源）→ **槽位规范化**（CONFIGS_PER_ITER 只写新实验轮次，历史数自动补进列表头 + 预算分解打印）→ **不可变层自动 diff**（源 run 的 launch_env.json 语义键 vs 当前发射参数，不一致逐键警告并拒绝；DATA_DIR/GENERAL_DATA_DIR 路径不同仅警告）→ exec run_search.sh（可选并行预发 random 臂）。中断后重跑同命令同写法 = 续跑（从 state 的 `history_seed` 识别，不重注入）。REMOTE_OBS_PREFIX 留空时自动从 climbmix-ma 配置的 `obs_prod_base`（`~/.config/climbmix/remote_ma.json`，与 secret 同文件，私有永不进 git）拼 `<base>/<EXP_NAME>`。stage_gate 对种子目录（state 含 `history_seed`）免孤儿归档，直接补写新指纹。
 
 **阶段脚本全家**（quadmix 式 `run_<阶段>`：从该阶段开始跑；`LAUNCH=0` 干跑）：
 
 | sh | 从哪开始 / 覆盖场景 |
 |---|---|
-| `runs/run_search_arms.sh` | 主实验（d20 搜索+两臂）：从零 / 中断续跑（重跑同命令）/ 热启动（`HISTORY_RUN`，场景 5、6） |
-| `runs/run_arm_only.sh` | 臂阶段：自定义配比（`WEIGHTS`）/ 赢家重训（`WEIGHTS` + 训练参数覆盖）/ 已有臂重发（`WEIGHTS` 空 + `--retry-failed`，场景 3、4） |
+| `runs/run_search.sh` | 新实验（d20 搜索+两臂）：从零 / 中断续跑（重跑同命令） |
+| `runs/run_extend_search.sh` | 基于已有 d20 实验结果做增量实验（`HISTORY_RUN`，场景 5、6；缺省列出可用源+点数+池 key+可复用性；发射前池身份/训练评测参数自动核验） |
+| `runs/run_arm_only.sh` | 臂阶段：自定义配比（`WEIGHTS`）/ 赢家重训（`WEIGHTS` + 训练参数覆盖）/ 已有臂重发（`WEIGHTS` 空 + `--retry-failed`，场景 3、4）；训完自动 CP4 全景报告（所有臂 vs ref=random） |
 | `runs/run_eval_only.sh` | 评测阶段：base 锚点补发（场景 8）；（待 mmlu 上游）d20 re-eval 挂这（场景 1，§4.3） |
-| `runs/run_report_only.sh` | 报告阶段：分数重算 sidecar（场景 2）+ 任意两臂 CP4 对比（含自定义臂） |
 
 手动谱（等价于壳内动作，留作参考）：
 
@@ -260,7 +264,11 @@ python3 scripts/inject_history.py \
 #    - 候选池 = 复制的 cluster_cache.npz（不是重新聚类）
 #    - 代码：评分公式修复已含（e8f22f2 之后）
 
-# 3) 发射（CONFIGS_PER_ITER 第 1 槽 = 30 历史；总计 30+60=90 点预算）
+# 3) 发射 — 注意: 手动谱直接跑 run_climbmix.sh, 没有壳的槽位规范化,
+#    必须写含历史的完整列表 (第 1 槽=30 历史); 一键路径
+#    (run_search.sh) 才能用 "只写新点计划" 的简写 "20,10"。
+#    OBS 前缀一次性配置后可省略:
+#    echo obs://<bucket>/<user>/climbmix > ~/.config/climbmix/obs_base_prefix
 EXP_NAME=prod3 K_ENHANCED=15 NPU_PER_EXP=8 REMOTE_MAX_JOBS=10 \
 CONFIGS_PER_ITER="30,20,10" ADAPTIVE_CONFIGS=1 ADAPTIVE_COMPACT=1 REMOTE_LOCAL_PARALLEL=1 \
 REMOTE_OBS_PREFIX=obs://<bucket>/<user>/climbmix/prod3 \

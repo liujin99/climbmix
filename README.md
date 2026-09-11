@@ -130,13 +130,15 @@ DEPTH=28  bash runs/train_base_model.sh   # d28 target checkpoint
 bash runs/speedrun_climbmix.sh
 
 # Step 3: Production experiments — quadmix-style stage scripts
-# (run_<stage>_only = 从该阶段开始; 主入口三态: 从零/续跑=重跑同命令/热启动)
+# (run_<stage> = 从该阶段开始; 主入口状态驱动: 从零/续跑=重跑同命令)
 # Each is self-contained: edit the env block at the top, then ./run it.
 #   LAUNCH=0 ./runs/xxx.sh  = dry-run (validate + print, no execution)
-bash runs/run_search_arms.sh     # 主实验 (d20 搜索 + 两臂; HISTORY_RUN=<旧run> = 热启动)
-bash runs/run_arm_only.sh        # 只跑臂 (自定义配比 WEIGHTS / 赢家重训 / 已有臂重发)
-bash runs/run_eval_only.sh       # 只评测 (base 锚点; 未来 d20 re-eval)
-bash runs/run_report_only.sh     # 只出报告 (分数重算 sidecar + 任意两臂 CP4 对比)
+bash runs/run_search.sh          # 新实验 (d20 搜索 + 两臂; 重跑同命令 = 续跑)
+bash runs/run_extend_search.sh       # 基于已有 d20 实验结果做增量实验 (HISTORY_RUN=旧run; 池/参数自动核验)
+bash runs/run_arm_only.sh             # 只跑臂 (自定义配比 WEIGHTS / 赢家重训 / 已有臂重发; 训完自动 CP4 全景报告)
+bash runs/run_eval_only.sh            # 只评测 (base 锚点; 未来 d20 re-eval)
+# 一次性: 把 "obs_prod_base" (生产 OBS 根前缀) 写进 ~/.config/climbmix/remote_ma.json
+# (与 secret 同文件) — 之后所有发射免填 REMOTE_OBS_PREFIX (自动拼 /<run_name>)。
 # 原始入口 (上述脚本的底层引擎, 全参数 env 驱动):
 bash runs/run_climbmix.sh
 ```
