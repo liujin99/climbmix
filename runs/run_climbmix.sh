@@ -53,7 +53,6 @@ GENERAL_DATA_DIR="${GENERAL_DATA_DIR:-$NANOCHAT_BASE_DIR/climbmix_shards}"
 PROXY_DEPTH="${PROXY_DEPTH:-20}"
 TARGET_DEPTH="${TARGET_DEPTH:-28}"
 PROXY_NUM_ITERATIONS="${PROXY_NUM_ITERATIONS:-1000}"
-TARGET_STEPS="${TARGET_STEPS:-1000}"
 # Token caps for data selection (full pool ≈ 100B tokens / 116M docs — NOT capped means
 # every proxy exp would select the whole pool; that's the default 0, so always set these).
 # Proxy: 400M tokens/exp = single-pass calibration (2026-08-28, TODO.md): training
@@ -61,9 +60,32 @@ TARGET_STEPS="${TARGET_STEPS:-1000}"
 # consumption → no silent loader cycling (200M gave epoch≈1.8; run-4 target log
 # showed epoch:4). Paper's 800M is its proxy CONSUMPTION (~394 × 2M batch), not a
 # cap; our 524M = 65% of paper (documented deviation, scoring_metric_design §12.3).
-# Target: 1B tokens ≈ d28 anneal budget (1000 iters × ~1M) ≈ 1 epoch, no repetition.
+# Target: TARGET_TOKENS 是唯一真源 (退火预算), 步数由它派生 (见下方推导块),
+# 池子=预算/STEM_RATIO, 消耗=预算 → 恒单遍 (epoch≈0.7)。
 PROXY_TARGET_TOKENS="${PROXY_TARGET_TOKENS:-400M}"
-TARGET_TOKENS="${TARGET_TOKENS:-1B}"
+TARGET_TOKENS="${TARGET_TOKENS:-2B}"
+
+# TARGET_STEPS 派生 (单一真源): steps = TARGET_TOKENS / total_batch_size (d28 ckpt meta)。
+# 消耗 ≈ 预算、池子 = 预算/STEM_RATIO ≈ 1.43×消耗 → 恒单遍 (epoch≈0.7, 守卫恒过)。
+# TARGET_STEPS 不再是用户旋钮: 外部设置 = 遗留配置, 就地报错 (防静默指纹漂移)。
+# 臂级复用 (run_arm_only.sh) 用同一 CLI 派生; 直接 dispatch 的"同数据改步数"走
+# env 优先级, 由 single-pass 守卫把关。
+# 历史精确复现: prod1/prod2 的 2000 步 = TARGET_TOKENS=2097152000。
+if [ -n "${TARGET_STEPS:-}" ]; then
+    echo "✗ TARGET_STEPS=${TARGET_STEPS} is no longer a knob — it is DERIVED from TARGET_TOKENS."
+    echo "  unset TARGET_STEPS and set the budget instead (TARGET_TOKENS=2B → 1907 steps @ 1,048,576)."
+    echo "  legacy 2000-step pair = TARGET_TOKENS=2097152000."
+    exit 1
+fi
+if [ "${TARGET_TOKENS}" = "0" ]; then
+    echo "✗ TARGET_TOKENS=0 ('all available') is invalid for target arms — set an explicit budget (e.g. 2B)."
+    exit 1
+fi
+TARGET_STEPS="$(python3 scripts/derive_target_steps.py \
+    --target-tokens "$TARGET_TOKENS" \
+    --ckpt-dir "$NANOCHAT_BASE_DIR/base_checkpoints/d${TARGET_DEPTH}")" \
+    || { echo "✗ TARGET_STEPS derivation failed"; exit 1; }
+echo "  TARGET_STEPS derived from TARGET_TOKENS=$TARGET_TOKENS -> $TARGET_STEPS steps"
 CONFIGS_PER_ITER="${CONFIGS_PER_ITER:-20,10,5}"
 # prod2 B++: 期望列表语义 — ADAPTIVE_CONFIGS=1 时 configs_per_iter 视为
 # "期望每轮实验数", 由实测并发 (RemoteExecutor 探测) 浮动到
@@ -609,6 +631,19 @@ run_arm() {
     if [ -f "$OUTPUT_DIR/.done_mid_train_$name" ]; then
         echo "  mid_train $name: already done, skip"
     else
+        # 单遍 (epoch<=1) 守卫: 消耗 (TARGET_STEPS × total_batch_size) 不得
+        # 超过混合池实际 token 量 — nanochat loader 跑完会静默循环重采,
+        # 破坏论文单遍退火语义且两臂不对称。发射/兜底训练前统一拦截
+        # (见 scripts/check_single_pass.py)。
+        if ! python3 "$CLIMBMIX_DIR/scripts/check_single_pass.py" \
+            --data-dir "$data_dir" \
+            --num-iterations "$TARGET_STEPS" \
+            --ckpt-dir "$TARGET_BASE_CKPT" \
+            --stem-ratio "$STEM_RATIO" \
+            --context "$name arm"; then
+            echo "✗ [$name] single-pass guard failed — refusing to train"
+            exit 1
+        fi
         if [ "$TARGET_ARM_MODE" = "remote" ] && [ "$REMOTE_ENABLED" = "1" ]; then
             echo "  [$name] remote target-arm dispatch (waits for the job)..."
             if python3 "$CLIMBMIX_DIR/scripts/dispatch_target_arm.py" \

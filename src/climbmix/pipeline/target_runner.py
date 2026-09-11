@@ -92,6 +92,11 @@ class TargetRunner:
               f"({self.stem_ratio*100:.0f}% STEM + {(1-self.stem_ratio)*100:.0f}% general)...")
         self._prepare_mixture_data(selected_indices, mixture_data_dir)
 
+        self._guard_single_pass(
+            mixture_data_dir,
+            mixed=self.stem_ratio < 1.0 and bool(self.general_data_dir),
+        )
+
         mid_cmd = self._build_mid_train_cmd(model_tag, mixture_data_dir)
         print(f"  [Target] mid_train: {' '.join(mid_cmd)}")
         mid_rc = self._run_subprocess(mid_cmd, target_dir, "mid_train")
@@ -306,6 +311,34 @@ class TargetRunner:
                 os.path.join(stem_temp_dir, f),
                 os.path.join(mixture_data_dir, f),
             )
+
+    def _guard_single_pass(self, mixture_data_dir: str, mixed: bool = True):
+        """Epoch<=1 guard: steps x total_batch_size <= measured mixture pool.
+
+        The nanochat loader wraps silently on exhaustion (no error, no
+        warning) — an over-budget config would re-sample documents and
+        break the paper's single-pass annealing semantics. See
+        climbmix.sampling.single_pass for the shared implementation.
+        """
+        from climbmix.sampling.single_pass import (
+            check_single_pass, measure_train_tokens, read_total_batch_size)
+        ckpt_dir = (self.target_phase1_ckpt
+                    or os.path.join(self.nanochat_base_dir, "base_checkpoints",
+                                    f"d{self.target_depth}"))
+        tbs = read_total_batch_size(ckpt_dir)
+        if tbs is None:
+            raise RuntimeError(
+                f"[Target] cannot resolve total_batch_size for the "
+                f"single-pass guard (no meta_*.json in {ckpt_dir}) — the "
+                f"annealing consumption cannot be validated")
+        pool_tokens = measure_train_tokens(mixture_data_dir)
+        info = check_single_pass(
+            self.target_num_iterations, tbs, pool_tokens,
+            stem_ratio=self.stem_ratio if mixed else 1.0,
+            context="target stage")
+        print(f"  [Target] single-pass OK: {info['epochs_x100'] / 100:.2f} "
+              f"epoch (consume {info['consume_tokens']:,} <= pool "
+              f"{pool_tokens:,} tokens)")
 
     def _build_mid_train_cmd(
         self,

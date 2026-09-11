@@ -103,6 +103,19 @@ def load_launch_env(output_dir: str) -> Dict[str, str]:
     return env
 
 
+def launch_env_target_steps(launch_env: Dict[str, str]) -> str:
+    """TARGET_STEPS from launch_env (run_climbmix.sh DERIVES it from
+    TARGET_TOKENS — the single source of truth). Empty = malformed
+    snapshot: fail loudly, never fall back to a default step count (a
+    wrong count silently changes the arm's training length)."""
+    steps = (launch_env.get("TARGET_STEPS") or "").strip()
+    if not steps:
+        raise SystemExit(
+            "✗ launch_env.json carries no TARGET_STEPS — launch via "
+            "runs/run_climbmix.sh (it derives the value from TARGET_TOKENS)")
+    return steps
+
+
 def parse_npu_env_block(path: str) -> Dict[str, str]:
     """Extract the export block of runs/lib/npu_env.sh (the d28-proven
     environment) as a dict — the remote arm job's spec.env carries exactly
@@ -346,14 +359,13 @@ def download_result_json(obs, result_uri: str) -> Optional[Dict]:
 def land_logs(obs, result_uri: str, output_dir: str, arm: str,
               node_count: int = 1) -> None:
     """Land the master's mid_train.log/eval.log plus every non-master
-    node's mid_train_node{r}.log and eval_node{r}.log when the arm ran
-    multi-node. eval_node{r}.log exists only when the model relay
-    delivered (32-rank eval); the obs.stat guard below skips whatever a
-    node never produced (relay fallback: nodes r>0 exit after train)."""
+    node's mid_train_node{r}.log when the arm ran multi-node. Nodes r>0
+    exit right after train (eval is node-0 only: the model file cannot
+    cross nodes — per-node output mounts, probe A 20260908), so they
+    produce no eval logs."""
     names = ["mid_train.log", "eval.log"] + [
-        f"{stem}_node{r}.log"
-        for r in range(1, max(1, node_count))
-        for stem in ("mid_train", "eval")]
+        f"mid_train_node{r}.log"
+        for r in range(1, max(1, node_count))]
     for name in names:
         src = f"{result_uri.rstrip('/')}/{name}"
         if name == "mid_train.log":
@@ -648,7 +660,7 @@ def main() -> int:
         try:
             pool_tokens = measure_train_tokens(data_dir)
             info = check_single_pass(
-                int(launch_env.get("TARGET_STEPS") or "1000"),
+                int(launch_env_target_steps(launch_env)),
                 tbs, pool_tokens,
                 stem_ratio=float(launch_env.get("STEM_RATIO") or "0.7"),
                 max_epochs=args.max_epochs, context=f"{arm} arm")
@@ -748,7 +760,7 @@ def main() -> int:
             run_name=f"{arm}_mid",
             model_tag=tag,
             data_dir=container_data_dir,
-            num_iterations=launch_env.get("TARGET_STEPS") or "1000",
+            num_iterations=launch_env_target_steps(launch_env),
             lr_scale=launch_env.get("TARGET_LR_SCALE") or "1.0",
             warmup=launch_env.get("TARGET_WARMUP") or "0.0",
             warmdown=launch_env.get("TARGET_WARMDOWN") or "0.9",

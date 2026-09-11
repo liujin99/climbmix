@@ -68,6 +68,13 @@ GLOBAL_EXCLUDE = {
     # fingerprints for zero semantic change. Classification changes
     # still propagate through the hashed FILE SET they produce.
     "src/climbmix/utils/fingerprint.py",
+    # Single-pass (epoch<=1) guard: observability-only — measures the
+    # mixture pool and validates steps x total_batch_size <= pool. It
+    # never changes data products, so excluding it keeps fingerprints
+    # stable across guard edits (and lets the guard land mid-run).
+    "scripts/check_single_pass.py",
+    "scripts/derive_target_steps.py",
+    "src/climbmix/sampling/single_pass.py",
 }
 # Phase-0 multi-node probes (scripts/probe/): platform diagnostics, same
 # class as scripts/diagnostics/ — must never reset search/target products.
