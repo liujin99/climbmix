@@ -389,6 +389,84 @@ with tempfile.TemporaryDirectory() as fake_run:
           and "mix_general_data.py" in r.stdout and "manifest.json" in r.stdout,
           (r.stdout + r.stderr).strip()[-160:])
 
+# ── 11. mix supply preflight: general repetition is loud by default ───
+# mix_general_data draws BOTH sides from cycling generators — a short
+# general supply used to repeat docs silently (ratio intact!). The
+# preflight must turn that into a loud error, with an explicit opt-in.
+mix_src = open(os.path.join(REPO, "scripts/mix_general_data.py")).read()
+check("mix: supply preflight present (count vs need + binomial margin)",
+      "supply preflight" in mix_src and "binomial" in mix_src)
+check("mix: explicit opt-in flag exists",
+      "--allow-general-repeat" in mix_src)
+check("shell: proxy paper-strength warning at launch",
+      "proxy 信号强度" in src and "800M" in src)
+
+import importlib.util
+with tempfile.TemporaryDirectory() as td:
+    # stub nanochat.dataset (stream_texts_uniform = plain parquet reader)
+    stub = os.path.join(td, "nanochat_stub")
+    os.makedirs(os.path.join(stub, "nanochat"))
+    with open(os.path.join(stub, "nanochat", "__init__.py"), "w") as f:
+        f.write("")
+    with open(os.path.join(stub, "nanochat", "dataset.py"), "w") as f:
+        f.write(
+            "import pyarrow.parquet as pq\n"
+            "MAX_SHARD = 2000\n"
+            "def index_to_filename(i):\n    return f'train_{i:05d}.parquet'\n"
+            "def download_single_file(i, d, t):\n    return True\n"
+            "def stream_texts_uniform(files):\n"
+            "    for fp in files:\n"
+            "        for t in pq.read_table(fp)['text'].to_pylist():\n"
+            "            yield t\n")
+    os.environ["NANOCHAT_REPO"] = stub
+    spec = importlib.util.spec_from_file_location(
+        "mix_general_data", os.path.join(REPO, "scripts/mix_general_data.py"))
+    mix = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mix)
+
+    stem_dir = os.path.join(td, "stem")
+    os.makedirs(stem_dir)
+    write_shard(os.path.join(stem_dir, "shard_00000.parquet"),
+                [f"s{i}" for i in range(40)])
+    write_shard(os.path.join(stem_dir, "shard_00001.parquet"), ["VAL"])
+    climb_dir = os.path.join(td, "climb")
+    os.makedirs(climb_dir)
+    c0 = os.path.join(climb_dir, "c0.parquet")
+    write_shard(c0, [f"g{i}" for i in range(4)])        # 4 docs — short supply
+
+    def out_texts(out):
+        texts = []
+        for p in sorted(glob.glob(os.path.join(out, "shard_*.parquet")))[:-1]:
+            texts += pq.read_table(p)["text"].to_pylist()
+        return texts
+
+    try:
+        mix.mix_data(stem_dir, [c0], os.path.join(td, "out1"),
+                     2, 20, num_npu=1, stem_ratio=0.5)
+        check("mix: short general supply raises (no silent repetition)", False)
+    except ValueError as e:
+        check("mix: short general supply raises (no silent repetition)",
+              "general data insufficient" in str(e)
+              and "allow-general-repeat" in str(e), str(e)[:90])
+
+    out2 = os.path.join(td, "out2")
+    mix.mix_data(stem_dir, [c0], out2, 2, 20, num_npu=1, stem_ratio=0.5,
+                 allow_general_repeat=True)
+    g = [t for t in out_texts(out2) if t.startswith("g")]
+    check("mix: opt-in proceeds and repetition is real (dups observable)",
+          len(g) >= 10 and len(set(g)) <= 4,
+          f"{len(g)} draws from {len(set(g))} unique docs")
+    check("mix: .done records ratio",
+          json.load(open(os.path.join(out2, ".done")))["stem_ratio"] == 0.5)
+
+    c1 = os.path.join(climb_dir, "c1.parquet")
+    write_shard(c1, [f"h{i}" for i in range(40)])       # ample supply
+    out3 = os.path.join(td, "out3")
+    mix.mix_data(stem_dir, [c1], out3, 2, 20, num_npu=1, stem_ratio=0.5)
+    h = [t for t in out_texts(out3) if t.startswith("h")]
+    check("mix: ample supply mixes clean (no duplicates)",
+          len(h) == len(set(h)), f"{len(h)} draws / {len(set(h))} unique")
+
 print()
 if FAILED:
     print(f"FAILED ({len(FAILED)}): {FAILED}")

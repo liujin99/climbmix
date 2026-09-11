@@ -100,6 +100,15 @@ PROXY_NUM_ITERATIONS="$(python3 scripts/derive_target_steps.py \
     --ckpt-dir "$NANOCHAT_BASE_DIR/base_checkpoints/d${PROXY_DEPTH}")" \
     || { echo "✗ PROXY_NUM_ITERATIONS derivation failed"; exit 1; }
 echo "  PROXY_NUM_ITERATIONS derived from PROXY_TARGET_TOKENS=$PROXY_TARGET_TOKENS -> $PROXY_NUM_ITERATIONS steps"
+python3 - "$PROXY_TARGET_TOKENS" <<'PYEOF'
+import sys
+sys.path.insert(0, "src")
+from climbmix.utils.token_estimate import parse_token_count
+t = parse_token_count(sys.argv[1])
+paper = 800_000_000
+print(f"  ⚠ proxy 信号强度: 每实验消耗 {t:,} tokens ≈ 论文 proxy ~800M 的 {t/paper:.0%}")
+print("    调强度只改预算: 400M → 762 步 (更省) / 800M → 1525 步 (论文等量)")
+PYEOF
 CONFIGS_PER_ITER="${CONFIGS_PER_ITER:-20,10,5}"
 # prod2 B++: 期望列表语义 — ADAPTIVE_CONFIGS=1 时 configs_per_iter 视为
 # "期望每轮实验数", 由实测并发 (RemoteExecutor 探测) 浮动到

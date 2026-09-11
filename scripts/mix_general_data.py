@@ -137,13 +137,20 @@ def endless_generator(gen_func, files):
 _MIX_LOCK = threading.Lock()
 
 
-def mix_data(stem_dir, climb_files, output_dir, num_output_files, batch_per_file=BATCH_PER_FILE, num_npu=8, stem_ratio=None):
+def mix_data(stem_dir, climb_files, output_dir, num_output_files, batch_per_file=BATCH_PER_FILE, num_npu=8, stem_ratio=None, allow_general_repeat=False):
     """Mix STEM + ClimbMix general data at document level.
 
     stem_ratio: fraction of output docs drawn from STEM (default: module
     STEM_RATIO, i.e. 0.7). Callers that loaded this module (proxy_runner /
     target_runner) MUST pass their own ratio — the module default silently
     diverged from their shard-count calculation when it differed from 0.7.
+
+    allow_general_repeat: the general-side draw uses an endless (cycling)
+    generator — when the available general docs fall short of the quota,
+    it REPEATS them silently. The supply preflight turns that into a loud
+    error; pass True (CLI: --allow-general-repeat) only as a deliberate,
+    documented choice (e.g. large-scale sampling where the general pool is
+    the binding constraint).
 
     Crash safety: shards are written to temp names and renamed into place; a
     .done marker is written only after everything (incl. the val shard copy)
@@ -162,10 +169,10 @@ def mix_data(stem_dir, climb_files, output_dir, num_output_files, batch_per_file
     with _MIX_LOCK:
         return _mix_data_locked(stem_dir, climb_files, output_dir,
                                 num_output_files, batch_per_file,
-                                num_npu, stem_ratio)
+                                num_npu, stem_ratio, allow_general_repeat)
 
 
-def _mix_data_locked(stem_dir, climb_files, output_dir, num_output_files, batch_per_file=BATCH_PER_FILE, num_npu=8, stem_ratio=None):
+def _mix_data_locked(stem_dir, climb_files, output_dir, num_output_files, batch_per_file=BATCH_PER_FILE, num_npu=8, stem_ratio=None, allow_general_repeat=False):
     if not climb_files:
         raise ValueError("No ClimbMix files available. Download failed?")
     ratio = STEM_RATIO if stem_ratio is None else stem_ratio
@@ -205,6 +212,33 @@ def _mix_data_locked(stem_dir, climb_files, output_dir, num_output_files, batch_
 
     if not stem_files:
         raise ValueError(f"No train shards found in {stem_dir} (only val?)")
+
+    # ── supply preflight: both draws cycle (endless_generator) — a short
+    # supply would REPEAT docs silently, ratio intact, zero signal. Count
+    # actual docs (parquet metadata only, fast) and fail loud instead.
+    total_docs = num_output_files * batch_per_file
+    margin = 5 * math.sqrt(total_docs * ratio * (1 - ratio)) + 1  # binomial 5σ
+    stem_need = total_docs * ratio
+    climb_need = total_docs * (1 - ratio)
+    stem_have = count_stem_docs(stem_files)
+    climb_have = count_stem_docs(climb_files)
+    if stem_have < stem_need + margin:
+        raise ValueError(
+            f"STEM supply insufficient: {stem_have:,} docs available but the mix "
+            f"draws ~{int(stem_need):,} (+{int(margin)} binomial margin) — the "
+            f"cycling draw would REPEAT STEM docs silently. Check the selection "
+            f"output (shortfall?) or num_output_files/batch_per_file alignment.")
+    if climb_have < climb_need + margin:
+        msg = (f"general data insufficient: {climb_have:,} docs available but "
+               f"the mix draws ~{int(climb_need):,} (+{int(margin)} binomial "
+               f"margin) — the cycling draw would REPEAT general docs silently "
+               f"(ratio stays perfect, model sees duplicates). Raise "
+               f"--max-climbmix-shards (check general-pool availability), lower "
+               f"the STEM budget, or pass --allow-general-repeat to accept "
+               f"repetition deliberately.")
+        if not allow_general_repeat:
+            raise ValueError("✗ " + msg)
+        print(f"  ⚠ ALLOWED general repetition: {msg}")
 
     # DDP row-group safety: every output shard must contain at least num_npu
     # row groups (dataloader assigns row groups round-robin per rank).
@@ -288,9 +322,15 @@ def main():
                         help="NPUs used for training the mixed data (row-group sizing, default 8)")
     parser.add_argument("--max-climbmix-shards", type=int, default=MAX_CLIMBMIX_SHARDS,
                         help="cap on general-data shards (default 50 = historical cap). "
-                             "Large-scale sampling (runs/run_large_scale_sample.sh) raises "
-                             "this when the budget needs more general data — the cap binding "
-                             "silently dilutes the STEM ratio below --stem-ratio.")
+                             "When the cap binds, the mix draws FEWER general shards than "
+                             "the quota needs — the supply preflight then fails loud "
+                             "(raise this flag or accept repetition via "
+                             "--allow-general-repeat).")
+    parser.add_argument("--allow-general-repeat", action="store_true",
+                        help="deliberately accept general-doc repetition when the pool "
+                             "falls short of the quota (loud warning still printed). "
+                             "Default: hard error (the cycling draw would otherwise "
+                             "repeat docs silently).")
     args = parser.parse_args()
 
     global STEM_RATIO
@@ -331,7 +371,8 @@ def main():
         print(f"  ClimbMix already downloaded: {len(climb_files)} files")
 
     mix_data(args.stem_dir, climb_files, args.output_dir, num_output_files, batch_per_file,
-             num_npu=args.num_npu)
+             num_npu=args.num_npu, stem_ratio=args.stem_ratio,
+             allow_general_repeat=args.allow_general_repeat)
 
 
 if __name__ == "__main__":

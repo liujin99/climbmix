@@ -21,7 +21,8 @@ TARGET_TOKENS="${TARGET_TOKENS:-20B}"        # 大规模 STEM 预算 (唯一真�
 STEM_RATIO="${STEM_RATIO:-0.7}"
 WEIGHTS="${WEIGHTS:-}"                       # 空 = $RUN_DIR/optimal_mixture_weights.json (搜索输出的 α*)
 OUT_DIR="${OUT_DIR:-}"                       # 空 = result/<run名>_final
-MAX_CLIMBMIX_SHARDS="${MAX_CLIMBMIX_SHARDS:-50}"  # 通用数据分片上限; 预算大时不足会大声警告 (配比失真)
+MAX_CLIMBMIX_SHARDS="${MAX_CLIMBMIX_SHARDS:-50}"  # 通用数据分片上限; 预算大时不足会大声报错 (通用文档将被重复)
+ALLOW_GENERAL_REPEAT="${ALLOW_GENERAL_REPEAT:-0}" # 1=显式接受通用文档重复 (通用池是硬约束时的权衡; 见 mix 预检)
 LAUNCH="${LAUNCH:-1}"                        # 0=干跑
 MEASURE="${MEASURE:-1}"                      # 1=实测产出 token 并写 manifest
 # ─── 本机路径 (与主 run 相同; 服务器默认通常不用改) ────────────────
@@ -88,6 +89,9 @@ MIX_CMD=(env NANOCHAT_REPO="$NANOCHAT_DIR" python3 scripts/mix_general_data.py
     --climbmix-dir "$GENERAL_DATA_DIR" --stem-ratio "$STEM_RATIO"
     --num-workers "$NUM_NPU" --num-npu "$NUM_NPU"
     --max-climbmix-shards "$MAX_CLIMBMIX_SHARDS")
+if [ "$ALLOW_GENERAL_REPEAT" = "1" ]; then
+    MIX_CMD+=(--allow-general-repeat)
+fi
 
 if [ "$LAUNCH" != "1" ]; then
     echo
@@ -115,7 +119,8 @@ else
 fi
 
 # ── ③ 实测 + manifest (把真相写进磁盘: 产了多少、配比是否达成) ──
-MEASURE="$MEASURE" python3 - "$OUT_DIR" "$RUN_DIR" "$WEIGHTS" \
+MEASURE="$MEASURE" ALLOW_GENERAL_REPEAT="$ALLOW_GENERAL_REPEAT" \
+    python3 - "$OUT_DIR" "$RUN_DIR" "$WEIGHTS" \
     "$TARGET_TOKENS" "$STEM_RATIO" "$MAX_CLIMBMIX_SHARDS" "$MIXED" <<'PY'
 import datetime, json, os, re, subprocess, sys
 
@@ -134,6 +139,7 @@ manifest = {
     "mixed_dir": mixed,
     "logs": {"select": os.path.join(out_dir, "select.log"),
              "mix": os.path.join(out_dir, "mix.log")},
+    "allow_general_repeat": env.get("ALLOW_GENERAL_REPEAT") == "1",
     "warnings": [],
 }
 
@@ -163,8 +169,10 @@ if os.path.exists(mix_log):
             if needed_shards >= int(cap):
                 manifest["warnings"].append(
                     f"general shards hit the cap ({needed_shards} >= {cap}): "
-                    f"STEM ratio drifts above {stem_ratio} — raise "
-                    f"MAX_CLIMBMIX_SHARDS (check general-pool availability first)")
+                    f"the general pool falls short of the {stem_ratio} quota — "
+                    f"mix_general_data now FAILS LOUD (cycling draw would repeat "
+                    f"docs silently). Raise MAX_CLIMBMIX_SHARDS or set "
+                    f"ALLOW_GENERAL_REPEAT=1 to accept repetition.")
 
 if env.get("MEASURE") == "1":
     from climbmix.sampling.single_pass import measure_train_tokens
