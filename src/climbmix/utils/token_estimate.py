@@ -26,12 +26,14 @@ def parse_token_count(value) -> int:
     """Parse a token count from "2B", "10M", "500K", "1.5B", "500Mi" or a
     plain integer.
 
-    Case-insensitive suffix; binary suffixes (Ki/Mi/Gi/Ti/Bi, powers of
-    1024) let budgets align exactly with step-count arithmetic — e.g. a
-    d20 total_batch_size of 524,288 makes "500Mi" = 1000 steps exactly,
-    and "2000Mi" = 2,097,152,000 = the prod1/prod2 exact 2000-step pair.
-    Plain integers pass through unchanged (backwards compatible). Raises
-    ValueError on invalid input.
+    Case-insensitive suffix. Decimal suffixes (K/M/B, powers of 1000) are
+    the conventional config format (e.g. "2B", "640M") — budget ratios stay
+    exact and readable at any scale. Binary suffixes (Ki/Mi/Gi/Ti/Bi,
+    powers of 1024) align exactly with step-count arithmetic: the d20/d28
+    total_batch_size is 1,048,576 = 2^20 (server-measured 2026-09-11), so
+    "N Mi" = N steps exactly ("1000Mi" = the prod1/prod2 exact 1000-step
+    pair, kept for legacy replication). Plain integers pass through
+    unchanged (backwards compatible). Raises ValueError on invalid input.
     """
     if isinstance(value, bool):
         raise ValueError(f"Invalid token count: {value!r}")
