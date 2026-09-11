@@ -74,7 +74,13 @@ def measure_train_tokens(
 
 
 def read_total_batch_size(ckpt_dir: Optional[str]) -> Optional[int]:
-    """total_batch_size from the newest meta_*.json under ckpt_dir.
+    """total_batch_size from the meta_*.json files under ckpt_dir.
+
+    All metas of one ckpt normally agree. When they disagree, the newest
+    by mtime wins and a LOUD warning names every candidate — never a
+    silent lexicographic pick (meta_999 vs meta_1000 sorts the wrong way;
+    a wrong tbs silently weakens the single-pass guard by the ratio of
+    the two values).
 
     Returns None when the dir is missing, empty or no meta carries the
     key — callers must fail loudly on None (a guessed batch size would
@@ -82,7 +88,8 @@ def read_total_batch_size(ckpt_dir: Optional[str]) -> Optional[int]:
     """
     if not ckpt_dir:
         return None
-    for path in reversed(sorted(glob.glob(os.path.join(ckpt_dir, "meta_*.json")))):
+    candidates = []  # (mtime, name, tbs)
+    for path in glob.glob(os.path.join(ckpt_dir, "meta_*.json")):
         try:
             with open(path) as f:
                 meta = json.load(f)
@@ -90,8 +97,18 @@ def read_total_batch_size(ckpt_dir: Optional[str]) -> Optional[int]:
             continue
         tbs = meta.get("total_batch_size")
         if tbs:
-            return int(tbs)
-    return None
+            candidates.append(
+                (os.path.getmtime(path), os.path.basename(path), int(tbs)))
+    if not candidates:
+        return None
+    values = {c[2] for c in candidates}
+    if len(values) == 1:
+        return candidates[0][2]
+    candidates.sort(reverse=True)  # newest mtime, name as tiebreak
+    print(f"  ⚠ meta_*.json disagree on total_batch_size in {ckpt_dir}: "
+          f"{', '.join(f'{c[1]}={c[2]:,}' for c in sorted(candidates, key=lambda c: c[1]))} "
+          f"— using {candidates[0][1]} (newest mtime); verify the ckpt dir")
+    return candidates[0][2]
 
 
 def derive_num_iterations(target_tokens: int, total_batch_size: int) -> int:

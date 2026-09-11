@@ -84,12 +84,14 @@ with tempfile.TemporaryDirectory() as td:
 
 # ── 2. read_total_batch_size ──────────────────────────────────────────────
 with tempfile.TemporaryDirectory() as td:
-    with open(os.path.join(td, "meta_step000100.json"), "w") as f:
-        json.dump({"total_batch_size": 1048576}, f)
-    with open(os.path.join(td, "meta_step000099.json"), "w") as f:
-        json.dump({"total_batch_size": 524288}, f)
-    check("tbs: newest meta wins (lexicographic, repo convention)",
+    # step-prefixed names agree on tbs -> returned regardless of order
+    for name, tbs in (("meta_step000100.json", 1048576),
+                      ("meta_step000099.json", 1048576)):
+        with open(os.path.join(td, name), "w") as f:
+            json.dump({"total_batch_size": tbs}, f)
+    check("tbs: step-prefixed metas agree -> value",
           read_total_batch_size(td) == 1048576)
+    # mtime resolution (disagreement) is covered in §12
     check("tbs: missing dir -> None", read_total_batch_size(None) is None)
     with tempfile.TemporaryDirectory() as td2:
         check("tbs: empty dir -> None", read_total_batch_size(td2) is None)
@@ -466,6 +468,40 @@ with tempfile.TemporaryDirectory() as td:
     h = [t for t in out_texts(out3) if t.startswith("h")]
     check("mix: ample supply mixes clean (no duplicates)",
           len(h) == len(set(h)), f"{len(h)} draws / {len(set(h))} unique")
+
+# ── 12. read_total_batch_size: no silent lexicographic pick ──────────
+# meta_999 vs meta_1000 sorts the wrong way lexically; a disagreeing meta
+# set must resolve by mtime (newest) and say so, never silently.
+import time
+with tempfile.TemporaryDirectory() as ck:
+    for name in ("meta_a.json", "meta_b.json"):
+        with open(os.path.join(ck, name), "w") as f:
+            json.dump({"total_batch_size": 1024}, f)
+    check("tbs: metas agree -> value, no drama",
+          read_total_batch_size(ck) == 1024)
+    with open(os.path.join(ck, "meta_999.json"), "w") as f:    # lexicographic trap
+        json.dump({"total_batch_size": 2048}, f)
+    with open(os.path.join(ck, "meta_1000.json"), "w") as f:
+        json.dump({"total_batch_size": 1024}, f)
+    old, new = time.time() - 3600, time.time()
+    os.utime(os.path.join(ck, "meta_999.json"), (old, old))    # old mtime, big value
+    os.utime(os.path.join(ck, "meta_1000.json"), (new, new))   # new mtime, right value
+    check("tbs: disagreement -> newest mtime wins (not lexicographic)",
+          read_total_batch_size(ck) == 1024)
+with tempfile.TemporaryDirectory() as ck2:
+    with open(os.path.join(ck2, "meta_x.json"), "w") as f:
+        json.dump({"other": 1}, f)
+    check("tbs: no meta carries the key -> None (caller fails loud)",
+          read_total_batch_size(ck2) is None)
+
+prs = open(os.path.join(REPO, "src/climbmix/pipeline/proxy_runner.py")).read()
+check("proxy: guard wired after mixture prep, before mid_train",
+      "_guard_single_pass(" in prs
+      and "proxy_num_iterations, tbs, pool_tokens" in prs
+      and prs.index("_prepare_mixture_data(mixture_config")
+      < prs.index("self._guard_single_pass(")
+      < prs.index("mid_cmd = self._build_mid_train_cmd"),
+      "search path now guarded like the target stage")
 
 print()
 if FAILED:
