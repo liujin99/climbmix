@@ -268,7 +268,7 @@ check("shell: TARGET_STEPS derivation block present",
       "no longer a knob" in src and
       "invalid for target arms" in src)
 check("shell: TARGET_TOKENS defined before derivation",
-      src.index('TARGET_TOKENS="${TARGET_TOKENS:-1000Mi}"')
+      src.index('TARGET_TOKENS="${TARGET_TOKENS:-2B}"')
       < src.index("derive_target_steps.py"))
 
 # real invocations of the two launch-time abort branches (the config block
@@ -325,9 +325,8 @@ except ValueError:
 
 check("proxy: knob default removed (value now derived)",
       'PROXY_NUM_ITERATIONS="${PROXY_NUM_ITERATIONS:-1000}"' not in src)
-check("proxy: budget default 1000Mi (= 1000 steps @ real tbs, "
-      "prod2 step-continuous)",
-      'PROXY_TARGET_TOKENS:-1000Mi' in src)
+check("proxy: budget default 640M (= 610 steps @ real tbs, 80% of paper ~800M)",
+      'PROXY_TARGET_TOKENS:-640M' in src)
 check("proxy: derivation block present",
       "PROXY_NUM_ITERATIONS derived from PROXY_TARGET_TOKENS" in src and
       "DERIVED from PROXY_TARGET_TOKENS" in src)
@@ -343,11 +342,20 @@ with tempfile.TemporaryDirectory() as base:
             json.dump({"total_batch_size": tbs}, f)
     r = subprocess.run(
         [sys.executable, os.path.join(REPO, "scripts/derive_target_steps.py"),
-         "--target-tokens", "1000Mi",
+         "--target-tokens", "640M",
          "--ckpt-dir", os.path.join(base, "base_checkpoints", "d20")],
         capture_output=True, text=True, timeout=60)
-    check("proxy: CLI 1000Mi @ real d20 tbs 1,048,576 -> exactly 1000",
-          r.returncode == 0 and r.stdout.strip() == "1000",
+    check("proxy: CLI 640M (default) @ real d20 tbs 1,048,576 -> 610",
+          r.returncode == 0 and r.stdout.strip() == "610",
+          (r.stdout + r.stderr).strip()[:100])
+    r = subprocess.run(
+        [sys.executable, os.path.join(REPO, "scripts/derive_target_steps.py"),
+         "--target-tokens", "2B",
+         "--ckpt-dir", os.path.join(base, "base_checkpoints", "d28")],
+        capture_output=True, text=True, timeout=60)
+    check("target: CLI 2B (default) @ real d28 tbs 1,048,576 -> 1907 "
+          "(param-proportional: d28/d20 = 3.4x, 2B/640M = 3.1x)",
+          r.returncode == 0 and r.stdout.strip() == "1907",
           (r.stdout + r.stderr).strip()[:100])
     r = subprocess.run(["bash", sh],
                        env={**env_base, "NANOCHAT_BASE_DIR": base,

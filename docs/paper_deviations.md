@@ -21,7 +21,7 @@
 | D7 | Random 基线小簇策略 | 未记载(其规模天然不会遇到:800B/21 簇/40B 预算 → 每簇配额 ~1.9B) | 簇配额不足 → 全取、不复制、不重分配(与 CLIMB 臂同一函数同一策略,两臂对称退化) | App. C.1 只定义等权 1/K;小池必须补一个策略且两臂一致 |
 | D8 | 优化目标 | 下游任务验证集 accuracy(PIQA/ARC_E/HellaSwag) | SNR 加权 acc+NLL z-score(6 个 STEM benchmark) | 难 benchmark 上 accuracy 是二项噪声;见 scoring_metric_design.md |
 | D9 | 通用数据混合 | 无(纯簇内配比) | 70% STEM + 30% ClimbMix(anti-forgetting) | 我们是从小 base 起步的 mid-training 场景(参照 MAI-Thinking-1 / Apple Intelligence) |
-| D10 | Proxy/Target 规模 | proxy 350M ≈800M tokens;target 1B/40B tokens | proxy d20(435M scaling)1000 步 = 1000Mi ≈1.048B;target d28(~1.5B scaling)1000 步 = 1000Mi | 算力;详细换算见 scoring_metric_design.md §12。token 口径为论文的 131%/2.6%,但退火预算相对 base 论文 +0.4%(40B/10T) vs 我们 +33~50%(1B/2-3B)——场景不同(小 base mid-training)。2026-09-11 勘误:旧记 524M/65% 基于错误 tbs(见 D16) |
+| D10 | Proxy/Target 规模 | proxy 350M ≈800M tokens;target 1B/40B tokens | proxy d20(435M scaling)610 步 = 640M ≈论文 80%;target d28(~1.5B scaling)1907 步 = 2B | 算力;详细换算见 scoring_metric_design.md §12。token 口径为论文的 80%/5%,但退火预算相对 base 论文 +0.4%(40B/10T) vs 我们 +67~100%(2B/2-3B)——场景不同(小 base mid-training)。2026-09-11 拍板:proxy = 论文 80%(资源受限,不超论文强度);target 与 proxy 等比(d28/d20 参数 3.4×,2B/640M = 3.1×)保配比转移。同日勘误:旧记 524M/65% 基于错误 tbs(见 D16) |
 | D11 | token 计量 | 精确 tokenize(池统计) | chars/4 估算(元数据预计算列) | 池扫描免 tokenize;配比/配额的近似 |
 | D12 | 评测子采样 | 全量 | speedrun 100 题/任务(fixed shuffle seed 1337,跨实验可比较);生产 -1 全量 | speedrun 时间预算;生产无偏差 |
 | D13 | 剪枝规则 | 簇平均质量 < 3.0 即剪(fasttext,§2.1/§3.1) | 平均阈值 + **单列下限** hybrid:任一质量列的簇均值 < `PRUNE_COLUMN_FLOOR`(生产默认 2.0,0=关)即剪 | 平均线漏检"格式干净但知识贫瘠"的簇(2026-08-31 20-分片画像:69/1000 簇过均线但 knowledge_value 1.8-2.0;6.6% docs / 仅 1.5% tokens);标签未校验故取保守档 2.0,见细节 D13 |
@@ -108,13 +108,16 @@ tokens 不可比)。改用 merge-distance elbow 定 K_ENHANCED=14(最大跳变
 
 ### D10 训练规模
 论文 proxy ≈800M tokens(45 GPU-h,由 6400 GPU-h target 反推,§C.4)、target
-1B/40B。我们 proxy 1000Mi(1000 步 × 1,048,576 = 1.048B,= 论文的 131%)、
-target 1000Mi(1000 步,TARGET_TOKENS=1000Mi STEM cap)——token 口径为论文的
-131%/2.6%(base 池 ~2-3B vs 论文 10T,场景不同;d28 scaling 修正为 ~1.5B,
+1B/40B。我们 proxy 640M(610 步 × 1,048,576,= 论文的 80%)、target 2B
+(1907 步,TARGET_TOKENS=2B STEM cap)——token 口径为论文的
+80%/5%(base 池 ~2-3B vs 论文 10T,场景不同;d28 scaling 修正为 ~1.5B,
 2026-09-04,meta auto-detect)。完整推导见 scoring_metric_design.md §12。
 **勘误(2026-09-11)**:此前记载的 "proxy 524M(=论文 65%)" 基于错误假设的
 tbs 524,288——那是 mid_train 的 meta 缺键回退值,真实 d20 meta 为 1,048,576
-(服务器实测),proxy 实际每实验消耗 1.048B。
+(服务器实测),prod2 proxy 实际每实验消耗 1.048B。
+**拍板(2026-09-11)**:默认 proxy=640M(论文 80%,资源受限不超论文强度)、
+target=2B(与 proxy 等比:d28/d20 参数 3.4×,2B/640M = 3.1× → 臂与搜索同
+tokens/参数 regime,配比转移保真);prod2 实跑 1000Mi/1B 仅作历史复现值。
 
 ### D16 单遍语义的 mix 定尺寸修复与 prod1/prod2 wrap 史实(2026-09-11)
 论文为单遍退火(consumption ≤ mixture)。我们的 mix 定尺寸 bug 使该语义
