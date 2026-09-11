@@ -209,6 +209,19 @@ speedrun 不变。
   → 自动回退 node 0 单机 8 卡(与锚点同口径,prod2 验证过的路径),非主
   节点训练后上传日志即退出。中继只加速、不影响正确性。base 锚点
   (base_eval_check)保持单节点 8 卡(eval-only 作业)。
+- **rev 3(2026-09-11,线上冒烟两连修)**。① 传输 bug:服务端块写
+  `makefile(buffering=0).write()` 是单次 `send()`,慢网络下部分写入
+  返回值被忽略 → GB 级传输静默丢字节、双端卡至超时(0911_095739
+  三 peer 全超时;本地回环 socket 缓冲大、测试不可复现)——出站写
+  全改 `sendall()`、逐 peer 字节计数、期限尺寸感知(300s+bytes/4MB/s)、
+  MSS 钳制(`CLIMBMIX_RELAY_MSS=1200` 防 overlay 大包黑洞);修复后
+  实测 7.9GB×3 ~1 分钟、verdict 32。② eval 启动竞态:32 卡 eval 紧接
+  32 卡 train,node1 的 0 号卡 HBM 残留未释放完,HCCL 初始化 401MiB
+  (≈2×200MB 默认平面)EL0004 → elastic 拆掉四节点 eval(0911_111111,
+  仅 node1 中招)——eval 前加 npu-smi HBM 沉降门(轮询至每卡 ≥24GiB
+  空闲,cap `CLIMBMIX_EVAL_SETTLE_S` 120s,到顶放行留痕)+ 32 卡 eval
+  传 `HCCL_BUFFSIZE=100`(eval allreduce 极小,减半无代价)。回退路径
+  (8 卡)行为不变。
 
 ## 已核对一致(正向审计)
 

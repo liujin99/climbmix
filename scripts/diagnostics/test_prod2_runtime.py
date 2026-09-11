@@ -595,6 +595,7 @@ with tempfile.TemporaryDirectory(prefix="prod2mn_") as mn_td:
         f.write(
             "#!/usr/bin/env bash\n"
             'printf \'%s\\n\' "$@" >> "$ARGV_REC"\n'
+            'echo "ENV HCCL_BUFFSIZE=${HCCL_BUFFSIZE:-unset}" >> "$ARGV_REC"\n'
             'echo "=== call ===" >> "$ARGV_REC"\n'
             "# rank-faithful mid_train emulation (train calls carry\n"
             "# --num-iterations; eval calls do not)\n"
@@ -669,7 +670,10 @@ with tempfile.TemporaryDirectory(prefix="prod2mn_") as mn_td:
                     "ARGV_REC": os.path.join(mn_td,
                                              f"argv_rec_n{node_rank}.txt"),
                     "MASTER_ADDR": "127.0.0.1", "MASTER_PORT": "29511",
-                    "NODE_RANK": str(node_rank)})
+                    "NODE_RANK": str(node_rank),
+                    # settle gate: no npu-smi on test hosts -> the fixed
+                    # 1 s fallback sleep instead of the 30 s one
+                    "CLIMBMIX_EVAL_SETTLE_S": "1"})
         if extra_env:
             env.update(extra_env)
         return env
@@ -773,6 +777,17 @@ with tempfile.TemporaryDirectory(prefix="prod2mn_") as mn_td:
                            "mid_checkpoint", "model_000100.pt")
     check("worker sim(relay): master ckpt landed after eval",
           os.path.isfile(n0_ckpt))
+    # rev-3 hardening: the 32-rank eval must carry halved HCCL comm
+    # buffers (0911_111111 EL0004: a ~2x200 MiB plane ask right after
+    # the train teardown) and both nodes must pass the settle gate.
+    check("worker sim(relay): 32-rank eval carries HCCL_BUFFSIZE=100",
+          rec_n0.count("ENV HCCL_BUFFSIZE=100") == 1
+          and rec_n1.count("ENV HCCL_BUFFSIZE=100") == 1
+          and rec_n0.count("ENV HCCL_BUFFSIZE=unset") == 1
+          and rec_n1.count("ENV HCCL_BUFFSIZE=unset") == 1)
+    check("worker sim(relay): eval settle gate ran on both nodes",
+          "[worker] eval settle:" in (out_n0[0] or "")
+          and "[worker] eval settle:" in (out_n1[0] or ""))
 
     # ── multi-node relay FALLBACK (CLIMBMIX_EVAL_RELAY=0): node-0-only
     # 8-rank eval — the pre-relay behavior, which any relay miss must
@@ -796,6 +811,9 @@ with tempfile.TemporaryDirectory(prefix="prod2mn_") as mn_td:
           rec_n0f.count("=== call ===") == 2
           and "--standalone" in rec_n0f.split("=== call ===")[1]
           and "--nnodes" not in rec_n0f.split("=== call ===")[1])
+    check("worker sim(fallback): standalone eval keeps default HCCL bufs",
+          "ENV HCCL_BUFFSIZE=100" not in rec_n0f
+          and "[worker] eval settle:" in (r_n0f.stdout or ""))
     check("worker sim(fallback): node1 trains ONLY (no eval call)",
           rec_n1f.count("=== call ===") == 1
           and "--node_rank=1" in rec_n1f
@@ -884,6 +902,59 @@ with tempfile.TemporaryDirectory(prefix="prod2mn_") as mn_td:
               str({k: len(v) for k, v in pulled.items()}))
     finally:
         remote_worker.RELAY_SERVE_TIMEOUT_S = _saved_to
+
+    # ── pre-eval settle gate (0911_111111 finding): node 1 device 0
+    # still held train residual when the 32-rank eval's HCCL asked for
+    # 401 MiB (EL0004) — the elastic teardown killed all four nodes.
+    # Gate semantics: poll npu-smi until every card leaves enough HBM
+    # free, capped; disabled at 0; fixed short sleep without npu-smi.
+    _canned_npusmi = (
+        "+======================+===============+===="
+        "==================================================+\n"
+        "| NPU     Name         | Health        | Power(W)"
+        "     Temp(C)           Hugepages-Usage(page) |\n"
+        "| 0      910B3A        | OK            | 97.0  "
+        "     42                0    / 0             |\n"
+        "| 0      /dev/davinci0 | 0000:C1:00.0  | 0     "
+        "     31000 / 32768                          |\n"
+        "| 1      910B3A        | OK            | 95.0  "
+        "     40                0    / 0             |\n"
+        "| 1      /dev/davinci1 | 0000:C2:00.0  | 0     "
+        "     1100  / 32768                          |\n")
+    check("settle: npu-smi parse (dirty 31000/32768 + clean 1100/32768)",
+          remote_worker._npu_hbm_usages(_canned_npusmi)
+          == [(31000, 32768), (1100, 32768)]
+          and remote_worker._npu_hbm_usages("") is None)
+    _orig_usages = remote_worker._npu_hbm_usages
+    try:
+        _calls = {"n": 0}
+
+        def _us_dirty():
+            _calls["n"] += 1
+            return [(31000, 32768), (1100, 32768)]
+
+        remote_worker._npu_hbm_usages = _us_dirty
+        _t0 = time.time()
+        remote_worker.wait_npu_settle(cap_s=1)
+        _dt_dirty = time.time() - _t0
+        check("settle: dirty HBM caps out in ~cap_s (returns, no hang)",
+              0.9 <= _dt_dirty <= 5.0 and _calls["n"] >= 2)
+        remote_worker._npu_hbm_usages = lambda: [(1100, 32768)] * 8
+        _t0 = time.time()
+        remote_worker.wait_npu_settle(cap_s=60)
+        check("settle: clean HBM passes on the first poll",
+              time.time() - _t0 < 2.0)
+        _calls["n"] = 0
+        remote_worker.wait_npu_settle(cap_s=0)
+        check("settle: cap_s=0 disables the gate (no npu-smi call)",
+              _calls["n"] == 0)
+        remote_worker._npu_hbm_usages = lambda: None
+        _t0 = time.time()
+        remote_worker.wait_npu_settle(cap_s=1)
+        check("settle: missing npu-smi -> short fixed sleep",
+              0.9 <= time.time() - _t0 <= 3.0)
+    finally:
+        remote_worker._npu_hbm_usages = _orig_usages
 
     # eval_only + node_count>1 must refuse (N evals would race one CSV)
     spec_eo = ExpSpec.from_json(open(mn_spec(2)).read())

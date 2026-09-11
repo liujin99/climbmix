@@ -70,6 +70,7 @@ Storage backends:
 import argparse
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -515,6 +516,67 @@ def _relay_pull(master_addr: str, port: int, rank: int, tag_dir: str,
             pass
 
 
+# ── pre-eval NPU settle gate (0911_111111 finding) ────────────────────────
+# The 32-rank eval starts on cards the 32-rank train JUST released. Process
+# exit frees HBM, but the driver release can lag — smoke 0911_111111 lost
+# its whole eval to exactly that: node 1 device 0 still held train residual
+# when HCCL asked for 401 MiB (EL0004, alloc ≈ 2x the 200 MiB default
+# HCCL_BUFFSIZE plane) while node 0 was clean and already evaluating. The
+# elastic teardown then killed all four nodes' evals. Gate: poll npu-smi
+# until every card leaves enough HBM free, bounded by a cap (then proceed
+# loudly — a bounded delay beats a dead multi-node job). Dev/test hosts
+# without npu-smi get a short fixed sleep instead.
+
+EVAL_SETTLE_CAP_S = float(os.environ.get("CLIMBMIX_EVAL_SETTLE_S", "120"))
+EVAL_SETTLE_MIN_FREE_MIB = 24576  # require >= 24 GiB free per card
+
+
+def _npu_hbm_usages(text=None):
+    """[(used_mib, total_mib), ...] per card from npu-smi output, or None
+    when npu-smi is missing/unparseable. `text` is injectable for tests."""
+    if text is None:
+        try:
+            text = subprocess.run(
+                ["npu-smi", "info"], capture_output=True, text=True,
+                timeout=15).stdout
+        except (OSError, subprocess.SubprocessError):
+            return None
+    pairs = []
+    for u, t in re.findall(r"(\d+)\s*/\s*(\d+)", text):
+        ti = int(t)
+        if ti >= 16000:  # real HBM totals; hugepages print "0 / 0"
+            pairs.append((int(u), ti))
+    return pairs or None
+
+
+def wait_npu_settle(cap_s=None):
+    """Block until every card's HBM is settled (see the comment above).
+    CLIMBMIX_EVAL_SETTLE_S overrides the cap; 0 disables the gate."""
+    if cap_s is None:
+        cap_s = EVAL_SETTLE_CAP_S
+    if cap_s <= 0:
+        return
+    t0 = time.time()
+    deadline = t0 + cap_s
+    while True:
+        usages = _npu_hbm_usages()
+        if usages is None:
+            print(f"[worker] eval settle: npu-smi unusable — fixed "
+                  f"{min(cap_s, 30):.0f}s wait", flush=True)
+            time.sleep(min(cap_s, 30))
+            return
+        if all(u <= t - EVAL_SETTLE_MIN_FREE_MIB for u, t in usages):
+            print(f"[worker] eval settle: HBM clean after "
+                  f"{time.time() - t0:.1f}s ({len(usages)} cards, "
+                  f"min free {EVAL_SETTLE_MIN_FREE_MIB} MiB)", flush=True)
+            return
+        if time.time() >= deadline:
+            print(f"[worker] eval settle: CAP {cap_s:.0f}s reached, HBM "
+                  f"still busy {usages} — proceeding anyway", flush=True)
+            return
+        time.sleep(min(5.0, max(0.1, deadline - time.time())))
+
+
 # ── embed dispatch (TODO E — kind == "embed" specs) ───────────────────────
 
 def run_embed(s: dict, storage, spec_path: str) -> int:
@@ -802,16 +864,23 @@ def main() -> int:
             # 32-rank world: this node joins the retargeted eval. The
             # CSV (rank-0-only writer), result.json and the checkpoint
             # upload stay master-owned — a second writer would clobber.
+            wait_npu_settle()
             s["eval_cmd"] = nanochat_cmds.retarget_torchrun_multinode(
                 s["eval_cmd"], node_count, node_rank,
                 master_addr, master_port + 1)
             eval_base = nanochat_cmds.make_eval_base_dir(
                 base, work, tag, subdir=f"_eval_base_node{node_rank}")
+            extra = dict(s.get("env") or {})
+            # Halve the HCCL comm-plane buffers for the 32-rank eval:
+            # they are allocated right after the train teardown and the
+            # 0911_111111 EL0004 was a ~2x200 MiB plane ask; eval's
+            # allreduce traffic is tiny, so smaller buffers cost nothing.
+            extra["HCCL_BUFFSIZE"] = "100"
             env = nanochat_cmds.build_subprocess_env(
                 s["nanochat_dir"], base,
                 device_ids=s.get("visible_devices") or [0],
                 base_dir_override=eval_base,
-                extra_env=s.get("env") or None)
+                extra_env=extra or None)
             eval_rc = run_cmd(s["eval_cmd"],
                               os.path.join(work, eval_log_name),
                               cwd=s["nanochat_dir"], env=env)
@@ -832,16 +901,25 @@ def main() -> int:
         # single-node 8-rank --standalone argv; relay-delivered runs
         # retarget to the full-node-count world (score-identical by
         # construction: base_eval's per-sample striding + all_reduce).
+        # The settle gate first: train just released these cards and a
+        # residual-filled HBM killed the 0911_111111 eval (see
+        # wait_npu_settle). Clean cards pass on the first npu-smi poll.
+        wait_npu_settle()
         if eval_world == 32:
             s["eval_cmd"] = nanochat_cmds.retarget_torchrun_multinode(
                 s["eval_cmd"], node_count, node_rank,
                 master_addr, master_port + 1)
         eval_base = nanochat_cmds.make_eval_base_dir(base, work, tag)
+        extra = dict(s.get("env") or {})
+        if eval_world == 32:
+            # Halved HCCL comm buffers — same rationale as the non-master
+            # join branch above (0911_111111 EL0004: ~2x200 MiB ask).
+            extra["HCCL_BUFFSIZE"] = "100"
         env = nanochat_cmds.build_subprocess_env(
             s["nanochat_dir"], base,
             device_ids=s.get("visible_devices") or [0],
             base_dir_override=eval_base,
-            extra_env=s.get("env") or None)
+            extra_env=extra or None)
         eval_rc = run_cmd(s["eval_cmd"], os.path.join(work, eval_log_name),
                           cwd=s["nanochat_dir"], env=env)
         res["eval_rc"] = eval_rc
