@@ -272,6 +272,19 @@ def start_log_streamer(storage, work: str, result_uri: str,
 # per-rank optim_* shards already exist on every node (each rank wrote
 # its own) and are useless to eval.
 #
+# Transport hardening (rev 3, 20260911 — live smoke finding): bulk
+# writes go through sendall(). A makefile(buffering=0).write() performs
+# ONE send() and returns short on a slow network — ignoring that return
+# silently drops bytes mid-file, which stalled BOTH sides until their
+# timeouts (the 0911 smoke's triple "peer transfer failed: timed out").
+# The serve deadline is size-aware (300 s + bytes/4MB/s floor) so a
+# slow-but-flowing transfer is not flunked, while a hard stall is still
+# caught by the per-op socket timeout. The MSS is clamped to 1200
+# (CLIMBMIX_RELAY_MSS, 0=off): overlay (VXLAN) pod networks whose
+# fragmentation-needed ICMP is firewalled pass small protocol lines but
+# blackhole full-size segments — HCCL never noticed because it rides
+# RDMA, not TCP.
+#
 # Failure semantics: ANY miss (connect failure, short read, missing DONE,
 # deadline, CLIMBMIX_EVAL_RELAY=0) degrades to the node-0-only 8-rank
 # eval — the behavior that shipped before the relay. The relay can only
@@ -281,6 +294,7 @@ RELAY_SERVE_TIMEOUT_S = float(
     os.environ.get("CLIMBMIX_RELAY_TIMEOUT_S", "300"))
 RELAY_CONNECT_TIMEOUT_S = float(
     os.environ.get("CLIMBMIX_RELAY_CONNECT_S", "180"))
+RELAY_MSS = int(os.environ.get("CLIMBMIX_RELAY_MSS", "1200"))
 RELAY_ENABLED = os.environ.get(
     "CLIMBMIX_EVAL_RELAY", "1").strip().lower() not in ("0", "false", "no")
 
@@ -296,6 +310,21 @@ def _relay_files(tag_dir: str):
     return names
 
 
+def _relay_total_bytes(tag_dir: str) -> int:
+    return sum(os.path.getsize(os.path.join(tag_dir, n))
+               for n in _relay_files(tag_dir))
+
+
+def _mss_clamp(sock: socket.socket):
+    """Best-effort TCP_MAXSEG clamp (see the transport notes above)."""
+    if RELAY_MSS > 0:
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_MAXSEG,
+                            RELAY_MSS)
+        except OSError:
+            pass
+
+
 class _RelayServer:
     """Node 0 side. start() spawns the listener; wait() blocks until every
     non-master peer finished its pull (-> 32) or the deadline passes
@@ -309,13 +338,16 @@ class _RelayServer:
         self.failed = set()      # ranks whose connection broke mid-transfer
         self.socks = {}          # rank -> socket (kept open for verdict)
         self.world = 8
+        self.total_bytes = 0     # set in start() — size-aware deadline
         self.decided = threading.Event()
         self.listener = None
         self._lock = threading.Lock()
 
     def start(self):
+        self.total_bytes = _relay_total_bytes(self.tag_dir)
         self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        _mss_clamp(self.listener)  # inherited by accepted sockets (Linux)
         self.listener.bind(("", self.port))
         self.listener.listen(self.peers + 2)
         self.listener.settimeout(1.0)
@@ -334,25 +366,36 @@ class _RelayServer:
                              daemon=True, name="climbmix-relay-conn").start()
 
     def _serve_one(self, conn: socket.socket):
+        t0 = time.time()
+        rank = None
+        sent = 0
         try:
             conn.settimeout(RELAY_SERVE_TIMEOUT_S)
-            f = conn.makefile("rwb", buffering=0)
-            req = f.readline().decode(errors="replace").strip()
+            rf = conn.makefile("rb", buffering=0)
+            req = rf.readline().decode(errors="replace").strip()
             rank = int(req.split()[-1])  # "GET <rank>"
             files = _relay_files(self.tag_dir)
-            f.write(f"OK {len(files)}\n".encode())
+            # sendall everywhere: a makefile(buffering=0) write() is a
+            # single send() that returns SHORT on a slow network —
+            # ignoring that silently drops bytes mid-file (rev 3 fix).
+            conn.sendall(f"OK {len(files)}\n".encode())
             for name in files:
                 path = os.path.join(self.tag_dir, name)
-                f.write(f"{name} {os.path.getsize(path)}\n".encode())
+                conn.sendall(f"{name} {os.path.getsize(path)}\n".encode())
                 with open(path, "rb") as fh:
                     while True:
                         chunk = fh.read(1 << 20)
                         if not chunk:
                             break
-                        f.write(chunk)
-            ack = f.readline().decode(errors="replace").strip()
+                        conn.sendall(chunk)
+                        sent += len(chunk)
+            ack = rf.readline().decode(errors="replace").strip()
             if ack != "DONE":
                 raise IOError(f"peer {rank} acked {ack!r}, expected DONE")
+            dt = time.time() - t0
+            print(f"[worker] relay: peer {rank} pulled {sent:,} B in "
+                  f"{dt:.1f}s ({sent / max(dt, 1e-3) / 1e6:.1f} MB/s)",
+                  flush=True)
             with self._lock:
                 self.done.add(rank)
                 self.socks[rank] = conn
@@ -361,28 +404,29 @@ class _RelayServer:
             if not self.decided.wait(RELAY_SERVE_TIMEOUT_S):
                 return  # deadline while waiting — client times out too
             try:
-                f.write(f"EVAL {self.world}\n".encode())
+                conn.sendall(f"EVAL {self.world}\n".encode())
             except OSError:
                 pass
         except Exception as e:
             # A broken transfer can never complete later — record the peer
             # as failed so wait() can decide the fallback immediately
             # instead of burning the whole deadline.
-            try:
-                rank = int(locals().get("req", "?").split()[-1])
-            except (ValueError, IndexError):
-                rank = None
             if rank is not None:
                 with self._lock:
                     self.failed.add(rank)
-            print(f"[worker] relay: peer transfer failed: {e}", flush=True)
+            print(f"[worker] relay: peer {rank} transfer failed after "
+                  f"{sent:,}/{self.total_bytes:,} B: {e}", flush=True)
             try:
                 conn.close()
             except OSError:
                 pass
 
     def wait(self) -> int:
-        deadline = time.time() + RELAY_SERVE_TIMEOUT_S
+        # Size-aware budget: base deadline plus a 4 MB/s-per-peer floor,
+        # so a slow-but-flowing GB-scale transfer is not flunked. Hard
+        # stalls are still caught by the per-op timeout in _serve_one.
+        deadline = time.time() + RELAY_SERVE_TIMEOUT_S + \
+            self.total_bytes / (4 << 20)
         while time.time() < deadline:
             with self._lock:
                 if len(self.done) >= self.peers:
@@ -410,8 +454,16 @@ def _relay_pull(master_addr: str, port: int, rank: int, tag_dir: str,
     sock = None
     while sock is None and time.time() < connect_deadline:
         try:
-            sock = socket.create_connection((master_addr, port), timeout=10)
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            _mss_clamp(sock)  # advertised MSS bounds the server's segments
+            sock.settimeout(10)
+            sock.connect((master_addr, port))
         except OSError:
+            try:
+                sock.close()
+            except OSError:
+                pass
+            sock = None
             time.sleep(2.0)
     if sock is None:
         log(f"[worker] relay: cannot reach {master_addr}:{port} in "
@@ -421,15 +473,15 @@ def _relay_pull(master_addr: str, port: int, rank: int, tag_dir: str,
         # Generous cap: covers the server's full serve deadline even if
         # this node finished its own pull early and waits for stragglers.
         sock.settimeout(RELAY_SERVE_TIMEOUT_S + 120)
-        f = sock.makefile("rwb", buffering=0)
-        f.write(f"GET {rank}\n".encode())
-        header = f.readline().decode(errors="replace").strip()
+        rf = sock.makefile("rb", buffering=0)
+        sock.sendall(f"GET {rank}\n".encode())
+        header = rf.readline().decode(errors="replace").strip()
         if not header.startswith("OK"):
             raise IOError(f"relay header {header!r}")
         n = int(header.split()[1])
         os.makedirs(tag_dir, exist_ok=True)
         for _ in range(n):
-            meta = f.readline().decode(errors="replace").strip()
+            meta = rf.readline().decode(errors="replace").strip()
             name, size_s = meta.rsplit(" ", 1)
             size = int(size_s)
             dst = os.path.join(tag_dir, name)
@@ -437,7 +489,7 @@ def _relay_pull(master_addr: str, port: int, rank: int, tag_dir: str,
             got = 0
             with open(tmp, "wb") as out:
                 while got < size:
-                    chunk = f.read(min(1 << 20, size - got))
+                    chunk = rf.read(min(1 << 20, size - got))
                     if not chunk:
                         raise IOError(f"relay EOF mid-file {name}")
                     out.write(chunk)
@@ -446,8 +498,8 @@ def _relay_pull(master_addr: str, port: int, rank: int, tag_dir: str,
                 raise IOError(f"relay short read {name}: {got} != {size}")
             os.replace(tmp, dst)
             log(f"[worker] relay: landed {name} ({size:,} B)")
-        f.write(b"DONE\n")
-        verdict = f.readline().decode(errors="replace").strip()
+        sock.sendall(b"DONE\n")
+        verdict = rf.readline().decode(errors="replace").strip()
         if not verdict.startswith("EVAL"):
             raise IOError(f"relay verdict {verdict!r}")
         world = int(verdict.split()[1])

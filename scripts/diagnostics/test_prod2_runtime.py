@@ -818,6 +818,73 @@ with tempfile.TemporaryDirectory(prefix="prod2mn_") as mn_td:
         check("worker sim(fallback): node1 does NOT touch result.json",
               f.read() == res_before_fb)
 
+    # ── relay transport regression (rev 3, 20260911 live-smoke finding):
+    # a makefile(buffering=0).write() is a SINGLE send() that returns
+    # short whenever the peer drains slower than the sender — the
+    # ignored return silently dropped bytes mid-file and stalled BOTH
+    # sides until their timeouts ("peer transfer failed: timed out" x3,
+    # smoke 0911_095739). sendall() must preserve byte identity under a
+    # peer far slower than the sender: small receive window +
+    # deliberately throttled reads force the sender to block mid-chunk.
+    import socket as _sk
+    _saved_to = remote_worker.RELAY_SERVE_TIMEOUT_S
+    remote_worker.RELAY_SERVE_TIMEOUT_S = 10.0
+    try:
+        slow_dir = os.path.join(mn_td, "relay_slow")
+        slow_tag = os.path.join(slow_dir, "d28_slow")
+        os.makedirs(slow_tag)
+        slow_model = os.urandom(6 << 20)
+        with open(os.path.join(slow_tag, "model_000100.pt"), "wb") as f:
+            f.write(slow_model)
+        with open(os.path.join(slow_tag, "meta_000100.json"), "wb") as f:
+            f.write(b'{"it": 100}')
+        _probe = _sk.socket()
+        _probe.bind(("127.0.0.1", 0))
+        slow_port = _probe.getsockname()[1]
+        _probe.close()
+        srv = remote_worker._RelayServer(slow_tag, slow_port, 2)
+        srv.start()
+        verdict_box = {}
+
+        def _decider():
+            verdict_box["world"] = srv.wait()
+
+        _dj = threading.Thread(target=_decider, daemon=True)
+        _dj.start()
+        cli = _sk.create_connection(("127.0.0.1", slow_port), timeout=30)
+        cli.settimeout(60)
+        cli.setsockopt(_sk.SOL_SOCKET, _sk.SO_RCVBUF, 32 << 10)
+        cli.sendall(b"GET 1\n")
+        crf = cli.makefile("rb", buffering=0)
+        nfiles = int(crf.readline().decode().strip().split()[1])
+        pulled = {}
+        for _ in range(nfiles):
+            meta = crf.readline().decode().strip()
+            fname, fsize = meta.rsplit(" ", 1)
+            fsize = int(fsize)
+            buf = bytearray()
+            while len(buf) < fsize:
+                # ~64 KiB every 5 ms — far slower than the sender; with
+                # the 32 KiB receive window sendall() must block mid-
+                # chunk for most of the transfer and still deliver all
+                # bytes.
+                buf += crf.read(min(64 << 10, fsize - len(buf)))
+                time.sleep(0.005)
+            pulled[fname] = bytes(buf)
+        cli.sendall(b"DONE\n")
+        verdict = crf.readline().decode().strip()
+        cli.close()
+        _dj.join(timeout=15)
+        check("relay slow reader: peer done -> verdict EVAL 32",
+              verdict == "EVAL 32" and verdict_box.get("world") == 32,
+              f"verdict={verdict!r} box={verdict_box}")
+        check("relay slow reader: byte identity despite throttled peer",
+              pulled.get("model_000100.pt") == slow_model
+              and pulled.get("meta_000100.json") == b'{"it": 100}',
+              str({k: len(v) for k, v in pulled.items()}))
+    finally:
+        remote_worker.RELAY_SERVE_TIMEOUT_S = _saved_to
+
     # eval_only + node_count>1 must refuse (N evals would race one CSV)
     spec_eo = ExpSpec.from_json(open(mn_spec(2)).read())
     spec_eo.eval_only = True
