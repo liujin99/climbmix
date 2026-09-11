@@ -346,13 +346,14 @@ def download_result_json(obs, result_uri: str) -> Optional[Dict]:
 def land_logs(obs, result_uri: str, output_dir: str, arm: str,
               node_count: int = 1) -> None:
     """Land the master's mid_train.log/eval.log plus every non-master
-    node's mid_train_node{r}.log when the arm ran multi-node. Nodes r>0
-    exit right after train (eval is node-0 only: the model file cannot
-    cross nodes — per-node output mounts, probe A 20260908), so they
-    produce no eval logs."""
+    node's mid_train_node{r}.log and eval_node{r}.log when the arm ran
+    multi-node. eval_node{r}.log exists only when the model relay
+    delivered (32-rank eval); the obs.stat guard below skips whatever a
+    node never produced (relay fallback: nodes r>0 exit after train)."""
     names = ["mid_train.log", "eval.log"] + [
-        f"mid_train_node{r}.log"
-        for r in range(1, max(1, node_count))]
+        f"{stem}_node{r}.log"
+        for r in range(1, max(1, node_count))
+        for stem in ("mid_train", "eval")]
     for name in names:
         src = f"{result_uri.rstrip('/')}/{name}"
         if name == "mid_train.log":

@@ -24,20 +24,29 @@ Multi-node (spec v3 node_count>1, the Phase-1 d28 target arms): the SAME
 worker runs on EVERY node of the job. Each node resolves its rendezvous
 (platform MASTER_* env or the k8s StatefulSet DNS the job runs as) and
 retargets the TRAIN torchrun launcher prefix (nanochat_cmds); the argv
-after "-m" stays pinned by the spec. Roles: every node trains, but only
-node 0 evals. The trained model exists ONLY on node 0 — save_checkpoint's
-rank-0 write lands in that node's local nanochat_base — and there is no
-cross-node path to it: the platform output mount is per-node local with
-one-way local->OBS sync (probe A 20260908, both probe jobs: "NOT-visible
-(saw 1/2 after 90s)" on every node) and containers carry no OBS SDK.
-The all-nodes eval of Phase 1.5 (2026-09-10) died on exactly this in the
-4-node smoke run 0910_154644: nodes 1-3 built empty _eval_base_node{r}
-farms and FileNotFoundError'd — reverted the same day. Nodes r>0 upload
-mid_train[_node{r}].log and exit right after train (their cards go back
-to the pool during node 0's eval). Node 0 runs the spec's ORIGINAL
-single-node (8-rank, --standalone) eval and owns the eval CSV, the
-checkpoint upload and result.json. The job succeeds only if every node
-exits 0.
+after "-m" stays pinned by the spec. Roles: every node trains, then the
+MODEL RELAY (2026-09-10, rev 2) decides the eval world. The trained
+model exists ONLY on node 0 — save_checkpoint's rank-0 write lands in
+that node's local nanochat_base — and the platform offers NO cross-node
+file path: the output mount is per-node local with one-way local->OBS
+sync (probe A 20260908, both probe jobs: "NOT-visible (saw 1/2 after
+90s)" on every node) and containers carry no OBS SDK. But the k8s
+network IS bidirectional (proven by every HCCL step and the train
+rendezvous itself), so node 0 serves model_*.pt + meta_*.json on
+master_port+2 and every non-master node pulls them into its own base
+dir (a ~3GB transfer takes seconds on the pod network). All peers
+delivered => the eval torchrun spans all 8*node_count ranks (rendezvous
+port = train port + 1; base_eval's per-sample striding + all_reduce
+aggregation is world-size invariant, so scores match the 8-rank form
+~node_count x faster). Any relay miss (peer failed, timeout, relay
+disabled via CLIMBMIX_EVAL_RELAY=0) => automatic fallback to node-0-only
+8-rank eval — the pre-relay behavior; the relay can only add speed,
+never take away correctness. Each node uses its own private
+_eval_base[_node{r}] dir and uploads mid_train[_node{r}].log +
+eval[_node{r}].log. Node 0 additionally owns the eval CSV, the
+checkpoint upload and result.json (uploaded after eval so non-master
+ranks do not idle at the eval rendezvous). The job succeeds only if
+every node exits 0.
 
 Progress visibility: a daemon thread streams the IN-PROGRESS mid_train.log
 and eval.log to {result_uri} every log_stream_s seconds (spec field, default
@@ -62,6 +71,7 @@ import argparse
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -240,6 +250,219 @@ def start_log_streamer(storage, work: str, result_uri: str,
     return _stop
 
 
+# ── multi-node model relay (Phase 1.5 rev 2, 2026-09-10) ───────────────────
+# Why this exists: the trained model file exists ONLY on node 0 (the
+# training's global rank 0 saves into ITS node-local nanochat_base), and
+# the platform provides no cross-node file path — output mounts are
+# per-node local with one-way local->OBS sync (probe A 20260908:
+# "NOT-visible (saw 1/2 after 90s)" on every node of both probe jobs)
+# and containers carry no OBS SDK. The k8s pod network, however, is
+# bidirectional and battle-proven (HCCL collectives + the train TCPStore
+# rendezvous both ride it). So the model crosses nodes the same way the
+# gradients do: over TCP.
+#
+# Protocol (port = master_port + 2; train uses master_port, the eval
+# rendezvous master_port + 1):
+#   client -> "GET <rank>\n"
+#   server -> "OK <nfiles>\n", then per file "<name> <size>\n" + raw bytes
+#   client -> "DONE\n"                    (after verifying every size)
+#   server -> "EVAL 32\n" | "EVAL 8\n"    (once ALL peers are done or the
+#                                          serve deadline passes)
+# Only model_*.pt + meta_*.json are served — eval loads those; the
+# per-rank optim_* shards already exist on every node (each rank wrote
+# its own) and are useless to eval.
+#
+# Failure semantics: ANY miss (connect failure, short read, missing DONE,
+# deadline, CLIMBMIX_EVAL_RELAY=0) degrades to the node-0-only 8-rank
+# eval — the behavior that shipped before the relay. The relay can only
+# add speed, never take away correctness.
+
+RELAY_SERVE_TIMEOUT_S = float(
+    os.environ.get("CLIMBMIX_RELAY_TIMEOUT_S", "300"))
+RELAY_CONNECT_TIMEOUT_S = float(
+    os.environ.get("CLIMBMIX_RELAY_CONNECT_S", "180"))
+RELAY_ENABLED = os.environ.get(
+    "CLIMBMIX_EVAL_RELAY", "1").strip().lower() not in ("0", "false", "no")
+
+
+def _relay_files(tag_dir: str):
+    """The files eval needs from the training node: the consolidated
+    model + its meta. Sorted for deterministic protocol order."""
+    names = []
+    for fn in sorted(os.listdir(tag_dir)):
+        if (fn.startswith("model_") and fn.endswith(".pt")) or \
+                (fn.startswith("meta_") and fn.endswith(".json")):
+            names.append(fn)
+    return names
+
+
+class _RelayServer:
+    """Node 0 side. start() spawns the listener; wait() blocks until every
+    non-master peer finished its pull (-> 32) or the deadline passes
+    (-> 8), then broadcasts the verdict to the completed peers."""
+
+    def __init__(self, tag_dir: str, port: int, node_count: int):
+        self.tag_dir = tag_dir
+        self.port = port
+        self.peers = node_count - 1
+        self.done = set()        # ranks that finished their pull
+        self.failed = set()      # ranks whose connection broke mid-transfer
+        self.socks = {}          # rank -> socket (kept open for verdict)
+        self.world = 8
+        self.decided = threading.Event()
+        self.listener = None
+        self._lock = threading.Lock()
+
+    def start(self):
+        self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.listener.bind(("", self.port))
+        self.listener.listen(self.peers + 2)
+        self.listener.settimeout(1.0)
+        threading.Thread(target=self._accept_loop, daemon=True,
+                         name="climbmix-relay-accept").start()
+
+    def _accept_loop(self):
+        while not self.decided.is_set():
+            try:
+                conn, _ = self.listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            threading.Thread(target=self._serve_one, args=(conn,),
+                             daemon=True, name="climbmix-relay-conn").start()
+
+    def _serve_one(self, conn: socket.socket):
+        try:
+            conn.settimeout(RELAY_SERVE_TIMEOUT_S)
+            f = conn.makefile("rwb", buffering=0)
+            req = f.readline().decode(errors="replace").strip()
+            rank = int(req.split()[-1])  # "GET <rank>"
+            files = _relay_files(self.tag_dir)
+            f.write(f"OK {len(files)}\n".encode())
+            for name in files:
+                path = os.path.join(self.tag_dir, name)
+                f.write(f"{name} {os.path.getsize(path)}\n".encode())
+                with open(path, "rb") as fh:
+                    while True:
+                        chunk = fh.read(1 << 20)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+            ack = f.readline().decode(errors="replace").strip()
+            if ack != "DONE":
+                raise IOError(f"peer {rank} acked {ack!r}, expected DONE")
+            with self._lock:
+                self.done.add(rank)
+                self.socks[rank] = conn
+            # Hold the socket until the verdict is decided, then deliver
+            # it on this same connection.
+            if not self.decided.wait(RELAY_SERVE_TIMEOUT_S):
+                return  # deadline while waiting — client times out too
+            try:
+                f.write(f"EVAL {self.world}\n".encode())
+            except OSError:
+                pass
+        except Exception as e:
+            # A broken transfer can never complete later — record the peer
+            # as failed so wait() can decide the fallback immediately
+            # instead of burning the whole deadline.
+            try:
+                rank = int(locals().get("req", "?").split()[-1])
+            except (ValueError, IndexError):
+                rank = None
+            if rank is not None:
+                with self._lock:
+                    self.failed.add(rank)
+            print(f"[worker] relay: peer transfer failed: {e}", flush=True)
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    def wait(self) -> int:
+        deadline = time.time() + RELAY_SERVE_TIMEOUT_S
+        while time.time() < deadline:
+            with self._lock:
+                if len(self.done) >= self.peers:
+                    break
+                if self.failed:  # a broken peer => 32 is unreachable now
+                    break
+            time.sleep(0.5)
+        with self._lock:
+            self.world = 32 if (len(self.done) >= self.peers
+                                and not self.failed) else 8
+        self.decided.set()
+        try:
+            self.listener.close()
+        except OSError:
+            pass
+        return self.world
+
+
+def _relay_pull(master_addr: str, port: int, rank: int, tag_dir: str,
+                log=print):
+    """Non-master node: pull model/meta from node 0 into tag_dir. Returns
+    the eval world (32 = every peer delivered) or None on ANY failure —
+    the caller falls back to exiting after its train stage."""
+    connect_deadline = time.time() + RELAY_CONNECT_TIMEOUT_S
+    sock = None
+    while sock is None and time.time() < connect_deadline:
+        try:
+            sock = socket.create_connection((master_addr, port), timeout=10)
+        except OSError:
+            time.sleep(2.0)
+    if sock is None:
+        log(f"[worker] relay: cannot reach {master_addr}:{port} in "
+            f"{RELAY_CONNECT_TIMEOUT_S:.0f}s — falling back (eval on node 0)")
+        return None
+    try:
+        # Generous cap: covers the server's full serve deadline even if
+        # this node finished its own pull early and waits for stragglers.
+        sock.settimeout(RELAY_SERVE_TIMEOUT_S + 120)
+        f = sock.makefile("rwb", buffering=0)
+        f.write(f"GET {rank}\n".encode())
+        header = f.readline().decode(errors="replace").strip()
+        if not header.startswith("OK"):
+            raise IOError(f"relay header {header!r}")
+        n = int(header.split()[1])
+        os.makedirs(tag_dir, exist_ok=True)
+        for _ in range(n):
+            meta = f.readline().decode(errors="replace").strip()
+            name, size_s = meta.rsplit(" ", 1)
+            size = int(size_s)
+            dst = os.path.join(tag_dir, name)
+            tmp = dst + ".relay_tmp"
+            got = 0
+            with open(tmp, "wb") as out:
+                while got < size:
+                    chunk = f.read(min(1 << 20, size - got))
+                    if not chunk:
+                        raise IOError(f"relay EOF mid-file {name}")
+                    out.write(chunk)
+                    got += len(chunk)
+            if got != size:
+                raise IOError(f"relay short read {name}: {got} != {size}")
+            os.replace(tmp, dst)
+            log(f"[worker] relay: landed {name} ({size:,} B)")
+        f.write(b"DONE\n")
+        verdict = f.readline().decode(errors="replace").strip()
+        if not verdict.startswith("EVAL"):
+            raise IOError(f"relay verdict {verdict!r}")
+        world = int(verdict.split()[1])
+        log(f"[worker] relay: verdict eval world = {world} ranks")
+        return world
+    except Exception as e:
+        log(f"[worker] relay: pull failed ({e}) — falling back")
+        return None
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
 # ── embed dispatch (TODO E — kind == "embed" specs) ───────────────────────
 
 def run_embed(s: dict, storage, spec_path: str) -> int:
@@ -333,6 +556,7 @@ def main() -> int:
     node_count = int(s.get("node_count", 1) or 1)
     master_port = int(s.get("master_port", 29500) or 29500)
     node_rank = 0
+    master_addr = ""
     if node_count > 1:
         master_addr, master_port, node_rank = \
             nanochat_cmds.resolve_multinode_rendezvous(
@@ -340,16 +564,21 @@ def main() -> int:
         s["mid_train_cmd"] = nanochat_cmds.retarget_torchrun_multinode(
             s["mid_train_cmd"], node_count, node_rank,
             master_addr, master_port)
-        # The eval cmd is NOT retargeted: only node 0 runs it (see the
-        # header docstring — the model file cannot cross nodes on this
-        # platform), and node 0's copy is the spec's original single-node
-        # 8-rank --standalone invocation.
+        # The eval cmd is retargeted LATER, only if the model relay
+        # delivers to every peer (see the relay block below) — the
+        # rendezvous port is train port + 1 (the train TCPStore may sit
+        # in TIME_WAIT when eval starts).
         print(f"[worker] multi-node job: node {node_rank}/{node_count}, "
               f"master {master_addr}:{master_port} "
-              f"(eval on node 0)", flush=True)
+              f"(eval rdzv port {master_port + 1}, "
+              f"relay {master_port + 2})", flush=True)
     train_log_name = ("mid_train.log" if node_rank == 0
                       else f"mid_train_node{node_rank}.log")
-    eval_log_name = "eval.log"
+    # Non-master eval log name is only USED when the relay delivers
+    # (32-rank eval); in the fallback the node exits after train and the
+    # streamer simply never sees this file.
+    eval_log_name = ("eval.log" if node_rank == 0
+                     else f"eval_node{node_rank}.log")
 
     # Live progress: stream the in-progress logs to the result prefix
     # while the stages run (0/absent disables — final uploads only).
@@ -479,14 +708,38 @@ def main() -> int:
                     stop_stream()
                     return mid_rc
                 return finish(mid_rc)
-            if node_count > 1 and node_rank != 0:
-                # Non-master node: train was this node's LAST stage. The
-                # trained model exists only on node 0 (rank-0 save) and
-                # no cross-node path can deliver it here (probe A
-                # 20260908: the output mount is per-node local, one-way
-                # to OBS), so there is nothing for this node in eval.
-                # Land the train log and release the cards back to the
-                # pool while node 0 runs the 8-rank eval.
+
+        # ── model relay (multi-node; see the relay section above). Any
+        # miss degrades to eval_world=8. Disabled entirely by
+        # CLIMBMIX_EVAL_RELAY=0. eval_only specs never get here (they
+        # are single-node only — refused at the top of this try).
+        eval_world = 8
+        if node_count > 1 and mid_rc == 0 and RELAY_ENABLED:
+            tag_dir = os.path.join(base, "mid_checkpoints", tag)
+            if node_rank == 0:
+                try:
+                    srv = _RelayServer(tag_dir, master_port + 2, node_count)
+                    srv.start()
+                    print(f"[worker] relay: serving "
+                          f"{', '.join(_relay_files(tag_dir))} to "
+                          f"{node_count - 1} peers on :{master_port + 2}",
+                          flush=True)
+                    eval_world = srv.wait()
+                except Exception:
+                    traceback.print_exc()
+                    eval_world = 8
+                print(f"[worker] relay: eval world = "
+                      f"{8 * node_count if eval_world == 32 else 8} ranks",
+                      flush=True)
+            else:
+                eval_world = _relay_pull(
+                    master_addr, master_port + 2, node_rank, tag_dir) or 8
+
+        if node_count > 1 and node_rank != 0:
+            if eval_world != 32:
+                # Relay fallback: train was this node's LAST stage. Land
+                # the train log and release the cards back to the pool
+                # while node 0 runs the 8-rank eval.
                 try:
                     storage.upload_file(os.path.join(work, train_log_name),
                                         f"{result_uri}/{train_log_name}")
@@ -494,11 +747,43 @@ def main() -> int:
                     traceback.print_exc()  # log delivery is best-effort
                 stop_stream()
                 return 0
+            # 32-rank world: this node joins the retargeted eval. The
+            # CSV (rank-0-only writer), result.json and the checkpoint
+            # upload stay master-owned — a second writer would clobber.
+            s["eval_cmd"] = nanochat_cmds.retarget_torchrun_multinode(
+                s["eval_cmd"], node_count, node_rank,
+                master_addr, master_port + 1)
+            eval_base = nanochat_cmds.make_eval_base_dir(
+                base, work, tag, subdir=f"_eval_base_node{node_rank}")
+            env = nanochat_cmds.build_subprocess_env(
+                s["nanochat_dir"], base,
+                device_ids=s.get("visible_devices") or [0],
+                base_dir_override=eval_base,
+                extra_env=s.get("env") or None)
+            eval_rc = run_cmd(s["eval_cmd"],
+                              os.path.join(work, eval_log_name),
+                              cwd=s["nanochat_dir"], env=env)
+            res["eval_rc"] = eval_rc
+            stop_stream()
+            for log_name in (train_log_name, eval_log_name):
+                lp = os.path.join(work, log_name)
+                if os.path.isfile(lp):
+                    try:
+                        storage.upload_file(lp, f"{result_uri}/{log_name}")
+                    except Exception:
+                        traceback.print_exc()  # best-effort
+            return 0 if (mid_rc == 0 and eval_rc == 0) \
+                else (mid_rc or eval_rc)
 
         # Eval in a PRIVATE base dir (symlink farm — identical to local).
-        # Single-node semantics even in multi-node jobs: only node 0
-        # reaches here, the model is in ITS base dir, and the spec's
-        # eval_cmd is the original unmodified single-node invocation.
+        # Single-node jobs and relay-fallback runs use the spec's original
+        # single-node 8-rank --standalone argv; relay-delivered runs
+        # retarget to the full-node-count world (score-identical by
+        # construction: base_eval's per-sample striding + all_reduce).
+        if eval_world == 32:
+            s["eval_cmd"] = nanochat_cmds.retarget_torchrun_multinode(
+                s["eval_cmd"], node_count, node_rank,
+                master_addr, master_port + 1)
         eval_base = nanochat_cmds.make_eval_base_dir(base, work, tag)
         env = nanochat_cmds.build_subprocess_env(
             s["nanochat_dir"], base,

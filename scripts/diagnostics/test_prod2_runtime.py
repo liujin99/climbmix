@@ -579,40 +579,54 @@ check("spec: embed_worker SPEC_VERSION in lockstep (v2-bump miss fixed)",
       re.search(r"^SPEC_VERSION = 3", embed_wsrc, re.M) is not None)
 
 # ── multi-node worker simulation (spec v3, node_count=2) ──────────────────
-# Runs the REAL remote_worker.py as a subprocess twice (node 0 + node 1)
+# Runs the REAL remote_worker.py as subprocesses (node 0 + node 1)
 # against a LocalStorage fake OBS, with a stub torchrun recording argv.
 # Rendezvous goes through the platform-env path (MASTER_ADDR/MASTER_PORT/
 # NODE_RANK in the worker's inherited env) — no hostname tricks needed.
+# The stub is rank-faithful: only a rank-0 (or unretargeted) train call
+# creates model+meta (the rank-0 consolidated save); non-zero ranks
+# create just their optim shard — so the model file reaching node 1's
+# base dir is PROOF the TCP relay delivered it.
 with tempfile.TemporaryDirectory(prefix="prod2mn_") as mn_td:
     mn_bin = os.path.join(mn_td, "bin")
     os.makedirs(mn_bin)
-    argv_rec = os.path.join(mn_td, "argv_rec.txt")
     stub_tr = os.path.join(mn_bin, "torchrun")
     with open(stub_tr, "w") as f:
         f.write(
             "#!/usr/bin/env bash\n"
             'printf \'%s\\n\' "$@" >> "$ARGV_REC"\n'
             'echo "=== call ===" >> "$ARGV_REC"\n'
-            "# emulate mid_train: create the checkpoint the worker uploads\n"
-            "# (train calls carry --num-iterations; eval calls do not)\n"
-            'tag=""; train=0\n'
+            "# rank-faithful mid_train emulation (train calls carry\n"
+            "# --num-iterations; eval calls do not)\n"
+            'tag=""; train=0; rank=""\n'
             'for a in "$@"; do case "$a" in '
             '--model-tag=*) tag="${a#--model-tag=}";; '
-            '--num-iterations=*) train=1;; esac; done\n'
+            '--num-iterations=*) train=1;; '
+            '--node_rank=*) rank="${a#--node_rank=}";; esac; done\n'
             'if [ "$train" = 1 ] && [ -n "$tag" ]; then\n'
             '  mkdir -p "$NANOCHAT_BASE_DIR/mid_checkpoints/$tag"\n'
-            '  echo ckpt > "$NANOCHAT_BASE_DIR/mid_checkpoints/$tag/'
+            '  if [ -z "$rank" ] || [ "$rank" = 0 ]; then\n'
+            '    echo ckpt > "$NANOCHAT_BASE_DIR/mid_checkpoints/$tag/'
             'model_000100.pt"\n'
+            '    echo meta > "$NANOCHAT_BASE_DIR/mid_checkpoints/$tag/'
+            'meta_000100.json"\n'
+            '  else\n'
+            '    echo optim > "$NANOCHAT_BASE_DIR/mid_checkpoints/$tag/'
+            'optim_000100_rank$rank.pt"\n'
+            '  fi\n'
             "fi\n"
             "exit 0\n")
     os.chmod(stub_tr, 0o755)
 
     mn_root = os.path.join(mn_td, "fakeobs")       # LocalStorage root
-    mn_base = os.path.join(mn_td, "nc_base")       # spec base_dir
+    mn_base0 = os.path.join(mn_td, "nc_base0")     # node 0 spec base_dir
+    mn_base1 = os.path.join(mn_td, "nc_base1")     # node 1 spec base_dir
     mn_work = os.path.join(mn_td, "nc_work")       # spec work_dir
     mn_ncdir = os.path.join(mn_td, "nanochat")     # spec nanochat_dir (cwd)
-    for d in (mn_root, os.path.join(mn_base, "tokenizer"), mn_work, mn_ncdir):
+    for d in (mn_root, mn_work, mn_ncdir):
         os.makedirs(d, exist_ok=True)
+    for b in (mn_base0, mn_base1):
+        os.makedirs(os.path.join(b, "tokenizer"), exist_ok=True)
     mn_ckpt_src = os.path.join(mn_td, "d28_asset")
     os.makedirs(mn_ckpt_src)
     with open(os.path.join(mn_ckpt_src, "model_000000.pt"), "w") as f:
@@ -624,9 +638,10 @@ with tempfile.TemporaryDirectory(prefix="prod2mn_") as mn_td:
     with open(os.path.join(mix_local, "shard_00000.parquet"), "w") as f:
         f.write("data")
 
-    def mn_spec(node_count):
+    def mn_spec(node_count, node_rank=0, base=None):
         spec = ExpSpec(
-            model_tag="d28_mn_x", nanochat_dir=mn_ncdir, base_dir=mn_base,
+            model_tag="d28_mn_x", nanochat_dir=mn_ncdir,
+            base_dir=base or mn_base0,
             work_dir=mn_work, base_ckpt_src=mn_ckpt_src,
             mixture_data_uri=mixture_uri, result_uri=result_uri,
             mid_train_cmd=build_target_mid_train_cmd(
@@ -642,92 +657,166 @@ with tempfile.TemporaryDirectory(prefix="prod2mn_") as mn_td:
                 core_batch_size="8", nproc_per_node=8),
             node_count=node_count, log_stream_s=0,
         )
-        path = os.path.join(mn_td, f"spec_{node_count}.json")
+        path = os.path.join(mn_td,
+                            f"spec_{node_count}_{node_rank}_{id(base)}.json")
         with open(path, "w") as f:
             f.write(spec.to_json())
         return path
 
-    def run_worker(spec_path, node_rank):
+    def _worker_env(node_rank, extra_env=None):
         env = dict(os.environ)
         env.update({"PATH": mn_bin + os.pathsep + env["PATH"],
-                    "ARGV_REC": argv_rec,
+                    "ARGV_REC": os.path.join(mn_td,
+                                             f"argv_rec_n{node_rank}.txt"),
                     "MASTER_ADDR": "127.0.0.1", "MASTER_PORT": "29511",
                     "NODE_RANK": str(node_rank)})
+        if extra_env:
+            env.update(extra_env)
+        return env
+
+    def run_worker(spec_path, node_rank, extra_env=None):
         return subprocess.run(
             [sys.executable, os.path.join(_stage, "remote_worker.py"),
              "--spec-uri", "obs://unused/spec.json",
              "--spec-local", spec_path, "--storage", "local",
              "--storage-root", mn_root],
-            env=env, capture_output=True, text=True, timeout=120)
+            env=_worker_env(node_rank, extra_env),
+            capture_output=True, text=True, timeout=180)
+
+    def spawn_worker(spec_path, node_rank, extra_env=None):
+        return subprocess.Popen(
+            [sys.executable, os.path.join(_stage, "remote_worker.py"),
+             "--spec-uri", "obs://unused/spec.json",
+             "--spec-local", spec_path, "--storage", "local",
+             "--storage-root", mn_root],
+            env=_worker_env(node_rank, extra_env),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    def rec_of(node_rank):
+        p = os.path.join(mn_td, f"argv_rec_n{node_rank}.txt")
+        return open(p).read() if os.path.isfile(p) else ""
+
+    res_local = os.path.join(mn_root, "b", "p", "arms", "x", "result",
+                             "result.json")
+
+    def fresh_scenario():
+        """The stub APPENDS to shared argv recs and LocalStorage keeps
+        every prior upload — isolate the argv checks and the
+        log-presence checks per scenario."""
+        import shutil as _sh
+        for r in (0, 1):
+            try:
+                os.remove(os.path.join(mn_td, f"argv_rec_n{r}.txt"))
+            except FileNotFoundError:
+                pass
+        _sh.rmtree(os.path.join(mn_root, "b", "p", "arms", "x", "result"),
+                   ignore_errors=True)
 
     # single-node sanity first: node_count=1 runs the argv VERBATIM
     r0 = run_worker(mn_spec(1), 0)
     check("worker sim: single-node exit 0", r0.returncode == 0,
           r0.stdout[-400:] + r0.stderr[-400:])
-    rec1 = open(argv_rec).read()
+    rec1 = rec_of(0)
     check("worker sim: single-node argv untouched (--standalone kept)",
           "--standalone" in rec1 and "--nnodes" not in rec1)
-    res_local = os.path.join(mn_root, "b", "p", "arms", "x", "result",
-                             "result.json")
     check("worker sim: single-node lands result.json",
           json.load(open(res_local))["mid_train_rc"] == 0)
 
-    os.remove(argv_rec)
-    # multi-node: node 0 (master) then node 1 (non-master)
-    r_n0 = run_worker(mn_spec(2), 0)
-    check("worker sim: multi-node node0 exit 0", r_n0.returncode == 0,
-          r_n0.stdout[-400:] + r_n0.stderr[-400:])
-    rec_n0 = open(argv_rec).read()
-    check("worker sim: node0 train argv retargeted (--nnodes=2 rank 0)",
+    # ── multi-node WITH relay: nodes run CONCURRENTLY (node 1's pull
+    # must overlap node 0's serve window — the real job shape). Real
+    # localhost sockets: MASTER_PORT 29511 -> eval rdzv 29512, relay
+    # 29513.
+    fresh_scenario()
+    relay_env = {"CLIMBMIX_RELAY_TIMEOUT_S": "45",
+                 "CLIMBMIX_RELAY_CONNECT_S": "30"}
+    p_n0 = spawn_worker(mn_spec(2, 0, base=mn_base0), 0, relay_env)
+    p_n1 = spawn_worker(mn_spec(2, 1, base=mn_base1), 1, relay_env)
+    out_n0 = p_n0.communicate(timeout=180)
+    out_n1 = p_n1.communicate(timeout=180)
+    check("worker sim(relay): node0 exit 0", p_n0.returncode == 0,
+          (out_n0[0] or "")[-400:] + (out_n0[1] or "")[-400:])
+    check("worker sim(relay): node1 exit 0", p_n1.returncode == 0,
+          (out_n1[0] or "")[-400:] + (out_n1[1] or "")[-400:])
+    rec_n0, rec_n1 = rec_of(0), rec_of(1)
+    check("worker sim(relay): node0 train retargeted (--nnodes=2 rank 0)",
           "--nnodes=2" in rec_n0 and "--node_rank=0" in rec_n0
-          and "--master_addr=127.0.0.1" in rec_n0
           and "--master_port=29511" in rec_n0
           and "--standalone" not in rec_n0.split("=== call ===")[0])
-    # Eval stays single-node on node 0: the spec's ORIGINAL argv runs
-    # (--standalone kept, no --nnodes) — nodes r>0 cannot see node 0's
-    # model file (per-node output mounts, probe A 20260908), so they
-    # exit after train and never join an eval rendezvous.
-    check("worker sim: node0 eval runs UNRETARGETED (standalone kept)",
+    check("worker sim(relay): node0 eval retargeted (port 29512, rank 0)",
           rec_n0.count("=== call ===") == 2
-          and "--standalone" in rec_n0.split("=== call ===")[1]
-          and "--nnodes" not in rec_n0.split("=== call ===")[1])
+          and "--nnodes=2" in rec_n0.split("=== call ===")[1]
+          and "--node_rank=0" in rec_n0.split("=== call ===")[1]
+          and "--master_port=29512" in rec_n0.split("=== call ===")[1]
+          and "--standalone" not in rec_n0.split("=== call ===")[1])
+    check("worker sim(relay): node1 joins eval (2 calls, rank 1, 29512)",
+          rec_n1.count("=== call ===") == 2
+          and "--node_rank=1" in rec_n1
+          and "--master_port=29511" in rec_n1.split("=== call ===")[0]
+          and "--master_port=29512" in rec_n1.split("=== call ===")[1]
+          and "--standalone" not in rec_n1.split("=== call ===")[1])
+    # RELAY PROOF: the stub wrote only an optim shard on node 1 — these
+    # files can only exist if the TCP relay delivered them.
+    n1_tag = os.path.join(mn_base1, "mid_checkpoints", "d28_mn_x")
+    n0_tag = os.path.join(mn_base0, "mid_checkpoints", "d28_mn_x")
+    check("worker sim(relay): model+meta RELAYED to node1 (bytes match)",
+          os.path.isfile(os.path.join(n1_tag, "model_000100.pt"))
+          and os.path.isfile(os.path.join(n1_tag, "meta_000100.json"))
+          and open(os.path.join(n1_tag, "model_000100.pt"), "rb").read()
+          == open(os.path.join(n0_tag, "model_000100.pt"), "rb").read()
+          and os.path.isfile(os.path.join(n1_tag,
+                                          "optim_000100_rank1.pt")))
     res_json = json.load(open(res_local))
-    check("worker sim: master owns result.json (train+eval rc 0)",
+    check("worker sim(relay): master owns result.json (train+eval rc 0)",
           res_json["mid_train_rc"] == 0 and res_json["eval_rc"] == 0
           and res_json["csv"] is None)  # stub eval writes no CSV
     n0_ckpt = os.path.join(mn_root, "b", "p", "arms", "x", "result",
                            "mid_checkpoint", "model_000100.pt")
-    check("worker sim: master ckpt landed after eval (post-eval upload)",
+    check("worker sim(relay): master ckpt landed after eval",
           os.path.isfile(n0_ckpt))
-    with open(res_local) as f:
-        res_before_n1 = f.read()
 
-    os.remove(argv_rec)
-    r_n1 = run_worker(mn_spec(2), 1)
-    check("worker sim: multi-node node1 exit 0", r_n1.returncode == 0,
-          r_n1.stdout[-400:] + r_n1.stderr[-400:])
-    rec_n1 = open(argv_rec).read()
-    check("worker sim: node1 trains ONLY (one call, rank 1, no eval)",
-          rec_n1.count("=== call ===") == 1 and "--node_rank=1" in rec_n1
-          and "--nnodes=2" in rec_n1
-          and "--master_port=29511" in rec_n1
-          and "base_eval" not in rec_n1)
-    # node 1 must not touch master-owned artifacts: result.json stays
-    # byte-identical to node 0's copy.
+    # ── multi-node relay FALLBACK (CLIMBMIX_EVAL_RELAY=0): node-0-only
+    # 8-rank eval — the pre-relay behavior, which any relay miss must
+    # reproduce exactly.
+    fresh_scenario()
+    fb_env = {"CLIMBMIX_EVAL_RELAY": "0"}
+    fb_base0 = os.path.join(mn_td, "fb_base0")
+    fb_base1 = os.path.join(mn_td, "fb_base1")
+    for b in (fb_base0, fb_base1):
+        os.makedirs(os.path.join(b, "tokenizer"), exist_ok=True)
+    r_n0f = run_worker(mn_spec(2, 0, base=fb_base0), 0, fb_env)
+    check("worker sim(fallback): node0 exit 0", r_n0f.returncode == 0,
+          r_n0f.stdout[-400:] + r_n0f.stderr[-400:])
     with open(res_local) as f:
-        check("worker sim: node1 does NOT touch master's result.json",
-              f.read() == res_before_n1)
+        res_before_fb = f.read()   # AFTER node0's own rewrite
+    r_n1f = run_worker(mn_spec(2, 1, base=fb_base1), 1, fb_env)
+    check("worker sim(fallback): node1 exit 0", r_n1f.returncode == 0,
+          r_n1f.stdout[-400:] + r_n1f.stderr[-400:])
+    rec_n0f, rec_n1f = rec_of(0), rec_of(1)
+    check("worker sim(fallback): node0 eval UNRETARGETED (standalone)",
+          rec_n0f.count("=== call ===") == 2
+          and "--standalone" in rec_n0f.split("=== call ===")[1]
+          and "--nnodes" not in rec_n0f.split("=== call ===")[1])
+    check("worker sim(fallback): node1 trains ONLY (no eval call)",
+          rec_n1f.count("=== call ===") == 1
+          and "--node_rank=1" in rec_n1f
+          and "base_eval" not in rec_n1f)
+    fb_tag1 = os.path.join(fb_base1, "mid_checkpoints", "d28_mn_x")
+    check("worker sim(fallback): no model file reached node1",
+          not os.path.exists(os.path.join(fb_tag1, "model_000100.pt"))
+          and os.path.isfile(os.path.join(fb_tag1,
+                                          "optim_000100_rank1.pt")))
     node1_train_log = os.path.join(mn_root, "b", "p", "arms", "x", "result",
                                    "mid_train_node1.log")
     node1_eval_log = os.path.join(mn_root, "b", "p", "arms", "x", "result",
                                   "eval_node1.log")
-    check("worker sim: node1 uploads train log, no eval log (node-0 eval)",
+    check("worker sim(fallback): node1 train log landed, no eval log",
           os.path.isfile(node1_train_log)
           and not os.path.exists(node1_eval_log))
-    master_log = os.path.join(mn_root, "b", "p", "arms", "x", "result",
-                              "mid_train.log")
-    check("worker sim: master's mid_train.log present",
-          os.path.isfile(master_log))
+    # node 1 must not touch master-owned artifacts: result.json stays
+    # byte-identical to node 0's copy.
+    with open(res_local) as f:
+        check("worker sim(fallback): node1 does NOT touch result.json",
+              f.read() == res_before_fb)
 
     # eval_only + node_count>1 must refuse (N evals would race one CSV)
     spec_eo = ExpSpec.from_json(open(mn_spec(2)).read())
