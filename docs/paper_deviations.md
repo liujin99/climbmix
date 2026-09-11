@@ -254,6 +254,19 @@ speedrun 不变。
   空闲,cap `CLIMBMIX_EVAL_SETTLE_S` 120s,到顶放行留痕)+ 32 卡 eval
   传 `HCCL_BUFFSIZE=100`(eval allreduce 极小,减半无代价)。回退路径
   (8 卡)行为不变。
+- **rev 4(2026-09-12,同权重不变性实测 + eval-only 输入侧结论)**。① 对同一份
+  落地 ckpt(d28_smoke4n_0911_140826,2 节点冒烟 0911_140826 产物)分别跑
+  16-rank(作业内)与 8-rank(master 本机 step7_eval_standalone,同
+  argv)eval:5/6 基准 6 位小数逐位相同(arc_challenge 0.462457、gpqa
+  0.227273、gsm8k 0.013647、math 0.002、mmlu_stem 0.301551),arc_easy
+  恰翻转 1/2376 例(0.748317 vs 0.748737),NLL Δ −1.3e-4/−2.2e-4,
+  STEM Δ −9.3e-5 = 该样本 ÷6——rev 2 预测的"仅 padding 组合抖动"得证,
+  偏差 ≪ 训练噪声底(095739 同形对照 ±5 样本)。② eval-only 复评作业的
+  架构坑:mount 后端 boot 视图把 result_uri 链到作业自身输出挂载(启动
+  为空、单向上行)→ 经 result_uri 下载 ckpt 结构性拉空(线上 1.06 s
+  静默失败);worker 修复 = 下载/symlink 后校验 model_*.pt,缺即报带
+  架构说明的错;eval-only 的 ckpt 必须走输入侧(ckpt_src → 资产挂载/
+  exp 输入快照,base 锚点一直如此)。
 
 ## 已核对一致(正向审计)
 

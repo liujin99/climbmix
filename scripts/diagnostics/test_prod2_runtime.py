@@ -966,6 +966,66 @@ with tempfile.TemporaryDirectory(prefix="prod2mn_") as mn_td:
     check("worker sim: eval_only + node_count=2 refuses",
           r_eo.returncode != 0 and "single-node" in r_eo.stdout + r_eo.stderr)
 
+    # eval_only + a result_uri download that finds NOTHING: mount-based
+    # backends map result_uri to the job's own (empty at boot) output
+    # mount — the 2026-09-12 live retry died 1.06 s in on this, with a
+    # confusing downstream isdir message instead of the real cause.
+    mn_base_eo_dl = os.path.join(mn_td, "nc_base_eo_dl")
+    mn_base_eo_src = os.path.join(mn_td, "nc_base_eo_src")
+    for _b in (mn_base_eo_dl, mn_base_eo_src):
+        os.makedirs(os.path.join(_b, "tokenizer"), exist_ok=True)
+    spec_eo2 = ExpSpec.from_json(open(mn_spec(1, base=mn_base_eo_dl)).read())
+    spec_eo2.eval_only = True
+    spec_eo2.ckpt_src = ""
+    spec_eo2.mixture_data_uri = ""
+    spec_eo2.mid_train_cmd = []
+    eo2_path = os.path.join(mn_td, "spec_eo2.json")
+    with open(eo2_path, "w") as f:
+        f.write(spec_eo2.to_json())
+    fresh_scenario()
+    r_eo2 = run_worker(eo2_path, 0)
+    _eo2_out = (r_eo2.stdout or "") + (r_eo2.stderr or "")
+    check("worker sim: eval_only empty download fails with the real cause",
+          r_eo2.returncode != 0
+          and "never reached the container" in _eo2_out
+          and "output mount" in _eo2_out,
+          _eo2_out[-400:])
+    res_eo2 = json.load(open(res_local))
+    check("worker sim: eval_only empty download result.json explains",
+          "never reached the container" in (res_eo2.get("error") or ""))
+
+    # eval_only happy path: ckpt_src -> staged asset WITH model files
+    # (the input-side route the mount architecture requires) — symlink
+    # + guard pass-through + eval runs, no train call.
+    spec_eo3 = ExpSpec.from_json(open(mn_spec(1, base=mn_base_eo_src)).read())
+    spec_eo3.eval_only = True
+    spec_eo3.ckpt_src = mn_ckpt_src
+    spec_eo3.mixture_data_uri = ""
+    spec_eo3.mid_train_cmd = []
+    eo3_path = os.path.join(mn_td, "spec_eo3.json")
+    with open(eo3_path, "w") as f:
+        f.write(spec_eo3.to_json())
+    fresh_scenario()
+    r_eo3 = run_worker(eo3_path, 0)
+    check("worker sim: eval_only ckpt_src exit 0", r_eo3.returncode == 0,
+          (r_eo3.stdout or "")[-400:] + (r_eo3.stderr or "")[-400:])
+    check("worker sim: eval_only runs eval only (no train call)",
+          rec_of(0).count("=== call ===") == 1
+          and "--model-tag=d28_mn_x" in rec_of(0))
+    res_eo3 = json.load(open(res_local))
+    check("worker sim: eval_only result rc 0, no ckpt upload",
+          res_eo3["mid_train_rc"] == 0 and res_eo3["eval_rc"] == 0
+          and res_eo3["checkpoint_uploaded"] is False)
+
+    # LocalStorage.download_dir must create the destination dir even on
+    # an empty listing (MoxingStorage parity — see the 2026-09-12 note).
+    _ls_root = tempfile.mkdtemp(prefix="prod2ls_")
+    _ls_dst = os.path.join(_ls_root, "dst_empty")
+    remote_worker.LocalStorage(_ls_root).download_dir(
+        "obs://b/nothing/here", _ls_dst)
+    check("storage: LocalStorage.download_dir makedirs on empty prefix",
+          os.path.isdir(_ls_dst))
+
 # private eval dir must carry base_checkpoints/{tag} when the base dir
 # has it: --model-type=base (the remote d28 anchor) loads through
 # nanochat load_model("base") -> {base_dir}/base_checkpoints/{tag}.

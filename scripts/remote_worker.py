@@ -68,6 +68,7 @@ Storage backends:
 """
 
 import argparse
+import glob
 import json
 import os
 import re
@@ -126,6 +127,10 @@ class LocalStorage:
                       for f in os.listdir(path))
 
     def download_dir(self, uri: str, local_dir: str) -> None:
+        # makedirs even when the prefix lists nothing — MoxingStorage
+        # parity (a silent no-op here turned the 2026-09-12 eval-only
+        # retry into a downstream isdir refusal).
+        os.makedirs(local_dir, exist_ok=True)
         for obj in self.list_objects(uri):
             name = obj.rsplit("/", 1)[-1]
             self.download_file(obj, os.path.join(local_dir, name))
@@ -763,6 +768,23 @@ def main() -> int:
                 print(f"[worker] eval-only: downloading mid checkpoint -> {ckpt_dir}",
                       flush=True)
                 storage.download_dir(f"{result_uri}/mid_checkpoint", ckpt_dir)
+            # 2026-09-12 live postmortem: on mount-based backends the
+            # boot view maps result_uri to THIS job's own output mount
+            # (empty at boot, one-way up-sync) — the download above
+            # pulled nothing and the eval died 1.06 s later in a
+            # confusing isdir check. Verify the model actually arrived,
+            # for BOTH branches (a ckpt_src mount without model files
+            # fails here too).
+            if not glob.glob(os.path.join(ckpt_dir, "model_*.pt")):
+                raise RuntimeError(
+                    f"eval_only: no model_*.pt under {ckpt_dir} — the "
+                    f"checkpoint never reached the container. Mount-based "
+                    f"backends map result_uri to this job's own (empty at "
+                    f"boot) output mount, so a result_uri download pulls "
+                    f"nothing: stage the checkpoint on the INPUT side "
+                    f"(spec.ckpt_src -> an asset mount / exp input "
+                    f"staging). If ckpt_src was set, its target lacks "
+                    f"model_*.pt.")
         else:
             mix_dir = os.path.join(work, "mixture_data")
             print(f"[worker] downloading mixture data -> {mix_dir}", flush=True)
