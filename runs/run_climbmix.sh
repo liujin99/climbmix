@@ -52,17 +52,16 @@ GENERAL_DATA_DIR="${GENERAL_DATA_DIR:-$NANOCHAT_BASE_DIR/climbmix_shards}"
 
 PROXY_DEPTH="${PROXY_DEPTH:-20}"
 TARGET_DEPTH="${TARGET_DEPTH:-28}"
-PROXY_NUM_ITERATIONS="${PROXY_NUM_ITERATIONS:-1000}"
 # Token caps for data selection (full pool ≈ 100B tokens / 116M docs — NOT capped means
 # every proxy exp would select the whole pool; that's the default 0, so always set these).
-# Proxy: 400M tokens/exp = single-pass calibration (2026-08-28, TODO.md): training
-# consumes 524M (1000 iters × 524,288); mix = 400M STEM + 171M general ≈ 571M ≥
-# consumption → no silent loader cycling (200M gave epoch≈1.8; run-4 target log
-# showed epoch:4). Paper's 800M is its proxy CONSUMPTION (~394 × 2M batch), not a
-# cap; our 524M = 65% of paper (documented deviation, scoring_metric_design §12.3).
+# Proxy: PROXY_TARGET_TOKENS 是搜索小实验的预算真源 (步数由它派生, 见下方推导块)。
+# 默认 500Mi = 524,288,000 = 1000 步 × 524,288 (d20 tbs) — 与历史搜索 (1000 步)
+# 完全连续, warm-start 注入的历史点分数可直接混用; 池 = 预算/0.7 ≈ 749M ≥ 消耗
+# 524M → 恒单遍 (epoch≈0.7)。论文 proxy 消耗 ~800M, 我们 524M = 65%
+# (documented deviation, scoring_metric_design §12.3)。
 # Target: TARGET_TOKENS 是唯一真源 (退火预算), 步数由它派生 (见下方推导块),
 # 池子=预算/STEM_RATIO, 消耗=预算 → 恒单遍 (epoch≈0.7)。
-PROXY_TARGET_TOKENS="${PROXY_TARGET_TOKENS:-400M}"
+PROXY_TARGET_TOKENS="${PROXY_TARGET_TOKENS:-500Mi}"
 TARGET_TOKENS="${TARGET_TOKENS:-2B}"
 
 # TARGET_STEPS 派生 (单一真源): steps = TARGET_TOKENS / total_batch_size (d28 ckpt meta)。
@@ -70,7 +69,7 @@ TARGET_TOKENS="${TARGET_TOKENS:-2B}"
 # TARGET_STEPS 不再是用户旋钮: 外部设置 = 遗留配置, 就地报错 (防静默指纹漂移)。
 # 臂级复用 (run_arm_only.sh) 用同一 CLI 派生; 直接 dispatch 的"同数据改步数"走
 # env 优先级, 由 single-pass 守卫把关。
-# 历史精确复现: prod1/prod2 的 2000 步 = TARGET_TOKENS=2097152000。
+# 历史精确复现: prod1/prod2 的 2000 步 = TARGET_TOKENS=2097152000 (= 2000Mi)。
 if [ -n "${TARGET_STEPS:-}" ]; then
     echo "✗ TARGET_STEPS=${TARGET_STEPS} is no longer a knob — it is DERIVED from TARGET_TOKENS."
     echo "  unset TARGET_STEPS and set the budget instead (TARGET_TOKENS=2B → 1907 steps @ 1,048,576)."
@@ -86,6 +85,21 @@ TARGET_STEPS="$(python3 scripts/derive_target_steps.py \
     --ckpt-dir "$NANOCHAT_BASE_DIR/base_checkpoints/d${TARGET_DEPTH}")" \
     || { echo "✗ TARGET_STEPS derivation failed"; exit 1; }
 echo "  TARGET_STEPS derived from TARGET_TOKENS=$TARGET_TOKENS -> $TARGET_STEPS steps"
+
+# PROXY_NUM_ITERATIONS 派生 (与 TARGET_STEPS 同规则): 搜索小实验步数由
+# PROXY_TARGET_TOKENS 派生 — token 预算是唯一真源 (说 token 直观, 说 steps 不直观)。
+# 外部设置 = 遗留配置, 就地报错; 需要更强/更省的搜索信号时改预算即可
+# (800Mi → 1526 步 = 论文 proxy 消耗量级; 400M → 762 步)。
+if [ -n "${PROXY_NUM_ITERATIONS:-}" ]; then
+    echo "✗ PROXY_NUM_ITERATIONS=${PROXY_NUM_ITERATIONS} is no longer a knob — it is DERIVED from PROXY_TARGET_TOKENS."
+    echo "  unset it and set the budget instead (PROXY_TARGET_TOKENS=500Mi → 1000 steps @ 524,288)."
+    exit 1
+fi
+PROXY_NUM_ITERATIONS="$(python3 scripts/derive_target_steps.py \
+    --target-tokens "$PROXY_TARGET_TOKENS" \
+    --ckpt-dir "$NANOCHAT_BASE_DIR/base_checkpoints/d${PROXY_DEPTH}")" \
+    || { echo "✗ PROXY_NUM_ITERATIONS derivation failed"; exit 1; }
+echo "  PROXY_NUM_ITERATIONS derived from PROXY_TARGET_TOKENS=$PROXY_TARGET_TOKENS -> $PROXY_NUM_ITERATIONS steps"
 CONFIGS_PER_ITER="${CONFIGS_PER_ITER:-20,10,5}"
 # prod2 B++: 期望列表语义 — ADAPTIVE_CONFIGS=1 时 configs_per_iter 视为
 # "期望每轮实验数", 由实测并发 (RemoteExecutor 探测) 浮动到

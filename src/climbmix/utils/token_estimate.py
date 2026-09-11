@@ -13,15 +13,25 @@ import numpy.typing as npt
 
 DEFAULT_CHARS_PER_TOKEN = 4
 
-_TOKEN_COUNT_RE = re.compile(r'^([0-9]*\.?[0-9]+)\s*([kKmMbB])?$')
-_TOKEN_SUFFIX_MULTIPLIERS = {'K': 1_000, 'M': 1_000_000, 'B': 1_000_000_000}
+_TOKEN_COUNT_RE = re.compile(r'^([0-9]*\.?[0-9]+)\s*([kKmMgGtTbB][iI]?)?$')
+_TOKEN_SUFFIX_MULTIPLIERS = {
+    'K': 1_000, 'M': 1_000_000, 'G': 1_000_000_000, 'T': 1_000_000_000_000,
+    'B': 1_000_000_000,  # legacy decimal billion
+    'KI': 1_024, 'MI': 1_048_576, 'GI': 1_073_741_824, 'TI': 1_099_511_627_776,
+    'BI': 1_073_741_824,
+}
 
 
 def parse_token_count(value) -> int:
-    """Parse a token count from "2B", "10M", "500K", "1.5B" or a plain integer.
+    """Parse a token count from "2B", "10M", "500K", "1.5B", "500Mi" or a
+    plain integer.
 
-    Case-insensitive suffix; plain integers pass through unchanged
-    (backwards compatible). Raises ValueError on invalid input.
+    Case-insensitive suffix; binary suffixes (Ki/Mi/Gi/Ti/Bi, powers of
+    1024) let budgets align exactly with step-count arithmetic — e.g. a
+    d20 total_batch_size of 524,288 makes "500Mi" = 1000 steps exactly,
+    and "2000Mi" = 2,097,152,000 = the prod1/prod2 exact 2000-step pair.
+    Plain integers pass through unchanged (backwards compatible). Raises
+    ValueError on invalid input.
     """
     if isinstance(value, bool):
         raise ValueError(f"Invalid token count: {value!r}")

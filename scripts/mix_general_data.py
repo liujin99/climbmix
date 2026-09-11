@@ -79,11 +79,11 @@ def detect_shard_size(stem_train_files):
         ) from e
 
 
-def calc_climbmix_count(stem_docs, stem_ratio):
+def calc_climbmix_count(stem_docs, stem_ratio, max_shards=MAX_CLIMBMIX_SHARDS):
     """Calculate how many ClimbMix shards are needed for the given STEM doc count."""
     needed_climb = stem_docs * (1 - stem_ratio) / stem_ratio
     n = math.ceil(needed_climb / CLIMBMIX_DOCS_PER_SHARD)
-    return max(MIN_CLIMBMIX_SHARDS, min(MAX_CLIMBMIX_SHARDS, n))
+    return max(MIN_CLIMBMIX_SHARDS, min(max_shards, n))
 
 
 def download_climbmix(data_dir, num_shards, num_workers=16):
@@ -286,6 +286,11 @@ def main():
                         help="Download workers (default 16)")
     parser.add_argument("--num-npu", type=int, default=8,
                         help="NPUs used for training the mixed data (row-group sizing, default 8)")
+    parser.add_argument("--max-climbmix-shards", type=int, default=MAX_CLIMBMIX_SHARDS,
+                        help="cap on general-data shards (default 50 = historical cap). "
+                             "Large-scale sampling (runs/run_large_scale_sample.sh) raises "
+                             "this when the budget needs more general data — the cap binding "
+                             "silently dilutes the STEM ratio below --stem-ratio.")
     args = parser.parse_args()
 
     global STEM_RATIO
@@ -302,13 +307,13 @@ def main():
     batch_per_file = detect_shard_size(stem_train_files)
 
     stem_docs = count_stem_docs(stem_train_files)
-    needed_shards = calc_climbmix_count(stem_docs, STEM_RATIO)
+    needed_shards = calc_climbmix_count(stem_docs, STEM_RATIO, args.max_climbmix_shards)
     needed_climb_docs = int(stem_docs * (1 - STEM_RATIO) / STEM_RATIO)
 
     print(f"  STEM: {stem_train_count} train shards, {stem_docs:,} docs "
           f"({batch_per_file} docs/shard)")
     print(f"  Need ~{needed_climb_docs:,} ClimbMix docs -> {needed_shards} shards "
-          f"(capped at {MIN_CLIMBMIX_SHARDS}-{MAX_CLIMBMIX_SHARDS})")
+          f"(cap {args.max_climbmix_shards})")
 
     existing_climb = []
     climb_start = max(0, MAX_SHARD - needed_shards + 1)

@@ -2,7 +2,9 @@
 """single-pass (epoch<=1) guard verification — measure_train_tokens /
 read_total_batch_size / check_single_pass / derive CLI e2e / fingerprint
 neutrality / wiring presence in run_climbmix.sh + dispatch + target_runner
-+ run_arm_only.sh (single-knob on the arm-reuse path).
++ run_arm_only.sh (single-knob on the arm-reuse path) / proxy single-knob
+(PROXY_NUM_ITERATIONS derived from PROXY_TARGET_TOKENS) / large-scale
+sampler smoke (runs/run_large_scale_sample.sh).
 
 Standalone (repo convention: no pytest infra). Run:
     python3 scripts/diagnostics/test_single_pass_guard.py
@@ -298,6 +300,94 @@ r = subprocess.run(["bash", arm_sh],
 check("arm-reuse: external TARGET_STEPS aborts at launch",
       r.returncode != 0 and "no longer a knob" in r.stdout + r.stderr,
       (r.stdout + r.stderr).strip()[:100])
+
+# ── 9. proxy single-knob: PROXY_NUM_ITERATIONS derived from budget ────
+check("Mi parse: 500Mi = 524,288,000 (1000 steps x d20 tbs)",
+      parse_token_count("500Mi") == 524_288_000)
+check("Mi parse: 2000Mi = prod1/prod2 exact 2000-step budget",
+      parse_token_count("2000Mi") == 2_097_152_000)
+check("Mi parse: 2Ki/1.5Gi binary magnitudes",
+      parse_token_count("2Ki") == 2048
+      and parse_token_count("1.5Gi") == 1_610_612_736)
+check("Mi parse: decimal suffixes unchanged (back-compat)",
+      parse_token_count("2B") == 2_000_000_000
+      and parse_token_count("400M") == 400_000_000)
+try:
+    parse_token_count("5X")
+    check("Mi parse: garbage raises", False)
+except ValueError:
+    check("Mi parse: garbage raises", True)
+
+check("proxy: knob default removed (value now derived)",
+      'PROXY_NUM_ITERATIONS="${PROXY_NUM_ITERATIONS:-1000}"' not in src)
+check("proxy: budget default 500Mi (= 1000 steps, history-continuous)",
+      'PROXY_TARGET_TOKENS:-500Mi' in src)
+check("proxy: derivation block present",
+      "PROXY_NUM_ITERATIONS derived from PROXY_TARGET_TOKENS" in src and
+      "DERIVED from PROXY_TARGET_TOKENS" in src)
+
+with tempfile.TemporaryDirectory() as base:
+    for d, tbs in (("d28", 1_048_576), ("d20", 524_288)):
+        dd = os.path.join(base, "base_checkpoints", d)
+        os.makedirs(dd)
+        with open(os.path.join(dd, "meta_x.json"), "w") as f:
+            json.dump({"total_batch_size": tbs}, f)
+    r = subprocess.run(
+        [sys.executable, os.path.join(REPO, "scripts/derive_target_steps.py"),
+         "--target-tokens", "500Mi",
+         "--ckpt-dir", os.path.join(base, "base_checkpoints", "d20")],
+        capture_output=True, text=True, timeout=60)
+    check("proxy: CLI 500Mi @ 524,288 -> exactly 1000 (warm-start continuity)",
+          r.returncode == 0 and r.stdout.strip() == "1000",
+          (r.stdout + r.stderr).strip()[:100])
+    r = subprocess.run(["bash", sh],
+                       env={**env_base, "NANOCHAT_BASE_DIR": base,
+                            "PROXY_NUM_ITERATIONS": "999"},
+                       capture_output=True, text=True, timeout=60)
+    check("proxy: external PROXY_NUM_ITERATIONS aborts at launch",
+          r.returncode != 0
+          and "PROXY_NUM_ITERATIONS=999 is no longer a knob" in r.stdout + r.stderr,
+          (r.stdout + r.stderr).strip()[-120:])
+
+# ── 10. run_large_scale_sample.sh: decoupled production sampler ──────
+lss = os.path.join(REPO, "runs/run_large_scale_sample.sh")
+lsrc = open(lss).read()
+check("lss: data-only by contract (no training/dispatch/eval)",
+      "dispatch_target_arm" not in lsrc and "mid_train" not in lsrc)
+check("lss: reuses search artifacts (alpha + cluster cache)",
+      "optimal_mixture_weights.json" in lsrc and "cluster_cache.npz" in lsrc)
+check("lss: manifest records measured truth + warnings",
+      "manifest.json" in lsrc and "measure_train_tokens" in lsrc
+      and "warnings" in lsrc)
+r = subprocess.run(["bash", lss],
+                   env={**env_base, "RUN_DIR": "/nonexistent_run_xyz"},
+                   capture_output=True, text=True, timeout=60)
+check("lss: missing run dir refused",
+      r.returncode != 0 and "RUN_DIR" in r.stdout + r.stderr,
+      (r.stdout + r.stderr).strip()[:100])
+
+with tempfile.TemporaryDirectory() as fake_run:
+    with open(os.path.join(fake_run, "launch_env.json"), "w") as f:
+        json.dump({"DATA_DIR": "/tmp/opencode/fake_pool",
+                   "GENERAL_DATA_DIR": "/tmp/opencode/fake_general"}, f)
+    with open(os.path.join(fake_run, "optimal_mixture_weights.json"), "w") as f:
+        json.dump({"0": 0.5, "1": 0.5}, f)
+    open(os.path.join(fake_run, "cluster_cache.npz"), "w").close()
+    r = subprocess.run(["bash", lss],
+                       env={**env_base, "RUN_DIR": fake_run,
+                            "TARGET_TOKENS": "0"},
+                       capture_output=True, text=True, timeout=60)
+    check("lss: TARGET_TOKENS=0 refused",
+          r.returncode != 0 and "明确预算" in r.stdout + r.stderr,
+          (r.stdout + r.stderr).strip()[:100])
+    r = subprocess.run(["bash", lss],
+                       env={**env_base, "RUN_DIR": fake_run,
+                            "TARGET_TOKENS": "20B", "LAUNCH": "0"},
+                       capture_output=True, text=True, timeout=60)
+    check("lss: dry-run validates + prints both tool commands",
+          r.returncode == 0 and "prepare_random_baseline.py" in r.stdout
+          and "mix_general_data.py" in r.stdout and "manifest.json" in r.stdout,
+          (r.stdout + r.stderr).strip()[-160:])
 
 print()
 if FAILED:
