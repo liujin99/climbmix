@@ -111,7 +111,7 @@ from climbmix.utils.token_estimate import parse_token_count
 t = parse_token_count(sys.argv[1])
 paper = 800_000_000
 print(f"  ⚠ proxy 信号强度: 每实验消耗 {t:,} tokens ≈ 论文 proxy ~800M 的 {t/paper:.0%}")
-    print("    调强度只改预算: 400M → 381 步 (更省) / 800M → 762 步 (论文等量; 默认 640M = 80%)")
+print("    调强度只改预算: 400M → 381 步 (更省) / 800M → 762 步 (论文等量; 默认 640M = 80%)")
 PYEOF
 CONFIGS_PER_ITER="${CONFIGS_PER_ITER:-20,10,5}"
 # prod2 B++: 期望列表语义 — ADAPTIVE_CONFIGS=1 时 configs_per_iter 视为
