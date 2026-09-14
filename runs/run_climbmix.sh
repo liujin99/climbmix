@@ -42,7 +42,7 @@ fi
 
 # ── Configuration ──
 CLIMBMIX_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-export PYTHONPATH="${CLIMBMIX_DIR}/src:${PYTHONPATH:-}"
+export PYTHONPATH="${CLIMBMIX_DIR}/src:${CLIMBMIX_DIR}/climbmix-ma:${PYTHONPATH:-}"
 
 EXP_NAME="${EXP_NAME:-main}"
 DATA_DIR="${DATA_DIR:-/home/ma-user/work/100B_stem_parquet_filtered}"
