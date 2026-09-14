@@ -92,6 +92,23 @@ def _read_shard_metadata(shard_path: str, schema_dict: dict) -> dict:
     row_col = schema_dict.get("row_in_shard_col")
     if row_col is not None and row_col in pf.columns:
         row_arr = pf[row_col].to_numpy(dtype=np.int64)
+        if np.unique(row_arr).size != n:
+            raise ValueError(
+                f"{basename}: row_in_shard_col '{row_col}' has "
+                f"{n - np.unique(row_arr).size} duplicate values — sri-keyed "
+                f"text reads require unique values; set row_in_shard_col: "
+                f"null in the schema for positional reads"
+            )
+    elif row_col is not None:
+        # Configured but not among the read columns: must fail loud — the
+        # historical silent np.arange fallback here is exactly how caches
+        # got poisoned with row positions instead of real column values
+        # (prod1/2/3 read_texts returned wrong docs + ~18% silent drops).
+        raise ValueError(
+            f"{basename}: row_in_shard_col '{row_col}' is configured but was "
+            f"not read from the parquet (read columns: {list(pf.columns)}); "
+            f"set row_in_shard_col: null in the schema for positional reads"
+        )
     else:
         row_arr = np.arange(n, dtype=np.int64)
 
@@ -105,6 +122,12 @@ def _read_shard_metadata(shard_path: str, schema_dict: dict) -> dict:
         "row_in_shard_col": row_arr,
         "computed_char_count": char_count_col is None,
     }
+
+
+def _read_shard_row_col(shard_path: str, row_col: str) -> np.ndarray:
+    """Read only the row_in_shard column from one shard (cache-heal worker)."""
+    s = pd.read_parquet(shard_path, columns=[row_col])[row_col]
+    return s.to_numpy(dtype=np.int64)
 
 
 class ShardMetadataManager:
@@ -215,6 +238,9 @@ class ShardMetadataManager:
         else:
             self._row_in_shard_cols = {}
 
+        if self._schema.row_in_shard_col is not None:
+            self._heal_row_cols_if_stale()
+
         self._is_row_col_sequential = self._check_row_col_sequential()
 
         valid_labels = self._cluster_labels[self._cluster_labels >= 0]
@@ -225,6 +251,100 @@ class ShardMetadataManager:
               f"({self._num_shards} shards) from cache")
         print(f"[ShardMetadataManager] Quality scores: {self._quality_scores.shape}")
         return True
+
+    def _heal_row_cols_if_stale(self) -> None:
+        """Validate cached row_in_shard values against the parquet files;
+        rebuild them (in place + cache rewrite) when they disagree.
+
+        Guards against caches built by versions that silently stored row
+        POSITIONS (np.arange) instead of the real row_in_shard column —
+        such caches made read_texts return wrong docs for ~82% of requests
+        and silently drop the rest (prod1/2/3 STEM pools).
+        """
+        row_col = self._schema.row_in_shard_col
+        n_shards = len(self._per_shard_info)
+        if n_shards == 0:
+            return
+        sample_ids = sorted(set(
+            np.linspace(0, n_shards - 1, min(8, n_shards)).astype(int).tolist()
+        ))
+
+        # Old caches may not carry the arrays at all — treat as stale.
+        stale = not bool(self._row_in_shard_cols)
+        reasons: List[str] = []
+        for sid in sample_ids:
+            info = self._per_shard_info[sid]
+            cached = self._row_in_shard_cols.get(sid)
+            try:
+                truth = _read_shard_row_col(info["path"], row_col)
+            except Exception as e:
+                raise RuntimeError(
+                    f"row_in_shard_col '{row_col}' unreadable in "
+                    f"{info['path']}: {e}"
+                ) from e
+            if len(truth) != info["num_docs"]:
+                raise RuntimeError(
+                    f"{info['path']}: row count {len(truth)} != cached "
+                    f"num_docs {info['num_docs']} — pool drifted under the "
+                    f"cache; delete {self._cache_path} and rebuild"
+                )
+            if len(np.unique(truth)) != len(truth):
+                raise RuntimeError(
+                    f"{info['path']}: duplicate '{row_col}' values — sri-"
+                    f"keyed reads require uniqueness; set row_in_shard_col: "
+                    f"null for positional reads"
+                )
+            if (cached is None or len(cached) != info["num_docs"]
+                    or not np.array_equal(cached, truth)):
+                stale = True
+                if cached is not None:
+                    n_diff = int((np.asarray(cached) != truth).sum())
+                    reasons.append(f"shard {sid}: {n_diff}/{len(truth)} differ")
+
+        if not stale:
+            return
+
+        print(f"[ShardMetadataManager] ROW_COL CACHE POISONED: cached "
+              f"'{row_col}' values disagree with parquet "
+              f"({'; '.join(reasons[:3]) if reasons else 'arrays missing'}) "
+              f"— rebuilding from parquet ({n_shards} shards)")
+        t0 = time.time()
+        if self._max_workers is not None:
+            n_workers = min(self._max_workers, n_shards)
+        else:
+            from climbmix.utils.concurrency import ConcurrencyConfig
+            n_workers = min(ConcurrencyConfig().max_io_workers, n_shards)
+
+        new_cols: Dict[int, np.ndarray] = {}
+        if n_workers <= 1:
+            for i, info in enumerate(self._per_shard_info):
+                new_cols[i] = _read_shard_row_col(info["path"], row_col)
+        else:
+            ctx = mp.get_context("spawn")
+            with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as pool:
+                future_map = {
+                    pool.submit(_read_shard_row_col, info["path"], row_col): i
+                    for i, info in enumerate(self._per_shard_info)
+                }
+                for future in as_completed(future_map):
+                    new_cols[future_map[future]] = future.result()
+
+        for i, info in enumerate(self._per_shard_info):
+            arr = new_cols[i]
+            if len(arr) != info["num_docs"]:
+                raise RuntimeError(
+                    f"{info['path']}: row count {len(arr)} != expected "
+                    f"{info['num_docs']}"
+                )
+            if len(np.unique(arr)) != len(arr):
+                raise RuntimeError(
+                    f"{info['path']}: duplicate '{row_col}' values — sri-"
+                    f"keyed reads require uniqueness"
+                )
+        self._row_in_shard_cols = new_cols
+        self._write_cache()
+        print(f"[ShardMetadataManager] Row-col cache healed: {n_shards} "
+              f"shards in {time.time() - t0:.1f}s")
 
     def _load_from_shards(self) -> None:
         """Load metadata from all shards in parallel."""
@@ -560,7 +680,13 @@ def _read_one_shard_texts(
     shard_total_rows: int,
     is_row_col_sequential: bool,
 ) -> List[str]:
-    """Read texts from a single shard using pyarrow."""
+    """Read texts from a single shard using pyarrow.
+
+    Missing requested docs raise RuntimeError instead of silently returning
+    "" — a metadata-selected doc always exists in its shard, so a miss means
+    metadata/parquet drift (the prod1/2/3 lesson: silent ""-drops turned a
+    hard indexing bug into an invisible ~18% mixture quality drift).
+    """
     import pyarrow.parquet as pq
 
     if row_col is None:
@@ -568,11 +694,13 @@ def _read_one_shard_texts(
         text_arr = table.column(text_col).to_numpy(zero_copy_only=False)
         result = []
         for i in local_rows:
-            if 0 <= int(i) < len(text_arr):
-                val = text_arr[int(i)]
-                result.append(str(val) if val is not None else "")
-            else:
-                result.append("")
+            if not (0 <= int(i) < len(text_arr)):
+                raise RuntimeError(
+                    f"{shard_path}: local row {int(i)} out of range "
+                    f"[0, {len(text_arr)}) — metadata/parquet row drift"
+                )
+            val = text_arr[int(i)]
+            result.append(str(val) if val is not None else "")
         return result
 
     n_requested = len(row_col_values)
@@ -585,11 +713,13 @@ def _read_one_shard_texts(
             texts = []
             for rv in row_col_values:
                 idx = int(rv)
-                if 0 <= idx < len(text_arr):
-                    val = text_arr[idx]
-                    texts.append(str(val) if val is not None else "")
-                else:
-                    texts.append("")
+                if not (0 <= idx < len(text_arr)):
+                    raise RuntimeError(
+                        f"{shard_path}: row_col value {idx} out of range "
+                        f"[0, {len(text_arr)}) — sequential-flag drift"
+                    )
+                val = text_arr[idx]
+                texts.append(str(val) if val is not None else "")
             return texts
         else:
             table = pq.read_table(shard_path, columns=[row_col, text_col], use_threads=False)
@@ -598,7 +728,15 @@ def _read_one_shard_texts(
             chunk_map: dict = {}
             for k, v in zip(row_arr, text_arr):
                 chunk_map[int(k)] = str(v) if v is not None else ""
-            return [chunk_map.get(int(rv), "") for rv in row_col_values]
+            missing = sorted({int(rv) for rv in row_col_values
+                              if int(rv) not in chunk_map})
+            if missing:
+                raise RuntimeError(
+                    f"{shard_path}: {len(missing)} requested '{row_col}' "
+                    f"values not found (e.g., {missing[:5]}) — metadata/"
+                    f"parquet drift, refusing silent wrong/empty texts"
+                )
+            return [chunk_map[int(rv)] for rv in row_col_values]
 
     table = pq.read_table(
         shard_path,
@@ -611,7 +749,15 @@ def _read_one_shard_texts(
     sort_idx = np.argsort(row_arr)
     texts = [str(text_arr[i]) if text_arr[i] is not None else "" for i in sort_idx]
     text_map = dict(zip(row_arr[sort_idx].tolist(), texts))
-    return [text_map.get(int(rv), "") for rv in row_col_values]
+    missing = sorted({int(rv) for rv in row_col_values
+                      if int(rv) not in text_map})
+    if missing:
+        raise RuntimeError(
+            f"{shard_path}: {len(missing)} requested '{row_col}' values "
+            f"not found (e.g., {missing[:5]}) — metadata/parquet drift, "
+            f"refusing silent wrong/empty texts"
+        )
+    return [text_map[int(rv)] for rv in row_col_values]
 
 
 def _assemble_texts(
