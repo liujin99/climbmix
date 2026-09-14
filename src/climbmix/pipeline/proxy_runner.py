@@ -565,12 +565,13 @@ class ProxyRunner:
             detected_batch = mix_mod.detect_shard_size(stem_train_files)
             # Pool = STEM docs / stem_ratio (full selection + general complement)
             # so training consumption ~ budget stays under 1 epoch by design.
-            # The old len(stem_train_files) sizing kept the pool at the
-            # selection's doc count (~budget x 0.98) — the loader wrapped.
-            # FLOOR (not ceil): the STEM draw = ratio x total must stay UNDER
-            # the supply or the mix preflight (supply + 5-sigma margin) fails.
-            num_output_files = max(
-                1, stem_docs // int(detected_batch * self.stem_ratio))
+            # calc_output_files additionally subtracts the binomial margin so
+            # the supply preflight passes BY CONSTRUCTION — the historical
+            # floor(stem_docs / (batch*ratio)) left only the integer remainder
+            # as headroom and died on sub-0.25% near-misses (prod3 iter-1:
+            # 10/16 configs killed by the STEM supply guard).
+            num_output_files = mix_mod.calc_output_files(
+                stem_docs, detected_batch, self.stem_ratio)
             mix_mod.mix_data(
                 stem_temp_dir, climb_files, mixture_data_dir,
                 num_output_files, detected_batch, num_npu=nproc,

@@ -90,6 +90,36 @@ def calc_climbmix_count(stem_docs, stem_ratio, max_shards=MAX_CLIMBMIX_SHARDS):
     return max(MIN_CLIMBMIX_SHARDS, min(max_shards, n))
 
 
+def binomial_margin(total_docs, stem_ratio):
+    """5-sigma binomial safety margin on the STEM draw — the exact quantity
+    the supply preflight demands on top of the nominal draw."""
+    return 5 * math.sqrt(total_docs * stem_ratio * (1 - stem_ratio)) + 1
+
+
+def calc_output_files(stem_docs, batch_per_file, stem_ratio):
+    """Largest output-file count whose STEM draw + binomial margin fits the
+    available STEM docs — the supply preflight passes BY CONSTRUCTION.
+
+    The historical floor(stem_docs / (batch*ratio)) left only the remainder
+    r = stem_docs mod (batch*ratio) in [0, batch*ratio) docs of headroom,
+    while the preflight demands a ~5-sigma binomial margin (~0.25% of the
+    draw). Whenever r < margin the config died on a sub-0.25% near-miss
+    (prod3 iter-1: 10/16 configs killed this way, shortest by 205 docs out
+    of 1.22M). Shrinking the output by at most one file absorbs the margin.
+    """
+    if batch_per_file <= 0:
+        raise ValueError(f"batch_per_file must be positive, got {batch_per_file}")
+    if not (0.0 < stem_ratio < 1.0):
+        raise ValueError(f"stem_ratio must be in (0, 1), got {stem_ratio}")
+    n = max(1, int(stem_docs // (batch_per_file * stem_ratio)))
+    while n > 1:
+        total = n * batch_per_file
+        if stem_ratio * total + binomial_margin(total, stem_ratio) <= stem_docs:
+            break
+        n -= 1
+    return n
+
+
 def download_climbmix(data_dir, num_shards, num_workers=16):
     """Download last N ClimbMix shards from the end to avoid overlap with pretrain (shards 0-999)."""
     os.makedirs(data_dir, exist_ok=True)
@@ -221,7 +251,7 @@ def _mix_data_locked(stem_dir, climb_files, output_dir, num_output_files, batch_
     # supply would REPEAT docs silently, ratio intact, zero signal. Count
     # actual docs (parquet metadata only, fast) and fail loud instead.
     total_docs = num_output_files * batch_per_file
-    margin = 5 * math.sqrt(total_docs * ratio * (1 - ratio)) + 1  # binomial 5σ
+    margin = binomial_margin(total_docs, ratio)
     stem_need = total_docs * ratio
     climb_need = total_docs * (1 - ratio)
     stem_have = count_stem_docs(stem_files)
@@ -349,16 +379,11 @@ def main():
     stem_train_count = len(stem_train_files)
     stem_docs = count_stem_docs(stem_train_files)
     batch_per_file = detect_shard_size(stem_train_files)
-    # Pool sizing (fixed 2026-09-11): mix total docs = STEM docs / stem_ratio so
-    # the pool carries the FULL selection plus its general complement — the
-    # documented "pool = budget / stem_ratio, epoch ~ stem_ratio" semantics.
-    # The historical default (num_output_files = stem_train_count) kept the
-    # doc count at the selection size, so the pool was only ~budget x 0.98 and
-    # the training LOADER wrapped (measured 3-4 epochs in prod2 proxy exps).
-    # FLOOR (not ceil): the STEM draw = ratio x total must stay UNDER the
-    # supply or the mix preflight (supply + 5-sigma margin) fails.
-    default_output_files = max(
-        1, stem_docs // int(batch_per_file * STEM_RATIO))
+    # Pool sizing: mix total docs = STEM docs / stem_ratio (minus the binomial
+    # margin) so the pool carries the FULL selection plus its general
+    # complement AND the supply preflight (draw + 5-sigma margin) passes by
+    # construction — see calc_output_files.
+    default_output_files = calc_output_files(stem_docs, batch_per_file, STEM_RATIO)
     num_output_files = args.num_output_files or default_output_files
 
     stem_docs = count_stem_docs(stem_train_files)

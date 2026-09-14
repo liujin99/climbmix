@@ -819,6 +819,28 @@ class IterativeBootstrapper:
                 f"result/*/exp_*/mid_train.log and eval.log; the pending-config "
                 f"state makes resume re-run exactly this iteration.")
 
+        # Floor enforcement (prod3 iter-1 lesson: 9 valid of a 20-floor
+        # iteration advanced silently, thinning every later predictor refit).
+        # CONFIGS_PER_ITER is the per-iteration data contract behind the
+        # predictor's learning guarantee, not a suggestion — an iteration
+        # below its floor must fail loud instead of limping on. Guards that
+        # reject configs (STEM supply / single-pass) are the usual culprit:
+        # a cluster of rejections means selection-budget vs pool calibration
+        # is off, not that the floor should bend.
+        n_finite_iter = int(np.isfinite(scores_arr).sum())
+        if n_finite_iter < e_i:
+            raise RuntimeError(
+                f"Iteration {iteration}: only {n_finite_iter} of "
+                f"{len(scores_arr)} scheduled configs produced measurable "
+                f"scores — below the CONFIGS_PER_ITER floor ({e_i}). The rest "
+                f"failed guards or errors (NaN, excluded from predictor "
+                f"training and best-config selection). Check the search log "
+                f"for guard rejections (STEM supply insufficient / "
+                f"single-pass violation): several of the same family means "
+                f"the selection budget and the pool's real token counts have "
+                f"drifted apart. The pending-config state makes resume "
+                f"re-run exactly this iteration.")
+
         best_idx = self._best_index(scores_arr)
         best_config = trained_configs[best_idx]
         best_score = float(scores_arr[best_idx])

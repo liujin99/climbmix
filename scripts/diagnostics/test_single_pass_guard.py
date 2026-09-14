@@ -528,12 +528,26 @@ check("proxy: guard wired after mixture prep, before mid_train",
 for name, path in (("proxy", "src/climbmix/pipeline/proxy_runner.py"),
                    ("target", "src/climbmix/pipeline/target_runner.py")):
     rsrc = open(os.path.join(REPO, path)).read()
-    check(f"{name}: pool sized at STEM docs / stem_ratio (floor, not len)",
-          "stem_docs // int(detected_batch * self.stem_ratio)" in rsrc
-          and "num_output_files = len(stem_train_files)" not in rsrc)
-check("mix CLI: default output sized at STEM / ratio",
-      "stem_docs // int(batch_per_file * STEM_RATIO)" in mix_src
+    check(f"{name}: pool sized margin-aware (calc_output_files, not len)",
+          "mix_mod.calc_output_files(" in rsrc
+          and "num_output_files = len(stem_train_files)" not in rsrc
+          and "stem_docs // int(detected_batch * self.stem_ratio)" not in rsrc)
+check("mix CLI: default output sized at calc_output_files",
+      "calc_output_files(stem_docs, batch_per_file, STEM_RATIO)" in mix_src
       and "default_output_files" in mix_src)
+check("mix: calc_output_files passes the supply preflight BY CONSTRUCTION "
+      "(prod3 iter-1 near-miss replay: 10/16 configs died on the old floor)",
+      # the four prod3 supply-kill doc counts, incl. the weekend killer
+      # exp_0000 (686,540) and the shortest near-miss exp_0013 (1,220,819,
+      # short by 205 docs) — all must now fit draw + 5-sigma margin
+      all(mix.calc_output_files(s, 10000, 0.7) * 7000
+          + mix.binomial_margin(mix.calc_output_files(s, 10000, 0.7) * 10000, 0.7) <= s
+          for s in (686540, 938724, 1220819, 1233765))
+      # previously-passing configs keep the IDENTICAL file count (byte-stable
+      # mixtures; already-trained exps stay resume/warm-start compatible)
+      and mix.calc_output_files(1116247, 10000, 0.7) == 159
+      and mix.calc_output_files(383046, 10000, 0.7) == 54
+      and mix.calc_output_files(417375, 10000, 0.7) == 59)
 check("mix: ClimbMix shard constant = 85K (measured 2026-09-11)",
       "CLIMBMIX_DOCS_PER_SHARD = 85000" in mix_src)
 check("mix: 85K constant actually drives the shard-count math",
