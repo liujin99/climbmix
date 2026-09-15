@@ -24,6 +24,7 @@ TARGET_TOKENS="${TARGET_TOKENS:-2B}"              # token 预算: 选点大小 +
 STEM_RATIO="${STEM_RATIO:-0.7}"
 RETRY_FAILED="${RETRY_FAILED:-1}"                 # 1 = 前次 dispatch 失败也重试
 WAIT_CACHE_MIN="${WAIT_CACHE_MIN:-0}"             # run 还在搜索中时: 等池缓存的分钟数
+SEED="${SEED:-42}"                                # 选样种子 (复刻/换 seed 重跑时改它)
 LAUNCH="${LAUNCH:-1}"                             # 0=干跑 (只准备数据+打印发射命令)
 # ─── 训练参数覆盖 (可选; 取消注释即生效, 其余用 run 的 launch_env) ──
 # TARGET_TOKENS="3B"   # 更大预算: 重选点重混合, 步数自动派生 (TARGET_STEPS 非旋钮)
@@ -96,7 +97,7 @@ PY
             --cluster-cache "$CACHE" \
             --schema config/schema_stem.yaml \
             --target-tokens "$TARGET_TOKENS" \
-            --seed 42 --num-npu "$NUM_NPU" \
+            --seed "$SEED" --num-npu "$NUM_NPU" \
             --weights "$WEIGHTS"
     fi
 
@@ -157,6 +158,11 @@ EXTRA=()
 if [ "$RETRY_FAILED" = "1" ]; then
     EXTRA+=(--retry-failed)
 fi
+# DISPATCH_EXTRA: 透传给 dispatch 的额外参数 (空格分隔, 如 "--job-timeout-h 22")
+if [ -n "${DISPATCH_EXTRA:-}" ]; then
+    read -r -a _DE <<< "$DISPATCH_EXTRA"
+    EXTRA+=("${_DE[@]}")
+fi
 
 if [ "$LAUNCH" != "1" ]; then
     echo
@@ -171,4 +177,8 @@ python3 scripts/dispatch_target_arm.py \
     --arm "$ARM_NAME" --output-dir "$RUN_DIR" \
     "${EXTRA[@]+"${EXTRA[@]}"}"
 
-auto_cp4_report "$RUN_DIR"
+if [ "${SKIP_AUTO_REPORT:-0}" = "1" ]; then
+    echo "  (SKIP_AUTO_REPORT=1 — 报告由调用方统一渲染)"
+else
+    auto_cp4_report "$RUN_DIR"
+fi
