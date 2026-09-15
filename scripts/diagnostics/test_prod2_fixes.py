@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 from climbmix.core.cluster_merge import (  # noqa: E402
     balanced_macro_clusters, validate_cluster_structure)
 from climbmix.core.types import (  # noqa: E402
-    CLIMBConfig, ClusterInfo, MixtureWeights, MixtureConfig)
+    CLIMBConfig, ClusterInfo, MixtureWeights, MixtureConfig, SearchConfig)
 from climbmix.core.iterative_bootstrapper import IterativeBootstrapper  # noqa: E402
 
 FAILED = []
@@ -221,14 +221,16 @@ sel = bs4._select_final_mixture()
 check("selection: all-task f<0 -> guard fires despite R2>0",
       bs4._selection_mode == "no_signal_best_measured" and not called2["design"])
 
-# ── 6. f noise floor in centered units (prod2 2026-09-09 unit bug) ────────
-# accs are centered ((raw-0.25)/0.75); the binomial floor 0.25/K is raw —
-# it must be rescaled by /0.75**2 or noise is understated 1.78x and w
-# inflates on noise-dominated benchmarks (mmlu_stem f flipped sign).
+# ── 6. f noise floor in centered units (prod2 2026-09-09 unit bug;
+#        prod3 2026-09-15 chance-semantics + worst-case-p bug) ──────────────
+# Centered = (raw - chance)/(1 - chance) per benchmark (BENCHMARK_CHANCE);
+# the floor is p_hat*(1-p_hat)/K/(1-chance)^2 with p_hat the empirical mean
+# in raw units. prod2 regression: 0.25/K not rescaled by /0.75^2 (MC tasks).
+# prod3 regression: MC semantics (0.25, 0.75^2) applied to CoT tasks whose
+# centered == raw — gsm8k_cot's noise was overstated ~20x, its w hit 0 and
+# the objective silently flipped to NLL.
 cfg6 = CLIMBConfig(val_tasks=["mmlu_stem"])
 bs6 = IterativeBootstrapper(cfg6, cluster_tokens, cluster_labels)
-# var = 1e-4 (centered units) — mmlu_stem K=3545: old f = +0.29, corrected
-# f = -0.25 — the sign flip is the regression signal.
 bs6._accumulated_per_benchmark = [
     ({"mmlu_stem": v}, {}) for v in (0.0396, 0.0196, 0.0396, 0.0196)
 ]
@@ -238,13 +240,44 @@ bs6._accumulated_configs = [
 ]
 bs6._compute_scores()
 _var6 = np.var([0.0396, 0.0196, 0.0396, 0.0196])
-_f6_expected = 1.0 - (0.25 / 3545 / 0.75 ** 2) / (_var6 + 1e-12)
+_p6 = 0.25 + 0.75 * float(np.mean([0.0396, 0.0196, 0.0396, 0.0196]))
+_f6_expected = 1.0 - (_p6 * (1.0 - _p6) / 3545 / 0.75 ** 2) / (_var6 + 1e-12)
 _f6 = bs6._task_f["mmlu_stem"]
-check("f: noise floor rescaled to centered units (/0.75^2)",
+check("f: MC noise floor = p_hat(1-p_hat)/K/0.75^2 (empirical p_hat)",
       abs(_f6 - _f6_expected) < 1e-9,
       f"f={_f6:.4f} expected={_f6_expected:.4f}")
-check("f: mmlu-scale variance flips sign once corrected (old +0.29)",
-      _f6 < 0.0, f"f={_f6:.4f}")
+check("f: mmlu-scale variance sits AT the noise bound — corrected floor "
+      "claims no signal (old hardcoded formula lied +0.29)",
+      _f6 < 0.05, f"f={_f6:.4f}")
+
+# prod3 regression: gsm8k_cot (chance~0, centered==raw, p~0.02). Old floor
+# 0.25/1319/0.75^2 = 3.37e-4 -> f=-1.97 -> w=0 (signal discarded); true floor
+# ~1.7e-5 -> f~+0.85. w_floor pinned to 0.0 here to expose the RAW w
+# difference (the 0.5 default would clamp both sides).
+cfg7 = CLIMBConfig(val_tasks=["gsm8k_cot"], search=SearchConfig(w_floor=0.0))
+bs7 = IterativeBootstrapper(cfg7, cluster_tokens, cluster_labels)
+_g = [0.034, 0.012, 0.033, 0.013]  # mean 0.023, var ~1.105e-4 (prod3-like)
+bs7._accumulated_per_benchmark = [({"gsm8k_cot": v}, {}) for v in _g]
+bs7._accumulated_configs = [
+    MixtureConfig(mixture_weights=MixtureWeights(weights=np.array([0.5, 0.5])))
+    for _ in range(4)
+]
+bs7._compute_scores()
+_var7 = np.var(_g)
+_f7_old = 1.0 - (0.25 / 1319 / 0.75 ** 2) / (_var7 + 1e-12)
+_f7_expected = 1.0 - (0.023 * 0.977 / 1319) / (_var7 + 1e-12)
+_f7 = bs7._task_f["gsm8k_cot"]
+check("f: CoT floor uses raw units (no 0.75^2), empirical p_hat",
+      abs(_f7 - _f7_expected) < 1e-9,
+      f"f={_f7:.4f} expected={_f7_expected:.4f}")
+check("f: prod3's discarded gsm8k signal is recovered "
+      f"(old-code f would be {_f7_old:.2f})",
+      _f7 > 0.5 and _f7_old < 0.0, f"f_new={_f7:.4f} f_old={_f7_old:.4f}")
+
+# w_floor default is 0.5 (acc-primary: NLL may at most halve a vote — the
+# prod3 silent flip to a pure NLL objective must be structurally impossible)
+check("w_floor default = 0.5 (prod3 silent NLL flip)",
+      SearchConfig().w_floor == 0.5)
 
 # ── 7. cp4_report: STEM NLL nan -> per-task N-weighted fallback ───────────
 import importlib.util  # noqa: E402

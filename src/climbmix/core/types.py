@@ -358,7 +358,16 @@ class SearchConfig:
     dirichlet_alpha: Optional[float] = None
     predict_top_n_ratio: float = 0.5
     sample_from_top_m: int = 32
-    w_floor: float = 0.0
+    # Lower clamp on the per-benchmark SNR weight w (accuracy share). The
+    # documented intent is acc-primary ("NLL a supplementary view"), but
+    # prod3 (2026-09-15) ran with w_floor=0.0: at d20@640M every benchmark's
+    # between-config acc variance sat under the (then mis-scaled) binomial
+    # noise floor, 4/6 tasks hit w=0 and the objective silently flipped to a
+    # pure NLL ranking — the search then picked the most predictable text
+    # (encyclopedia/prose clusters) and the winner halved gsm8k at d28.
+    # 0.5 = NLL may at most halve a benchmark's vote, never take it over.
+    # Semantic knob: enters the search fingerprint.
+    w_floor: float = 0.5
 
     @property
     def total_configs(self) -> int:
@@ -552,6 +561,27 @@ BENCHMARK_SIZES = {
     "gpqa_diamond": 198,
     "gsm8k_cot": 1319,
     "math_cot_500": 500,
+}
+
+# Chance level + centering semantics per benchmark. The eval harness reports
+# CENTERED accuracy = (raw - chance) / (1 - chance): 4-choice MC tasks use
+# chance=0.25; generative CoT tasks are exact-match with chance~0 (centered
+# == raw). The SNR noise floor in IterativeBootstrapper._compute_scores must
+# use the SAME per-task semantics: raw binomial variance p(1-p)/K divided by
+# (1 - chance)**2 to land in centered units. prod3 (2026-09-15): the floor
+# hard-coded MC semantics (0.25/K/0.75^2) for ALL tasks, overstating
+# gsm8k_cot's noise ~20x (worst-case p=0.25 vs actual p~0.02, plus the
+# 0.75^2 rescale that does not apply to chance~0 tasks). The strongest true
+# signal in the data (gsm8k f_true=+0.85) was scored as noise (f=-1.97,
+# w=0) and the search optimized NLL instead. Unknown benchmarks fall back to
+# MC semantics with a loud print — extend this map when adding task types.
+BENCHMARK_CHANCE = {
+    "arc_easy": 0.25,
+    "arc_challenge": 0.25,
+    "mmlu_stem": 0.25,
+    "gpqa_diamond": 0.25,
+    "gsm8k_cot": 0.0,
+    "math_cot_500": 0.0,
 }
 
 

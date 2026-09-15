@@ -22,6 +22,7 @@ from climbmix.core.types import (
     ProxyResult,
     IterationResult,
     CLIMBConfig,
+    BENCHMARK_CHANCE,
     BENCHMARK_SIZES,
 )
 from climbmix.core.dirichlet_sampler import DirichletSampler
@@ -255,7 +256,9 @@ class IterativeBootstrapper:
         """Compute SNR-weighted scores for all accumulated configs.
 
         Per-benchmark: z-score accuracy and NLL, combine with SNR weight.
-        sigma2_noise = 0.25 / K (worst-case binomial variance).
+        sigma2_noise = p_hat*(1-p_hat)/K / (1-chance)^2, with p_hat the
+        empirical mean accuracy (raw units) and chance from
+        BENCHMARK_CHANCE (per-task centering semantics).
         f = 1 - noise/between (can be negative when noise > between).
         w = max(w_floor, min(1, max(0, (1+f)/2))) — clamped to [w_floor, 1].
 
@@ -280,6 +283,7 @@ class IterativeBootstrapper:
         benchmarks = self.config.val_tasks
         score_sum = np.zeros(N, dtype=np.float64)
         score_cnt = np.zeros(N, dtype=np.int64)
+        task_w: Dict[str, float] = {}
 
         for b in benchmarks:
             accs = np.array([
@@ -311,12 +315,27 @@ class IterativeBootstrapper:
                 nll_z = np.full(len(nlls), np.nan)
 
             K = BENCHMARK_SIZES.get(b, 1000)
-            # accs are CENTERED ((raw - 0.25) / 0.75): the raw-unit binomial
-            # floor p(1-p)/K (conservative max 0.25/K) must be rescaled into
-            # centered units by /0.75**2, or noise is understated by 1.78x
-            # and w inflates on noise-dominated benchmarks (prod2 2026-09-09:
-            # mmlu_stem f +0.195 -> -0.43, w 0.597 -> 0.287 once fixed).
-            sigma2_noise = 0.25 / (K * 0.75 ** 2)
+            # Noise floor in centered units, with per-task chance semantics:
+            # centered = (raw - chance)/(1 - chance), so the raw-unit
+            # binomial variance p(1-p)/K divides by (1-chance)^2. Two prod3
+            # (2026-09-15) defects fixed here — the old hard-coded
+            # 0.25/(K*0.75^2):
+            #   1. worst-case p=0.25 for every task: gsm8k_cot (p~0.02)
+            #      overstated ~5x; now p_hat is the empirical mean (raw).
+            #   2. MC centering assumed for every task: CoT tasks are
+            #      exact-match (chance~0, centered==raw) — the 0.75^2
+            #      rescale does not apply and overstated them another 1.78x.
+            # Net effect on prod3's final scoring round: gsm8k_cot noise
+            # 3.4e-4 (f=-1.97, w=0 — the strongest true signal, f_true=+0.85,
+            # discarded) -> 1.7e-5 (f=+0.85, w=0.93, acc-dominated).
+            chance = BENCHMARK_CHANCE.get(b)
+            if chance is None:
+                print(f"    {b}: unknown chance level — assuming 4-choice MC "
+                      f"(0.25); extend BENCHMARK_CHANCE in types.py")
+                chance = 0.25
+            p_hat = chance + (1.0 - chance) * float(np.nanmean(accs[valid]))
+            p_hat = min(max(p_hat, 1e-4), 1.0 - 1e-4)
+            sigma2_noise = p_hat * (1.0 - p_hat) / K / (1.0 - chance) ** 2
             sigma2_between = float(accs[valid].var()) + 1e-12
             f = 1.0 - sigma2_noise / sigma2_between
             w = max(self.w_floor, min(1.0, max(0.0, (1.0 + f) / 2.0)))
@@ -333,8 +352,27 @@ class IterativeBootstrapper:
             if n_valid < N:
                 extra_parts.append(f"{N - n_valid} unmeasured")
             extra = (", " + ", ".join(extra_parts)) if extra_parts else ""
+            task_w[b] = w
             print(f"    {b}: w={w:.3f} (f={f:.3f}, noise={sigma2_noise:.6f}, "
                   f"between={sigma2_between:.6f}{extra})")
+
+        # Loud objective decomposition — the alarm prod3 never had: accuracy
+        # is the primary signal by design, so a majority of noise-bound tasks
+        # (f<0: between-config acc spread under the binomial floor) means
+        # those benchmarks' votes lean on NLL. Say it every round; a proxy
+        # that ranks mostly by LM loss favors predictable text and can pick
+        # mixtures that quietly starve downstream capabilities (prod3:
+        # encyclopedia/prose winner halved gsm8k at d28).
+        if task_w:
+            nll_leaning = [b for b in benchmarks if b in self._task_f
+                           and self._task_f[b] < 0.0]
+            acc_share = sum(task_w.values()) / len(task_w)
+            if nll_leaning:
+                print(f"    [Scoring] WARNING: acc share {acc_share:.0%}; "
+                      f"noise-bound tasks (f<0, >=50% NLL vote): "
+                      f"{', '.join(nll_leaning)} — their ranking leans on "
+                      f"NLL (LM loss); denseify measurements or check the "
+                      f"proxy scale if this persists")
 
         scores = np.full(N, np.nan, dtype=np.float64)
         measured = score_cnt > 0
