@@ -279,6 +279,42 @@ check("f: prod3's discarded gsm8k signal is recovered "
 check("w_floor default = 0.5 (prod3 silent NLL flip)",
       SearchConfig().w_floor == 0.5)
 
+# ── 8. sampler weight floor (prod3 corner-seeking / sticky-zero insurance) ─
+from climbmix.core.dirichlet_sampler import DirichletSampler  # noqa: E402
+_tok8 = np.array([500, 300, 50, 20, 10, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5],
+                 dtype=np.int64)  # tiny clusters -> alpha_i << 1 -> near-zero draws
+_cfg8 = CLIMBConfig()  # weight_floor default 0.01
+_s8 = DirichletSampler(15, _tok8, _cfg8, seed=7)
+_b8 = _s8.sample_batch(300)
+_W8 = np.array([c.mixture_weights.weights for c in _b8])
+check("sampler floor: every cluster >= floor/(1+K*floor) in batch draws",
+      _W8.min() >= 0.01 / 1.15 - 1e-12, f"min={_W8.min():.5f}")
+check("sampler floor: rows renormalized to 1",
+      np.allclose(_W8.sum(axis=1), 1.0))
+
+# guided exploration around a corner base (C10=1.0, 14 dead) revives dead
+# clusters while staying centered on the base — the sticky-zero fix.
+# 50 copies of the corner as bases + m=50 keeps every draw on the guided
+# path (m > len(bases) would fill the remainder from the base distribution)
+_corner8 = MixtureConfig(mixture_weights=MixtureWeights(
+    weights=np.array([0.0] * 9 + [1.0] + [0.0] * 5)))
+_bases8 = [_corner8] * 50
+_s8b = DirichletSampler(15, _tok8, _cfg8, seed=11)
+_g8 = _s8b.sample_from_top_n(_bases8, m=50, exploration_concentration=5.0)
+_G8 = np.array([c.mixture_weights.weights for c in _g8])
+check("sampler floor: dead clusters revived in guided draws (sticky zero fixed)",
+      _G8.min() >= 0.01 / 1.15 - 1e-12, f"min={_G8.min():.5f}")
+check("sampler floor: insurance is bounded — corner base stays dominant",
+      _G8[:, 9].mean() > 0.5, f"C10 mean={_G8[:, 9].mean():.3f}")
+
+# weight_floor=0 disables (pre-fix behavior: sparse draws return)
+_cfg8c = CLIMBConfig(search=SearchConfig(weight_floor=0.0))
+_s8c = DirichletSampler(15, _tok8, _cfg8c, seed=7)
+_b8c = _s8c.sample_batch(300)
+_W8c = np.array([c.mixture_weights.weights for c in _b8c])
+check("sampler floor=0: disabled, sparse draws return (pre-fix behavior)",
+      (_W8c < 0.005).any(), f"min={_W8c.min():.5f}")
+
 # ── 7. cp4_report: STEM NLL nan -> per-task N-weighted fallback ───────────
 import importlib.util  # noqa: E402
 _spec = importlib.util.spec_from_file_location(

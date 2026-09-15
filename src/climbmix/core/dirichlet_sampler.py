@@ -48,9 +48,24 @@ class DirichletSampler:
 
         self._concentration = self.config.get_dirichlet_concentration(cluster_token_counts)
 
+    def _apply_floor(self, weights: np.ndarray) -> np.ndarray:
+        """Clamp every cluster to >= SearchConfig.weight_floor, renormalize.
+
+        Anti-corner insurance (prod3 2026-09-15): guided exploration around
+        a base that zeroed a cluster pins its alpha at 0.01, so without this
+        clamp zeros are sticky across rounds and a sparse winner trains with
+        no diversity cushion. 1% floor keeps the expressive range (uniform =
+        1/K); weight_floor=0 disables (identity, pre-fix behavior).
+        """
+        floor = self.config.search.weight_floor
+        if floor <= 0.0:
+            return weights
+        weights = np.maximum(weights, floor)
+        return weights / weights.sum()
+
     def sample_one(self) -> MixtureConfig:
         alpha = self._concentration * self._proportions
-        weights = self._rng.dirichlet(alpha)
+        weights = self._apply_floor(self._rng.dirichlet(alpha))
         mw = MixtureWeights(weights=weights.astype(np.float64))
         return MixtureConfig(mixture_weights=mw)
 
@@ -59,7 +74,8 @@ class DirichletSampler:
         all_weights = self._rng.dirichlet(alpha, size=n)
         configs = []
         for i in range(n):
-            mw = MixtureWeights(weights=all_weights[i].astype(np.float64))
+            mw = MixtureWeights(
+                weights=self._apply_floor(all_weights[i]).astype(np.float64))
             configs.append(MixtureConfig(mixture_weights=mw, config_id=i))
         return configs
 
@@ -74,8 +90,9 @@ class DirichletSampler:
 
         Paper: "randomly sample M new configurations from the top N ranked
         configurations." We implement this as Dirichlet sampling centered
-        around each top-N config, which naturally stays on the simplex
-        without needing clip-and-renormalize post-processing.
+        around each top-N config, which naturally stays on the simplex —
+        the only clip-and-renormalize here is the deliberate weight floor
+        (SearchConfig.weight_floor, anti-corner insurance; see _apply_floor).
 
         For each selected top-N config with weights w, we sample from
         Dir(concentration * w) to generate nearby exploration configs.
@@ -92,7 +109,7 @@ class DirichletSampler:
         for base in base_configs:
             alpha = exploration_concentration * base.mixture_weights.weights
             alpha = np.maximum(alpha, 0.01)
-            new_weights = self._rng.dirichlet(alpha)
+            new_weights = self._apply_floor(self._rng.dirichlet(alpha))
             mw = MixtureWeights(weights=new_weights.astype(np.float64))
             new_configs.append(MixtureConfig(mixture_weights=mw))
 

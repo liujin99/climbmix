@@ -358,6 +358,18 @@ class SearchConfig:
     dirichlet_alpha: Optional[float] = None
     predict_top_n_ratio: float = 0.5
     sample_from_top_m: int = 32
+    # Post-draw weight floor for EVERY sampled mixture config: the sampler
+    # clamps each cluster to >= weight_floor and renormalizes. Anti-corner
+    # insurance — guided exploration around a base that zeroed a cluster
+    # pins its Dirichlet alpha at 0.01 (dirichlet_sampler.py), so zeros are
+    # STICKY: once the predictor's favourite drops a cluster, later rounds
+    # almost never revive it, and a sparse winner then trains 3B single-pass
+    # with no diversity cushion (prod3 2026-09-15: 7/15 clusters near zero
+    # -> gsm8k halved at d28). 1% keeps ~full expressive range (uniform =
+    # 1/K ~ 6.7%) while guaranteeing no cluster is fully starved; meaningful
+    # range (0, 1/K). 0 disables (pre-fix behavior). Semantic knob: enters
+    # the search fingerprint.
+    weight_floor: float = 0.01
     # Lower clamp on the per-benchmark SNR weight w (accuracy share). The
     # documented intent is acc-primary ("NLL a supplementary view"), but
     # prod3 (2026-09-15) ran with w_floor=0.0: at d20@640M every benchmark's
