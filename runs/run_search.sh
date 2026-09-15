@@ -11,7 +11,9 @@
 #  用法: 编辑下方 EDIT 块 → ./runs/run_search.sh
 #        后台: nohup ./runs/run_search.sh > run.log 2>&1 &
 #        干跑: LAUNCH=0 ./runs/run_search.sh (校验+打印, 不启动)
-#  其他阶段: run_arm_only.sh (臂, 训完自动全景报告) / run_eval_only.sh (评测)
+#  其他阶段 (continue-from 家族): run_extend_search.sh (d20 增量续搜) /
+#    run_trainval.sh (d28 训练验证轮: 新预算/换seed, 住 trainval/ 子目录) /
+#    run_arm_only.sh (补一个臂) / run_eval_only.sh (只评测)
 # ═══════════════════════════════════════════════════════════════════
 set -euo pipefail
 

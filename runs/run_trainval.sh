@@ -1,47 +1,57 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════
-#  run_validation.sh — continue from 训练验证 (两阶段目录模式, quadmix 同款)
+#  run_trainval.sh — 从 d28 训练验证阶段开始 (同一配比策略的新验证轮)
 #
-#  算法阶段 (run_search.sh: 搜索 + 首次验证) 产出 weights / cluster cache;
-#  本脚本从那里 "continue": 建立独立验证目录 result/<VAL_NAME>_current,
-#  按配置的臂 + token 预算跑一轮新的训练验证对比, 自带 CP4 报告。
+#  实验身份 = 一个最优配比策略的产出条件 (数据池 + 聚类 + 搜索配置,
+#  即搜索指纹); 池/聚类/搜索变了才是新实验 (run_search / run_extend_search)。
+#  同一策略的更多训练验证 (更大 token 预算 / 换 seed / 对比臂) 不是新
+#  实验 — 是本实验的验证轮, 住进实验目录的 trainval/ 子目录:
 #
-#  用法 (服务器: git pull 后一条命令):
+#    result/prod3_current/                 # 实验 prod3 (一个 _current)
+#    ├── 搜索产物 + 首轮 3B 验证 (run_search 的 Step 1-8, 根目录历史约定)
+#    └── trainval/
+#        ├── val20b/                       # 本脚本产出的验证轮 (独立成套)
+#        └── val35b_s7/
+#
+#  本脚本做什么: 校验 → 建 trainval/<轮名>/ (从实验根目录只读复制
+#  weights/cluster_cache/launch_env/remote_config, OBS 前缀重写隔离) →
+#  后台预取 general 分片 → 按臂表逐臂调 run_arm_only.sh (选样→混合→
+#  single-pass 守卫→远端 dispatch) → 落地后渲染本轮 CP4 报告。
+#
+#  入口家族 (continue-from 语义, 各阶段一条):
+#    1 全新实验                    → runs/run_search.sh
+#    2 d20 增量 (历史注入+续搜)     → runs/run_extend_search.sh
+#    3 d28 训练验证轮 (本脚本)      → runs/run_trainval.sh
+#    4 补一个臂 (重发/自定义配比)   → runs/run_arm_only.sh
+#    5 只评测 (新基准集/base 锚点)  → runs/run_eval_only.sh
+#
+#  用法:
 #    SRC_RUN_DIR=result/prod3_current SCALE_TOKENS=20B NODES=8 \
-#      nohup bash runs/run_validation.sh > ~/work/tmp/val20b.log 2>&1 &
-#  再上一档 (独立新目录, .done 幂等):
-#    SRC_RUN_DIR=result/prod3_current SCALE_TOKENS=35B NODES=8 ...同上
-#  臂配置 (可任意组合):
-#    ARMS="winner random"                       # 默认: 搜索最优 vs 均匀基线
-#    ARMS="winner random fix1=0.1,0.2,...,15个" # 自定义配比臂 (逗号列表或权重文件路径)
+#      nohup bash runs/run_trainval.sh > ~/work/tmp/trainval20b.log 2>&1 &
+#  再上一档: SCALE_TOKENS=35B (轮名自动派生 val35b; .done 幂等可重入)
+#  臂表: ARMS="winner random" (默认) | 含自定义: "winner random fix1=0.1,..."
 #
-#  目录协议 (与算法阶段隔离):
-#    SRC_RUN_DIR (只读)  →  result/<VAL_NAME>_current (本实验独立目录)
-#    复制: weights / cluster_cache(+info) / launch_env / search_state
-#    重写: remote_config 的 obs_prefix → .../<VAL_NAME> (per-run OBS 隔离)
-#  ⚠ VAL 目录只归本脚本管 — 不要拿它的名字跑 run_search.sh
-#    (无指纹目录会被 stage gate 当 orphan 归档)。
-#
-#  分层: 本脚本是编排层; 每臂由 runs/run_arm_only.sh (单臂引擎:
-#  选样→混合→single-pass 守卫→远端 dispatch) 执行。
-#  NODES 必须 2 的幂 (1/2/4/8/16): d28 优化器按 ws=8×NODES 切分全部
-#  2^k 张量维度, ws 含因子 3 时 optim.py:499 断言必炸 (probe C 实证)。
+#  注意:
+#  · 实验 run 绿色收官后目录会改名 (prod3_current → prod3_<ts>);
+#    下一轮把 SRC_RUN_DIR 指向归档目录即可 (轮目录内容自洽, 不受影响)
+#  · NODES 必须 2 的幂 (1/2/4/8/16): d28 优化器按 ws=8×NODES 切分全部
+#    2^k 张量维度, ws 含因子 3 时 optim.py:499 断言必炸 (probe C 实证)
 # ═══════════════════════════════════════════════════════════════════
 set -euo pipefail
 
 # ─── EDIT HERE (env 可临时覆盖) ────────────────────────────────────
-SRC_RUN_DIR="${SRC_RUN_DIR:-result/prod3_current}"   # 算法阶段目录 (只读)
-VAL_NAME="${VAL_NAME:-}"           # 空=自动派生 <src名>_val<tokens>, 如 prod3_val20b
+SRC_RUN_DIR="${SRC_RUN_DIR:-result/prod3_current}"   # 实验目录 (只读来源)
+ROUND_NAME="${ROUND_NAME:-}"         # 空=自动派生 val<tokens>[_s<seed>]
 SCALE_TOKENS="${SCALE_TOKENS:-20B}"          # token 预算 (10B/20B/35B...)
 NODES="${NODES:-8}"                          # 每臂节点数 — 必须 2 的幂
 ARMS="${ARMS:-winner random}"                # 臂表: winner | random | 名字=权重
-SEED="${SEED:-42}"                           # 选样种子 (换 seed 复刻时改它)
+SEED="${SEED:-42}"                           # 选样种子 (≠42 时进轮名)
 PREFETCH="${PREFETCH:-1}"                    # 1=选样期间后台预取 general 分片
 LAUNCH="${LAUNCH:-1}"                        # 0=干跑 (只打印计划)
 # ─── 本机路径 (与主 run 相同; 服务器默认通常不用改) ─────────────────
 NANOCHAT_BASE_DIR="${NANOCHAT_BASE_DIR:-/home/ma-user/work/nanochat_model_dir}"
 GENERAL_DATA_DIR="${GENERAL_DATA_DIR:-$NANOCHAT_BASE_DIR/climbmix_shards}"
-VAL_LOG_DIR="${VAL_LOG_DIR:-$HOME/work/tmp}"
+TRAINVAL_LOG_DIR="${TRAINVAL_LOG_DIR:-$HOME/work/tmp}"
 # ───────────────────────────────────────────────────────────────────
 
 CLIMBMIX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -52,7 +62,7 @@ source "$CLIMBMIX_DIR/runs/lib/auto_report.sh"
 [[ "$NODES" =~ ^[0-9]+$ ]] && (( NODES >= 1 && (NODES & (NODES-1)) == 0 )) \
     || { echo "✗ NODES=$NODES 非法 — 必须 2 的幂 (1/2/4/8/16): d28 优化器分片约束 (optim.py:499)"; exit 1; }
 WFILE="$SRC_RUN_DIR/optimal_mixture_weights.json"
-[ -f "$WFILE" ] || { echo "✗ $WFILE 不存在 — 需要算法阶段的最终选点"; exit 1; }
+[ -f "$WFILE" ] || { echo "✗ $WFILE 不存在 — 需要实验的最终选点 (搜索完成后产出; run 收官改名后把 SRC_RUN_DIR 指向归档目录)"; exit 1; }
 [ -f "$SRC_RUN_DIR/cluster_cache.npz" ] || { echo "✗ $SRC_RUN_DIR/cluster_cache.npz 不存在"; exit 1; }
 [ -f "$SRC_RUN_DIR/launch_env.json" ]  || { echo "✗ $SRC_RUN_DIR/launch_env.json 不存在"; exit 1; }
 [ -f "$SRC_RUN_DIR/remote_config.json" ] || { echo "✗ $SRC_RUN_DIR/remote_config.json 不存在"; exit 1; }
@@ -87,56 +97,57 @@ PY
 )" || exit 1
 IFS=$'\t' read -r TOK_BYTES STEPS_EST TIMEOUT_H NEEDED CAP PREFETCH_N DISK_GB TOKTAG UNIFORM <<< "$PLAN"
 
-# VAL_NAME 自动派生: result/prod3_current → prod3_val20b
-if [ -z "$VAL_NAME" ]; then
-    SRC_BASE="$(basename "$SRC_RUN_DIR")"; SRC_BASE="${SRC_BASE%_current}"
-    VAL_NAME="${SRC_BASE}_val${TOKTAG}"
+# 轮名自动派生: val20b / val35b_s7
+if [ -z "$ROUND_NAME" ]; then
+    ROUND_NAME="val${TOKTAG}"
+    [ "$SEED" != "42" ] && ROUND_NAME="${ROUND_NAME}_s${SEED}"
 fi
-VAL_DIR="result/${VAL_NAME}_current"
+ROUND_DIR="$SRC_RUN_DIR/trainval/$ROUND_NAME"
 
 FREE_GB=$(df -BG . | awk 'NR==2{print $4}' | tr -d G)
 [ "$FREE_GB" -ge $((DISK_GB + 50)) ] \
     || { echo "✗ 磁盘空闲 ${FREE_GB}G < 预算 ${DISK_GB}G + 50G (两臂混料+选样)"; exit 1; }
 
-echo "═══ validation: ${ARMS} @ ${SCALE_TOKENS} (=${TOK_BYTES} tokens) ═══"
+echo "═══ trainval round: ${ARMS} @ ${SCALE_TOKENS} (=${TOK_BYTES} tokens) ═══"
 echo "  src:     ${SRC_RUN_DIR} (只读)"
-echo "  val dir: ${VAL_DIR} (独立实验目录)"
+echo "  round:   ${ROUND_DIR} (实验内的独立验证轮)"
 echo "  nodes:   ${NODES}/臂 (ws=$((NODES*8))) → est ${STEPS_EST} 步, job timeout ${TIMEOUT_H}h"
 echo "  general: ~${NEEDED} 分片 (cap=${CAP}, 预取 ${PREFETCH_N})"
 echo "  disk:    est ${DISK_GB}G, free ${FREE_GB}G"
 
 [ "$LAUNCH" = "1" ] || { echo; echo "[dry-run] LAUNCH=0 — 只打印计划"; exit 0; }
 
-# ── 初始化 VAL 目录 (幂等; 从算法阶段复制数据源, OBS 前缀重写隔离) ──
-mkdir -p "$VAL_DIR"
+# ── 初始化轮目录 (幂等; 从实验根目录复制数据源, OBS 前缀重写隔离) ──
+mkdir -p "$ROUND_DIR"
 for f in optimal_mixture_weights.json cluster_cache.npz cluster_info_cache.json \
          launch_env.json search_state.json; do
-    [ -f "$SRC_RUN_DIR/$f" ] && { [ -f "$VAL_DIR/$f" ] || cp "$SRC_RUN_DIR/$f" "$VAL_DIR/$f"; }
+    [ -f "$SRC_RUN_DIR/$f" ] && { [ -f "$ROUND_DIR/$f" ] || cp "$SRC_RUN_DIR/$f" "$ROUND_DIR/$f"; }
 done
-[ -f "$VAL_DIR/remote_config.json" ] || cp "$SRC_RUN_DIR/remote_config.json" "$VAL_DIR/remote_config.json"
-python3 - "$VAL_DIR/remote_config.json" "$VAL_NAME" <<'PY'
+[ -f "$ROUND_DIR/remote_config.json" ] || cp "$SRC_RUN_DIR/remote_config.json" "$ROUND_DIR/remote_config.json"
+python3 - "$ROUND_DIR/remote_config.json" "$ROUND_NAME" <<'PY'
 import json, sys
-p, name = sys.argv[1], sys.argv[2]
+p, round_name = sys.argv[1], sys.argv[2]
 c = json.load(open(p))
 pre = (c.get("obs_prefix") or "").rstrip("/")
 if pre:
-    c["obs_prefix"] = pre.rsplit("/", 1)[0] + "/" + name
+    base, _, exp = pre.rpartition("/")
+    c["obs_prefix"] = f"{base}/{exp}/trainval/{round_name}"
 json.dump(c, open(p, "w"), indent=2)
 print("[setup] obs_prefix ->", c["obs_prefix"])
 PY
-cat > "$VAL_DIR/.validation_only" <<MSG
-validation-only dir managed by runs/run_validation.sh
-src: ${SRC_RUN_DIR}   budget: ${SCALE_TOKENS}   nodes: ${NODES}   seed: ${SEED}
-不要用 ${VAL_NAME} 作为 EXP_NAME 跑 run_search.sh (无指纹目录会被 orphan 归档)
+cat > "$ROUND_DIR/.trainval_round" <<MSG
+trainval round managed by runs/run_trainval.sh
+src experiment: ${SRC_RUN_DIR}   budget: ${SCALE_TOKENS}   nodes: ${NODES}   seed: ${SEED}
+不要把此目录当 run 目录使用 (无指纹, 非 stage-gate 管理)
 MSG
-echo "  setup ✓ (${VAL_DIR})"
+echo "  setup ✓ (${ROUND_DIR})"
 
-mkdir -p "$VAL_LOG_DIR"
+mkdir -p "$TRAINVAL_LOG_DIR"
 
 # ── 后台预取 general 分片 (与选样重叠; .download.lock 跨进程保护) ──
 if [ "$PREFETCH" = "1" ]; then
     nohup python3 - "$GENERAL_DATA_DIR" "$PREFETCH_N" \
-        > "$VAL_LOG_DIR/val_${VAL_NAME}_prefetch.log" 2>&1 <<'PY' &
+        > "$TRAINVAL_LOG_DIR/trainval_${ROUND_NAME}_prefetch.log" 2>&1 <<'PY' &
 import sys
 sys.path.insert(0, "scripts")
 from mix_general_data import download_climbmix
@@ -150,17 +161,17 @@ fi
 declare -a PIDS=() NAMES=()
 for spec in $ARMS; do
     case "$spec" in
-        winner) NAME=winner; WVAL="$VAL_DIR/optimal_mixture_weights.json" ;;
+        winner) NAME=winner; WVAL="$ROUND_DIR/optimal_mixture_weights.json" ;;
         random) NAME=random; WVAL="$UNIFORM" ;;
         *)      NAME="${spec%%=*}"; WVAL="${spec#*=}" ;;
     esac
-    env RUN_DIR="$VAL_DIR" ARM_NAME="$NAME" WEIGHTS="$WVAL" \
+    env RUN_DIR="$ROUND_DIR" ARM_NAME="$NAME" WEIGHTS="$WVAL" \
         TARGET_TOKENS="$SCALE_TOKENS" TARGET_ARM_NODES="$NODES" \
         CLIMBMIX_MAX_SHARDS="$CAP" SEED="$SEED" \
         SKIP_AUTO_REPORT=1 DISPATCH_EXTRA="--job-timeout-h $TIMEOUT_H" \
-        bash runs/run_arm_only.sh > "$VAL_LOG_DIR/val_${VAL_NAME}_${NAME}.log" 2>&1 &
+        bash runs/run_arm_only.sh > "$TRAINVAL_LOG_DIR/trainval_${ROUND_NAME}_${NAME}.log" 2>&1 &
     PIDS+=($!); NAMES+=("$NAME")
-    echo "  ${NAME} pid=$! (log: $VAL_LOG_DIR/val_${VAL_NAME}_${NAME}.log)"
+    echo "  ${NAME} pid=$! (log: $TRAINVAL_LOG_DIR/trainval_${ROUND_NAME}_${NAME}.log)"
 done
 
 FAILED=0
@@ -168,12 +179,12 @@ for i in "${!PIDS[@]}"; do
     if wait "${PIDS[$i]}"; then
         echo "  ${NAMES[$i]} ✓"
     else
-        echo "  ✗ ${NAMES[$i]} 失败 — 看 $VAL_LOG_DIR/val_${VAL_NAME}_${NAMES[$i]}.log"
+        echo "  ✗ ${NAMES[$i]} 失败 — 看 $TRAINVAL_LOG_DIR/trainval_${ROUND_NAME}_${NAMES[$i]}.log"
         FAILED=1
     fi
 done
 
-# ── CP4 报告 (本验证目录内的臂, 对照 random) ──
-auto_cp4_report "$VAL_DIR"
-echo "═══ done (FAILED=$FAILED) — 报告: ${VAL_DIR}/report.md ═══"
+# ── CP4 报告 (本轮目录内的臂, 对照 random) ──
+auto_cp4_report "$ROUND_DIR"
+echo "═══ done (FAILED=$FAILED) — 报告: ${ROUND_DIR}/report.md ═══"
 exit $FAILED
