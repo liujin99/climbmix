@@ -72,7 +72,7 @@ TARGET_TOKENS="${TARGET_TOKENS:-2B}"
 # TARGET_STEPS 派生 (单一真源): steps = TARGET_TOKENS / total_batch_size (d28 ckpt meta)。
 # 消耗 ≈ 预算、池子 = 预算/STEM_RATIO ≈ 1.43×消耗 → 恒单遍 (epoch≈0.7, 守卫恒过)。
 # TARGET_STEPS 不再是用户旋钮: 外部设置 = 遗留配置, 就地报错 (防静默指纹漂移)。
-# 臂级复用 (run_arm_only.sh) 用同一 CLI 派生; 直接 dispatch 的"同数据改步数"走
+# 臂级复用 (runs/lib/arm_engine.sh) 用同一 CLI 派生; 直接 dispatch 的"同数据改步数"走
 # env 优先级, 由 single-pass 守卫把关。
 # 历史复现: prod1/prod2 实际跑的是 1000 步 (tbs 1,048,576) = TARGET_TOKENS=1000Mi。
 if [ -n "${TARGET_STEPS:-}" ]; then

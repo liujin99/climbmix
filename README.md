@@ -81,9 +81,12 @@ climbmix/
 │   ├── embedding_performance.md        # 嵌入性能
 │   └── nan_investigation.md            # stella NaN 修复调查
 ├── runs/                                # Shell scripts
-│   ├── continue.sh                     # 唯一执行入口: bash runs/continue.sh <stage> (stage=重入点)
-│   ├── stages/                         # 阶段实现 (scratch/search/mix/arm/eval)
-│   ├── run_climbmix.sh                  # 主管道引擎 (scratch 阶段背后; 高级直接路径)
+│   ├── run_experiment.sh               # 入口: 跑一个实验 (完整链; 从零/断点续跑)
+│   ├── run_extend_experiment.sh        # 入口: 扩展实验 (复用已有实验 d20 已测点, 增量搜索)
+│   ├── run_extend_traineval.sh         # 入口: 扩展训练评测 (同一配比, 变 token/base/参数的对比轮)
+│   ├── run_extend_eval.sh              # 入口: 扩展评测 (换评测基准集, 不训练)
+│   ├── run_climbmix.sh                  # 主管道引擎 (run_experiment 背后; 高级直接路径)
+│   ├── lib/                            # 共享库 + 内部引擎 (arm_engine/stage_gate/...)
 │   ├── speedrun_climbmix.sh             # End-to-end validation (minimal data + steps)
 │   ├── smoke_test.sh                    # Logic smoke test (CPU)
 │   └── train_base_model.sh             # Generate base checkpoint (NPU)
@@ -131,19 +134,19 @@ DEPTH=28  bash runs/train_base_model.sh   # d28 target checkpoint
 # Step 2: End-to-end validation first (minimal data, ~minutes)
 bash runs/speedrun_climbmix.sh
 
-# Step 3: Production experiments — single entry, stage = re-entry point
-# (continue.sh <stage> = 从该阶段开始, 跑完其后所有步骤; 不是只跑该子步)
-# Each stage is self-contained: edit the env block at its top (runs/stages/<stage>.sh)
-#   LAUNCH=0 bash runs/continue.sh <stage>  = dry-run (validate + print, no execution)
-#   bash runs/continue.sh               = 打印阶段菜单
-bash runs/continue.sh scratch    # 全新实验 (池→聚类→d20搜索→混料→双臂→报告; 重跑同命令=续跑)
-bash runs/continue.sh search     # 从搜索步续: 注入历史 run 已测点做增量 d20 → 后续全链
-bash runs/continue.sh mix        # 从混料步续 (验证轮): 新预算/seed 重采样重混双臂 → 训练评测
-bash runs/continue.sh arm        # 从臂步续: 自定义配比 WEIGHTS / 赢家重训 / 已有臂重发
-bash runs/continue.sh eval       # 从评测步续: base 锚点; 未来 d20 re-eval
+# Step 3: Production experiments — 入口家族, 参数 (EDIT 块) 就在每个脚本头部
+#   LAUNCH=0 <cmd> = dry-run (validate + print, no execution)
+# ── 实验级: 跑一个完整实验 ──
+bash runs/run_experiment.sh          # 跑一个实验: 池(不变则复用嵌入)→聚类→d20搜索→混料→双臂→报告
+                                     #   状态驱动: 从零 / 断点续跑 = 重跑同命令
+bash runs/run_extend_experiment.sh   # 扩展实验: 复用已有实验的 d20 已测点→增量搜索→后续全链 (HISTORY_RUN=旧实验)
+# ── 扩展级: 对已有实验追加, 非必经下一站 ──
+bash runs/run_extend_traineval.sh    # 扩展训练评测: 同一最优配比, 变 token预算/base_model/训练参数的
+                                     #   双臂对比训练→评测→报告 (SCALE_TOKENS=20B NODES=8)
+bash runs/run_extend_eval.sh         # 扩展评测: 对既有 ckpt 换评测基准集→报告, 不训练
 # 一次性: 把 "obs_prod_base" (生产 OBS 根前缀) 写进 ~/.config/climbmix/remote_ma.json
 # (与 secret 同文件) — 之后所有发射免填 REMOTE_OBS_PREFIX (自动拼 /<run_name>)。
-# 原始入口 (scratch 阶段的底层引擎, 全参数 env 驱动):
+# 原始入口 (run_experiment 的底层引擎, 全参数 env 驱动):
 bash runs/run_climbmix.sh
 ```
 

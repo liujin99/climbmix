@@ -1,21 +1,22 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════
-#  阶段 scratch: 全新实验 — 从头跑完整条链 (bash runs/continue.sh scratch)
-#    池 → 聚类 → d20 搜索 → 混料 → 双臂 (climb/random) 训练评测 → 报告
+#  跑一个实验 (完整链): 池 → 聚类 → d20 搜索 → 混料 → 双臂 (climb/random)
+#  训练评测 → 报告
 #
-#  状态驱动 — 同一命令覆盖两种情形, 重跑即续:
-#    · 从零:      新 EXP_NAME
+#  状态驱动 — 同一命令覆盖多种情形, 重跑即续:
+#    · 从零:      新 EXP_NAME (池与历史一致时自动复用嵌入/聚类缓存, 不重算)
 #    · 中断继续:  同 EXP_NAME 重跑本命令 (exp .done / search_state /
 #                 指纹三级断点自动续, 不从头来)
-#  复用历史实验热启动 (inject 旧 run 结果为新 run 地基):
-#    → bash runs/continue.sh search
+#  想复用已有实验的 d20 已测点做增量实验?
+#    → runs/run_extend_experiment.sh
 #
-#  用法: 编辑下方 EDIT 块 → bash runs/continue.sh scratch
-#        后台: nohup bash runs/continue.sh scratch > run.log 2>&1 &
-#        干跑: LAUNCH=0 bash runs/continue.sh scratch (校验+打印, 不启动)
-#  家族 (continue.sh <stage>, 每个 stage = 重入点, 跑完其后所有步骤):
-#    scratch(本) / search / mix / arm / eval
-#  主管道引擎: runs/run_climbmix.sh (本阶段 exec 它; 高级直接路径)
+#  用法: 编辑下方 EDIT 块 → bash runs/run_experiment.sh
+#        后台: nohup bash runs/run_experiment.sh > run.log 2>&1 &
+#        干跑: LAUNCH=0 bash runs/run_experiment.sh (校验+打印, 不启动)
+#  入口家族 (后三个 extend_* = 对已有实验的扩展动作, 非必经下一站):
+#    run_experiment(本) / run_extend_experiment / run_extend_traineval /
+#    run_extend_eval
+#  主管道引擎: runs/run_climbmix.sh (本脚本 exec 它; 高级直接路径)
 # ═══════════════════════════════════════════════════════════════════
 set -euo pipefail
 
@@ -67,7 +68,7 @@ export EXP_NAME CONFIGS_PER_ITER K_ENHANCED ADAPTIVE_CONFIGS ADAPTIVE_COMPACT \
        REMOTE_FLAVOR REMOTE_POOL_NAME
 # ───────────────────────────────────────────────────────────────────
 
-CLIMBMIX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+CLIMBMIX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$CLIMBMIX_DIR"
 OUTPUT_DIR="$CLIMBMIX_DIR/result/${EXP_NAME}_current"
 
@@ -85,7 +86,7 @@ if [ -f "$OUTPUT_DIR/search_state.json" ]; then
     echo "  → 检测到已有 search_state — 续跑 (三级断点, 不从头来)"
 else
     echo "  → 从零开始"
-    echo "    (要基于已有 d20 实验结果做增量实验? 用 bash runs/continue.sh search)"
+    echo "    (要基于已有 d20 实验结果做增量实验? 用 runs/run_extend_experiment.sh)"
 fi
 
 if [ "$LAUNCH" != "1" ]; then

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════
-#  阶段 arm: 从臂阶段重入 — 训练/(重)发一个 d28 目标臂, 跳过搜索
-#  (bash runs/continue.sh arm; 臂训完继续评测→报告。docs/reuse_design.md §4.4)
-#  本阶段同时是 mix 阶段的逐臂引擎 (选样→混合→守卫→dispatch)。
+#  臂引擎 (内部, 非用户入口): 训练/(重)发一个 d28 目标臂
+#  由 runs/run_extend_traineval.sh 逐臂调用 (选样→混合→single-pass 守卫→
+#  远端 dispatch→报告); 应急手动直调亦可 (一次性自定义臂/失败臂补发)。
+#  (docs/reuse_design.md §4.4)
 #
 #  三种用法 (由 ARM_NAME / WEIGHTS 组合决定):
 #    a) 自定义配比臂:  ARM_NAME=fixratio_v1 WEIGHTS="0.2,0.3,..."
@@ -11,7 +12,7 @@
 #    c) 已有臂重发:    ARM_NAME=random (WEIGHTS 留空 — 数据已混合,
 #                      失败重试场景; 前次 SUCCEEDED 的臂会被 .done 跳过)
 #
-#  用法: 编辑下方 EDIT 块 → bash runs/continue.sh arm
+#  常规路径: 对比轮用 runs/run_extend_traineval.sh 的 ARMS 臂表, 不直调本引擎
 #  训完自动出 CP4 全景报告 (run 内所有臂, 对照默认 random; 臂没落地自动跳过)
 # ═══════════════════════════════════════════════════════════════════
 set -euo pipefail

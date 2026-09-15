@@ -39,7 +39,7 @@ OBS 内部分两区，判据 = 生产者 + 再生成本 + 生命周期不同：
 
 现状缺口：OBS 上有全部重资产、却没有最关键的轻资产（search_state/eval CSV 是 master 产物，从不离开磁盘）。`archive/` 区补这个洞。归档动作目前手动（`obsutil cp`），自动化待做（见 §7）。
 
-**OBS 前缀必须按 run 隔离**：`REMOTE_OBS_PREFIX` 末尾必须带 run 名（如 `…/prod/climbmix/prod3`）。原因：exp id 每 run 从 0 重编，跨 run 共用前缀时——搜索 exp 混合数据是先删后传（remote_executor `_run_remote_experiment`），旧 run 的 OBS 记录会被摧毁；臂数据用 `upload_dir_if_missing`（存在即跳过），新 run 可能直接用旧 run 的混合数据训练（静默正确性事故）。preflight 校验待加（§7；`continue.sh scratch` 入口已强制）。
+**OBS 前缀必须按 run 隔离**：`REMOTE_OBS_PREFIX` 末尾必须带 run 名（如 `…/prod/climbmix/prod3`）。原因：exp id 每 run 从 0 重编，跨 run 共用前缀时——搜索 exp 混合数据是先删后传（remote_executor `_run_remote_experiment`），旧 run 的 OBS 记录会被摧毁；臂数据用 `upload_dir_if_missing`（存在即跳过），新 run 可能直接用旧 run 的混合数据训练（静默正确性事故）。preflight 校验待加（§7；`runs/run_experiment.sh` 入口已强制）。
 
 ---
 
@@ -54,10 +54,10 @@ OBS 内部分两区，判据 = 生产者 + 再生成本 + 生命周期不同：
 
 **复用凭证 = 不可变层一致**。操作层面的校验手段：
 
-- **池身份（内容级，第一前提）**：K 相同 ≠ 池相同——权重向量活在簇空间里，两个不同池各自聚成 K=15，同一权重指代的是不同文档集合。池身份 = `pool_embedding_cache_key`（sha256 of 全部分片名+大小、嵌入模型、截断长度、采样数，`utils/embed_cache.py`——与 pool-keyed 缓存同源，每个 run 的 search.log 都记录过）。search 阶段（`runs/stages/search.sh`）发射前自动核验：源 key（search.log 记录）vs 当前 key（现场扫 DATA_DIR 计算），不等**拒绝发射**；源无 search.log 时退回 DATA_DIR 路径级比对（不等亦拒绝）。局限（与指纹同级）：同名同大小的内容替换检测不到。
+- **池身份（内容级，第一前提）**：K 相同 ≠ 池相同——权重向量活在簇空间里，两个不同池各自聚成 K=15，同一权重指代的是不同文档集合。池身份 = `pool_embedding_cache_key`（sha256 of 全部分片名+大小、嵌入模型、截断长度、采样数，`utils/embed_cache.py`——与 pool-keyed 缓存同源，每个 run 的 search.log 都记录过）。`runs/run_extend_experiment.sh` 发射前自动核验：源 key（search.log 记录）vs 当前 key（现场扫 DATA_DIR 计算），不等**拒绝发射**；源无 search.log 时退回 DATA_DIR 路径级比对（不等亦拒绝）。局限（与指纹同级）：同名同大小的内容替换检测不到。
 - **K（池维度）**：注入工具硬校验 + `_load_state` 已有的 n_clusters 守卫（不匹配 → 丢弃状态重新开始）。
 - **池内容**：新 run 的 `cluster_cache.npz` **必须从旧 run 复制，不重新生成**（cluster 重生成有随机性，参数相同池子也可能不同）。注入工具对 `--pool` 指定的 cache 计算 sha256 记入种子溯源块；缓存继承 = 双文件（`cluster_cache.npz` + `cluster_info_cache.json`，缺一会触发重新聚类）。
-- **训练/eval 配置**：search 阶段自动 diff 源 run 的 `launch_env.json` 语义键 vs 当前发射参数（env 覆盖 > run_climbmix.sh EDIT 块默认值），不一致逐键列出并拒绝；`DATA_DIR`/`GENERAL_DATA_DIR` 路径不同仅警告（内容终审由池 key 把关）。
+- **训练/eval 配置**：`runs/run_extend_experiment.sh` 自动 diff 源 run 的 `launch_env.json` 语义键 vs 当前发射参数（env 覆盖 > run_climbmix.sh EDIT 块默认值），不一致逐键列出并拒绝；`DATA_DIR`/`GENERAL_DATA_DIR` 路径不同仅警告（内容终审由池 key 把关）。
 
 **数据模型：raw 与 derived 分离**。`search_state.json` 里的 `accumulated_per_benchmark`（每任务原始 acc/NLL）是**不可变事实**；`accumulated_scores` 是 raw × 评分公式的**派生物**，可随公式版本重算（这正是 rescore 存在的理由；prod2 的 w 单位 bug 教训）。
 
@@ -163,18 +163,18 @@ NANOCHAT_REPO=$NANOCHAT_DIR python3 scripts/mix_general_data.py \
   --climbmix-dir $GENERAL_DATA_DIR --stem-ratio 0.7 --num-workers 8 --num-npu 8
 ```
 
-**③ 发射：`bash runs/continue.sh arm`（runs/stages/arm.sh；底层 `dispatch_target_arm.py --arm <name>` 开放任意名）**——`--arm` 不再限死三选一，任何 `[A-Za-z0-9_-]+` 的名字走通用臂路径（锁/`.done`/audit/tag/OBS `target_arms/<name>/` 全部按名字泛化；random 的选点等待和 base_eval_check 的单节点约束只对这两个名字生效）：
+**③ 发射：`bash runs/run_extend_traineval.sh` 的 ARMS 臂表（内部引擎 `runs/lib/arm_engine.sh`；底层 `dispatch_target_arm.py --arm <name>` 开放任意名）**——`--arm` 不再限死三选一，任何 `[A-Za-z0-9_-]+` 的名字走通用臂路径（锁/`.done`/audit/tag/OBS `target_arms/<name>/` 全部按名字泛化；random 的选点等待和 base_eval_check 的单节点约束只对这两个名字生效）：
 
 ```bash
 # 固定比例基线臂 (壳自动: 选点 → 混合 → dispatch)
-ARM_NAME=fixratio_v1 WEIGHTS="0.2,0.2,0.3,..." bash runs/continue.sh arm
+ARM_NAME=fixratio_v1 WEIGHTS="0.2,0.2,0.3,..." bash runs/lib/arm_engine.sh
 
 # 赢家重训：换训练参数 —— 预算 = TARGET_TOKENS 单参数（1.5B 目标模型按
 # token 预算配置；步数自动派生，TARGET_STEPS 非旋钮）。TARGET_TOKENS 覆盖
 # 必须走壳（壳层发现 TOKENS ≠ run 快照时重派生步数再传 dispatch；裸跑
 # dispatch 读的是快照里的派生步数，只设 TOKENS 不会改变训练长度）：
 ARM_NAME=winner_v2 WEIGHTS=result/<run>/optimal_mixture_weights.json \
-TARGET_TOKENS=3B MID_DEVICE_BATCH_SIZE=1 bash runs/continue.sh arm
+TARGET_TOKENS=3B MID_DEVICE_BATCH_SIZE=1 bash runs/lib/arm_engine.sh
 ```
 
 **复用语义**：臂混合数据走 `upload_dir_if_missing`（同配比 + 同池 → 同 OBS 地址 → 存在即跳过 = 复用混合数据，省重新混合）；这正是把跨 run 前缀碰撞的"地雷"反转成复用特性的前提——前提是 §1 的 per-run 前缀规则先落地。
@@ -221,28 +221,28 @@ TARGET_TOKENS=3B MID_DEVICE_BATCH_SIZE=1 bash runs/continue.sh arm
 **一键方式**（入口即意图：全新实验 / 复用热启动 分开两个 sh）：
 
 ```bash
-# 全新实验 (不用历史): bash runs/continue.sh scratch (重跑同命令 = 续跑)
-# 复用历史热启动:     bash runs/continue.sh search — EDIT 块填 HISTORY_RUN
+# 全新实验 (不用历史): bash runs/run_experiment.sh (重跑同命令 = 续跑)
+# 复用历史热启动:     bash runs/run_extend_experiment.sh — EDIT 块填 HISTORY_RUN
 #   (留空运行 = 列出所有可用历史 run 及其点数)
 HISTORY_RUN=result/prod2_k15bal_20260909_200323 \
-  bash runs/continue.sh search        # 阶段旋钮 = env (runs/stages/search.sh 头注)
-LAUNCH=0 bash runs/continue.sh search  # 干跑: 校验+注入+打印发射线, 不发射
+  bash runs/run_extend_experiment.sh  # 旋钮 = env, 见脚本头注 EDIT 块
+LAUNCH=0 bash runs/run_extend_experiment.sh  # 干跑: 校验+注入+打印发射线, 不发射
 # CONFIGS_PER_ITER = 新实验自己的轮次计划 (历史=地基, 不算轮次):
 #   "20,10" = 新实验第 1 轮 20 个 + 第 2 轮 10 个新 d20;
 #   历史 30 点作地基 → 总实验数 60, 其中要跑的 30 (干跑打印预算分解)
 ```
 
-壳内自动完成（即下面的手动谱）：源 run 完整性检查 → **K 一致性预检**（balanced_profile 的 K_final vs K_ENHANCED，不一致直接拒绝；HISTORY_RUN 缺省时列出可用源 + 点数 + 池 K + 池 key + 可复用性标注）→ **池身份核验**（源 search.log 的池 key vs 现场扫 DATA_DIR 算的 key，不等拒绝；无 search.log 回退路径级比对）→ 复制池缓存（**双文件** `cluster_cache.npz` + `cluster_info_cache.json` — climb_pipeline 缓存命中条件，缺任一个会触发重新聚类 = 历史点作废）→ inject_history（池 K 硬校验 + 当前公式重算 + 溯源）→ **槽位规范化**（CONFIGS_PER_ITER 只写新实验轮次，历史数自动补进列表头 + 预算分解打印）→ **不可变层自动 diff**（源 run 的 launch_env.json 语义键 vs 当前发射参数，不一致逐键警告并拒绝；DATA_DIR/GENERAL_DATA_DIR 路径不同仅警告）→ exec scratch 阶段（可选并行预发 random 臂）。中断后重跑同命令同写法 = 续跑（从 state 的 `history_seed` 识别，不重注入）。REMOTE_OBS_PREFIX 留空时自动从 climbmix-ma 配置的 `obs_prod_base`（`~/.config/climbmix/remote_ma.json`，与 secret 同文件，私有永不进 git）拼 `<base>/<EXP_NAME>`。stage_gate 对种子目录（state 含 `history_seed`）免孤儿归档，直接补写新指纹。
+壳内自动完成（即下面的手动谱）：源 run 完整性检查 → **K 一致性预检**（balanced_profile 的 K_final vs K_ENHANCED，不一致直接拒绝；HISTORY_RUN 缺省时列出可用源 + 点数 + 池 K + 池 key + 可复用性标注）→ **池身份核验**（源 search.log 的池 key vs 现场扫 DATA_DIR 算的 key，不等拒绝；无 search.log 回退路径级比对）→ 复制池缓存（**双文件** `cluster_cache.npz` + `cluster_info_cache.json` — climb_pipeline 缓存命中条件，缺任一个会触发重新聚类 = 历史点作废）→ inject_history（池 K 硬校验 + 当前公式重算 + 溯源）→ **槽位规范化**（CONFIGS_PER_ITER 只写新实验轮次，历史数自动补进列表头 + 预算分解打印）→ **不可变层自动 diff**（源 run 的 launch_env.json 语义键 vs 当前发射参数，不一致逐键警告并拒绝；DATA_DIR/GENERAL_DATA_DIR 路径不同仅警告）→ exec runs/run_experiment.sh（可选并行预发 random 臂）。中断后重跑同命令同写法 = 续跑（从 state 的 `history_seed` 识别，不重注入）。REMOTE_OBS_PREFIX 留空时自动从 climbmix-ma 配置的 `obs_prod_base`（`~/.config/climbmix/remote_ma.json`，与 secret 同文件，私有永不进 git）拼 `<base>/<EXP_NAME>`。stage_gate 对种子目录（state 含 `history_seed`）免孤儿归档，直接补写新指纹。
 
-**阶段家族**（唯一入口 `bash runs/continue.sh <stage>`；stage = 重入点，从该阶段开始跑完其后所有步骤；`LAUNCH=0` 干跑；实现 `runs/stages/<stage>.sh`）：
+**入口家族**（参数 EDIT 块就在每个脚本头部；`LAUNCH=0` 干跑；后两个 extend_* = 对已有实验的扩展动作，非必经下一站）：
 
-| stage | 从哪开始 / 覆盖场景 |
+| 脚本 | 做什么 |
 |---|---|
-| `scratch` | 全新实验（池→d20 搜索→两臂→报告）：从零 / 中断续跑（重跑同命令） |
-| `search` | 从搜索步续：基于已有 d20 实验结果做增量实验（`HISTORY_RUN`，场景 5、6；缺省列出可用源+点数+池 key+可复用性；发射前池身份/训练评测参数自动核验） |
-| `mix` | 从混料步续（验证轮）：同一配比策略新预算/seed 重采样重混双臂（住实验 `trainval/<轮名>/`）→ 训练评测 → 报告 |
-| `arm` | 从臂步续：自定义配比（`WEIGHTS`）/ 赢家重训（`WEIGHTS` + 训练参数覆盖）/ 已有臂重发（`WEIGHTS` 空 + `--retry-failed`，场景 3、4）；训完自动 CP4 全景报告（所有臂 vs ref=random） |
-| `eval` | 从评测步续：base 锚点补发（场景 8）；（待 mmlu 上游）d20 re-eval 挂这（场景 1，§4.3） |
+| `runs/run_experiment.sh` | 跑一个实验（池→聚类→d20 搜索→混料→两臂→报告）：从零 / 中断续跑（重跑同命令）；池不变自动复用嵌入缓存 |
+| `runs/run_extend_experiment.sh` | 扩展实验：复用已有实验的 d20 已测点做增量实验（`HISTORY_RUN`，场景 5、6；缺省列出可用源+点数+池 key+可复用性；发射前池身份/训练评测参数自动核验） |
+| `runs/run_extend_traineval.sh` | 扩展训练评测：同一最优配比，变 token 预算/base_model/训练参数的双臂对比轮（住实验 `traineval/<轮名>/`；ARMS 臂表可含自定义配比）→ 训练评测 → 报告 |
+| `runs/run_extend_eval.sh` | 扩展评测：对既有 ckpt 换评测基准集 / base 锚点补发（场景 8）；（待 mmlu 上游）d20 re-eval 挂这（场景 1，§4.3） |
+| `runs/lib/arm_engine.sh` | 臂引擎（内部，非入口）：由 run_extend_traineval 逐臂调用；应急直调 = 自定义配比 / 赢家重训 / 已有臂重发 |
 
 手动谱（等价于壳内动作，留作参考）：
 
@@ -267,7 +267,7 @@ python3 scripts/inject_history.py \
 
 # 3) 发射 — 注意: 手动谱直接跑 run_climbmix.sh, 没有壳的槽位规范化,
 #    必须写含历史的完整列表 (第 1 槽=30 历史); 一键路径
-#    (continue.sh scratch) 才能用 "只写新点计划" 的简写 "20,10"。
+#    (run_experiment.sh) 才能用 "只写新点计划" 的简写 "20,10"。
 #    OBS 前缀一次性配置后可省略:
 #    echo obs://<bucket>/<user>/climbmix > ~/.config/climbmix/obs_base_prefix
 EXP_NAME=prod3 K_ENHANCED=15 NPU_PER_EXP=8 REMOTE_MAX_JOBS=10 \
