@@ -29,6 +29,16 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from tqdm import tqdm
 
+# HF reachability (server findings 2026-09-12/15): the egress proxy
+# CONNECT-tunnels to huggingface.co return 503 bursts (90+ consecutive); only
+# hf-mirror.com is reliable. run_climbmix.sh exports HF_ENDPOINT, but the
+# pre-launched random-arm dispatch (spawned by run_search.sh BEFORE exec'ing
+# run_climbmix.sh) and direct CLI invocations do not inherit it. This module is
+# the ONLY download entry point, and dataset.py bakes BASE_URL from the env at
+# import time — so default it here, before that import. Override with an
+# explicit HF_ENDPOINT to use the origin.
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+
 try:
     from nanochat.dataset import (
         download_single_file,
@@ -121,43 +131,85 @@ def calc_output_files(stem_docs, batch_per_file, stem_ratio):
 
 
 def download_climbmix(data_dir, num_shards, num_workers=16):
-    """Download last N ClimbMix shards from the end to avoid overlap with pretrain (shards 0-999)."""
+    """Download last N ClimbMix shards from the end to avoid overlap with pretrain (shards 0-999).
+
+    Cross-process safe: the climb-arm mix (main script, Step 5) and the
+    random-arm mix (pre-launched dispatch) can both arrive here for the same
+    missing shards — they serialize on <data_dir>/.download.lock and the
+    second arriver re-checks what the first left behind. Without the lock,
+    two writers append to the SAME .tmp with interleaved Range resumes and
+    corrupt the parquet (validate_parquet then fails, masking the cause).
+    """
+    import fcntl
+
     os.makedirs(data_dir, exist_ok=True)
     climb_start = max(0, MAX_SHARD - num_shards + 1)
     climb_ids = list(range(climb_start, MAX_SHARD + 1))
 
-    print(f"  Downloading ClimbMix shards {climb_ids[0]}-{climb_ids[-1]} ({len(climb_ids)} files)")
+    lock_path = os.path.join(data_dir, ".download.lock")
+    with open(lock_path, "w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            return _download_climbmix_locked(
+                data_dir, climb_ids, num_workers)
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
 
-    remaining = list(climb_ids)
+
+def _download_climbmix_locked(data_dir, climb_ids, num_workers):
+    fname = lambda i: os.path.join(data_dir, index_to_filename(i))
+    missing = [i for i in climb_ids if not os.path.exists(fname(i))]
+    if not missing:
+        print(f"  ClimbMix shards complete ({len(climb_ids)} files — "
+              f"lock peer downloaded them)", flush=True)
+        return [fname(i) for i in climb_ids if os.path.exists(fname(i))]
+
+    print(f"  Downloading ClimbMix shards {index_to_filename(climb_ids[0])}-"
+          f"{index_to_filename(climb_ids[-1])} ({len(missing)}/{len(climb_ids)} "
+          f"missing; endpoint {os.environ.get('HF_ENDPOINT')})", flush=True)
+
+    remaining = list(missing)
     for round_idx in range(1, 4):
         if not remaining:
             break
         if round_idx > 1:
             # Transient proxy/network failures (e.g. 503 bursts lasting tens of
             # minutes) deserve a cooldown before the next round of retries.
-            print(f"  Cooling down 60s before round {round_idx}...")
+            print(f"  Cooling down 60s before round {round_idx}...", flush=True)
             time.sleep(60)
         round_workers = max(4, num_workers // round_idx)
+
+        def _dl(i):
+            return i, download_single_file(i, data_dir, "climb")
+
+        t0 = time.time()
+        succeeded = set()
         with ThreadPool(round_workers) as pool:
-            results = pool.map(lambda i: download_single_file(i, data_dir, "climb"), remaining)
-        failed = [remaining[i] for i, r in enumerate(results) if not r]
+            for i, ok in pool.imap_unordered(_dl, remaining):
+                if ok:
+                    succeeded.add(i)
+                print(f"    {index_to_filename(i)}: {'ok' if ok else 'FAILED'} "
+                      f"({len(succeeded)}/{len(remaining)} ok, "
+                      f"{time.time() - t0:.0f}s)", flush=True)
+        failed = [i for i in remaining if i not in succeeded]
         if not failed:
-            print(f"  Round {round_idx}: all {len(remaining)} files downloaded")
+            print(f"  Round {round_idx}: all {len(remaining)} files downloaded",
+                  flush=True)
             remaining = []
             break
-        print(f"  Round {round_idx}: {len(failed)} files still failed")
+        print(f"  Round {round_idx}: {len(failed)} files still failed", flush=True)
         remaining = failed
 
     if remaining:
         raise RuntimeError(
-            f"ClimbMix download failed for shards {remaining} after 3 rounds. "
+            f"ClimbMix download failed for shards "
+            f"{[index_to_filename(i) for i in remaining]} after 3 rounds. "
             f"Check proxy/network, or pre-download manually into {data_dir} "
-            f"(HF_ENDPOINT=https://hf-mirror.com may help)."
+            f"(HF_ENDPOINT={os.environ.get('HF_ENDPOINT')} is the endpoint in use)."
         )
 
-    climb_files = [os.path.join(data_dir, index_to_filename(i)) for i in climb_ids]
-    climb_files = [f for f in climb_files if os.path.exists(f)]
-    print(f"  Downloaded {len(climb_files)} ClimbMix files")
+    climb_files = [fname(i) for i in climb_ids if os.path.exists(fname(i))]
+    print(f"  Downloaded {len(climb_files)} ClimbMix files", flush=True)
     return climb_files
 
 
@@ -367,6 +419,15 @@ def main():
                              "repeat docs silently).")
     args = parser.parse_args()
 
+    # Progress visibility: when piped (nohup redirect / dispatch run_logged)
+    # stdout is block-buffered and phase prints sit invisible for minutes —
+    # a 30-min silent shard download is indistinguishable from a hang.
+    for _s in (sys.stdout, sys.stderr):
+        try:
+            _s.reconfigure(line_buffering=True)
+        except Exception:
+            pass
+
     global STEM_RATIO
     STEM_RATIO = args.stem_ratio
 
@@ -404,7 +465,7 @@ def main():
             existing_climb.append(fpath)
 
     if len(existing_climb) < needed_shards:
-        print(f"  ClimbMix shards incomplete ({len(existing_climb)}/{needed_shards}), downloading...")
+        print(f"  ClimbMix shards incomplete ({len(existing_climb)}/{needed_shards}), downloading...", flush=True)
         climb_files = download_climbmix(args.climbmix_dir, needed_shards, args.num_workers)
     else:
         climb_files = existing_climb

@@ -415,6 +415,18 @@ check("mix: supply preflight present (count vs need + binomial margin)",
       "supply preflight" in mix_src and "binomial" in mix_src)
 check("mix: explicit opt-in flag exists",
       "--allow-general-repeat" in mix_src)
+check("mix: HF_ENDPOINT defaults to hf-mirror BEFORE nanochat import "
+      "(egress proxy 503s on huggingface.co; dispatch path has no env)",
+      'os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")' in mix_src
+      and mix_src.index('os.environ.setdefault("HF_ENDPOINT"')
+      < mix_src.index("from nanochat.dataset"))
+check("mix: cross-process download lock (climb + random mixes race on .tmp)",
+      ".download.lock" in mix_src and "fcntl.flock" in mix_src
+      and "LOCK_EX" in mix_src)
+check("mix: CLI line-buffered + per-shard download progress "
+      "(30-min silent download looks identical to a hang)",
+      "reconfigure(line_buffering=True)" in mix_src
+      and "imap_unordered" in mix_src)
 check("shell: proxy paper-strength warning at launch",
       "proxy 信号强度" in src and "800M" in src)
 
