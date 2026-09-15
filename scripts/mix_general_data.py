@@ -62,7 +62,22 @@ except ImportError:
 STEM_RATIO = 0.7
 BATCH_PER_FILE = 10000
 MIN_CLIMBMIX_SHARDS = 3
-MAX_CLIMBMIX_SHARDS = 50
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    try:
+        return int(raw) if raw else default
+    except ValueError:
+        print(f"[mix] WARNING: {name}={raw!r} is not an int — using {default}")
+        return default
+
+
+# General-side shard cap. Default 50 keeps every historical run byte-identical;
+# scale-ups that need more general tokens (e.g. a 10B-consume target arm needs
+# ~64 shards for a clean 70/30 — without the cap it would silently clamp to 50
+# and drift the ratio to ~76/24) override via CLIMBMIX_MAX_SHARDS.
+MAX_CLIMBMIX_SHARDS = max(MIN_CLIMBMIX_SHARDS, _env_int("CLIMBMIX_MAX_SHARDS", 50))
 # Measured 2026-09-11 on the real HF ClimbMix shards (server probe): 84,992-86,016
 # docs per file (index_to_filename range shard_06540-06542, ~2,940 chars/doc).
 # The historical 500,000 was wrong by ~6x — it made calc_climbmix_count request
