@@ -1,33 +1,30 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════
-#  run_trainval.sh — 从 d28 训练验证阶段开始 (同一配比策略的新验证轮)
+#  阶段 mix: 从混料阶段重入 — 同一配比策略的新训练验证轮
+#  (bash runs/continue.sh mix; 混料后继续双臂训练评测→报告全链)
 #
 #  实验身份 = 一个最优配比策略的产出条件 (数据池 + 聚类 + 搜索配置,
-#  即搜索指纹); 池/聚类/搜索变了才是新实验 (run_search / run_extend_search)。
+#  即搜索指纹); 池/聚类/搜索变了才是新实验 (scratch / search 阶段)。
 #  同一策略的更多训练验证 (更大 token 预算 / 换 seed / 对比臂) 不是新
 #  实验 — 是本实验的验证轮, 住进实验目录的 trainval/ 子目录:
 #
 #    result/prod3_current/                 # 实验 prod3 (一个 _current)
-#    ├── 搜索产物 + 首轮 3B 验证 (run_search 的 Step 1-8, 根目录历史约定)
+#    ├── 搜索产物 + 首轮 3B 验证 (scratch 阶段的 Step 1-8, 根目录历史约定)
 #    └── trainval/
-#        ├── val20b/                       # 本脚本产出的验证轮 (独立成套)
+#        ├── val20b/                       # 本阶段产出的验证轮 (独立成套)
 #        └── val35b_s7/
 #
-#  本脚本做什么: 校验 → 建 trainval/<轮名>/ (从实验根目录只读复制
+#  本阶段做什么: 校验 → 建 trainval/<轮名>/ (从实验根目录只读复制
 #  weights/cluster_cache/launch_env/remote_config, OBS 前缀重写隔离) →
-#  后台预取 general 分片 → 按臂表逐臂调 run_arm_only.sh (选样→混合→
+#  后台预取 general 分片 → 按臂表逐臂调 arm 阶段 (选样→混合→
 #  single-pass 守卫→远端 dispatch) → 落地后渲染本轮 CP4 报告。
 #
-#  入口家族 (continue-from 语义, 各阶段一条):
-#    1 全新实验                    → runs/run_search.sh
-#    2 d20 增量 (历史注入+续搜)     → runs/run_extend_search.sh
-#    3 d28 训练验证轮 (本脚本)      → runs/run_trainval.sh
-#    4 补一个臂 (重发/自定义配比)   → runs/run_arm_only.sh
-#    5 只评测 (新基准集/base 锚点)  → runs/run_eval_only.sh
+#  家族 (continue.sh <stage>, 每个 stage = 重入点, 跑完其后所有步骤):
+#    scratch / search / mix(本) / arm / eval
 #
 #  用法:
 #    SRC_RUN_DIR=result/prod3_current SCALE_TOKENS=20B NODES=8 \
-#      nohup bash runs/run_trainval.sh > ~/work/tmp/trainval20b.log 2>&1 &
+#      nohup bash runs/continue.sh mix > ~/work/tmp/trainval20b.log 2>&1 &
 #  再上一档: SCALE_TOKENS=35B (轮名自动派生 val35b; .done 幂等可重入)
 #  臂表: ARMS="winner random" (默认) | 含自定义: "winner random fix1=0.1,..."
 #
@@ -54,7 +51,7 @@ GENERAL_DATA_DIR="${GENERAL_DATA_DIR:-$NANOCHAT_BASE_DIR/climbmix_shards}"
 TRAINVAL_LOG_DIR="${TRAINVAL_LOG_DIR:-$HOME/work/tmp}"
 # ───────────────────────────────────────────────────────────────────
 
-CLIMBMIX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CLIMBMIX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$CLIMBMIX_DIR"
 source "$CLIMBMIX_DIR/runs/lib/auto_report.sh"
 
@@ -136,7 +133,7 @@ json.dump(c, open(p, "w"), indent=2)
 print("[setup] obs_prefix ->", c["obs_prefix"])
 PY
 cat > "$ROUND_DIR/.trainval_round" <<MSG
-trainval round managed by runs/run_trainval.sh
+trainval round managed by runs/stages/mix.sh (continue.sh mix)
 src experiment: ${SRC_RUN_DIR}   budget: ${SCALE_TOKENS}   nodes: ${NODES}   seed: ${SEED}
 不要把此目录当 run 目录使用 (无指纹, 非 stage-gate 管理)
 MSG
@@ -157,7 +154,7 @@ PY
     echo "  prefetch pid=$!"
 fi
 
-# ── 逐臂发射 (引擎: run_arm_only.sh = 选样→混合→守卫→dispatch) ──
+# ── 逐臂发射 (引擎: arm 阶段 = 选样→混合→守卫→dispatch) ──
 declare -a PIDS=() NAMES=()
 for spec in $ARMS; do
     case "$spec" in
@@ -169,7 +166,7 @@ for spec in $ARMS; do
         TARGET_TOKENS="$SCALE_TOKENS" TARGET_ARM_NODES="$NODES" \
         CLIMBMIX_MAX_SHARDS="$CAP" SEED="$SEED" \
         SKIP_AUTO_REPORT=1 DISPATCH_EXTRA="--job-timeout-h $TIMEOUT_H" \
-        bash runs/run_arm_only.sh > "$TRAINVAL_LOG_DIR/trainval_${ROUND_NAME}_${NAME}.log" 2>&1 &
+        bash runs/stages/arm.sh > "$TRAINVAL_LOG_DIR/trainval_${ROUND_NAME}_${NAME}.log" 2>&1 &
     PIDS+=($!); NAMES+=("$NAME")
     echo "  ${NAME} pid=$! (log: $TRAINVAL_LOG_DIR/trainval_${ROUND_NAME}_${NAME}.log)"
 done

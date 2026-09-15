@@ -81,7 +81,9 @@ climbmix/
 │   ├── embedding_performance.md        # 嵌入性能
 │   └── nan_investigation.md            # stella NaN 修复调查
 ├── runs/                                # Shell scripts
-│   ├── run_climbmix.sh                  # Main entry: full pipeline d20 search + d28 target (NPU)
+│   ├── continue.sh                     # 唯一执行入口: bash runs/continue.sh <stage> (stage=重入点)
+│   ├── stages/                         # 阶段实现 (scratch/search/mix/arm/eval)
+│   ├── run_climbmix.sh                  # 主管道引擎 (scratch 阶段背后; 高级直接路径)
 │   ├── speedrun_climbmix.sh             # End-to-end validation (minimal data + steps)
 │   ├── smoke_test.sh                    # Logic smoke test (CPU)
 │   └── train_base_model.sh             # Generate base checkpoint (NPU)
@@ -129,17 +131,19 @@ DEPTH=28  bash runs/train_base_model.sh   # d28 target checkpoint
 # Step 2: End-to-end validation first (minimal data, ~minutes)
 bash runs/speedrun_climbmix.sh
 
-# Step 3: Production experiments — quadmix-style stage scripts
-# (run_<stage> = 从该阶段开始; 主入口状态驱动: 从零/续跑=重跑同命令)
-# Each is self-contained: edit the env block at the top, then ./run it.
-#   LAUNCH=0 ./runs/xxx.sh  = dry-run (validate + print, no execution)
-bash runs/run_search.sh          # 新实验 (d20 搜索 + 两臂; 重跑同命令 = 续跑)
-bash runs/run_extend_search.sh       # 基于已有 d20 实验结果做增量实验 (HISTORY_RUN=旧run; 池/参数自动核验)
-bash runs/run_arm_only.sh             # 只跑臂 (自定义配比 WEIGHTS / 赢家重训 / 已有臂重发; 训完自动 CP4 全景报告)
-bash runs/run_eval_only.sh            # 只评测 (base 锚点; 未来 d20 re-eval)
+# Step 3: Production experiments — single entry, stage = re-entry point
+# (continue.sh <stage> = 从该阶段开始, 跑完其后所有步骤; 不是只跑该子步)
+# Each stage is self-contained: edit the env block at its top (runs/stages/<stage>.sh)
+#   LAUNCH=0 bash runs/continue.sh <stage>  = dry-run (validate + print, no execution)
+#   bash runs/continue.sh               = 打印阶段菜单
+bash runs/continue.sh scratch    # 全新实验 (池→聚类→d20搜索→混料→双臂→报告; 重跑同命令=续跑)
+bash runs/continue.sh search     # 从搜索步续: 注入历史 run 已测点做增量 d20 → 后续全链
+bash runs/continue.sh mix        # 从混料步续 (验证轮): 新预算/seed 重采样重混双臂 → 训练评测
+bash runs/continue.sh arm        # 从臂步续: 自定义配比 WEIGHTS / 赢家重训 / 已有臂重发
+bash runs/continue.sh eval       # 从评测步续: base 锚点; 未来 d20 re-eval
 # 一次性: 把 "obs_prod_base" (生产 OBS 根前缀) 写进 ~/.config/climbmix/remote_ma.json
 # (与 secret 同文件) — 之后所有发射免填 REMOTE_OBS_PREFIX (自动拼 /<run_name>)。
-# 原始入口 (上述脚本的底层引擎, 全参数 env 驱动):
+# 原始入口 (scratch 阶段的底层引擎, 全参数 env 驱动):
 bash runs/run_climbmix.sh
 ```
 

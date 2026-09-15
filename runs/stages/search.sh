@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════
-#  基于已有 d20 实验结果，进行增量实验
+#  阶段 search: 从搜索阶段重入 — 基于已有 d20 实验结果做增量实验
+#  (bash runs/continue.sh search; 跑完搜索后继续混料→双臂→报告全链)
 #
 #  本脚本做什么 (依次执行):
 #    1. 复用资格核验: 数据池身份(内容级 key) + 聚类 K + 训练/评测参数
 #       逐项与源 run 比对, 任一不符拒绝发射 (docs/reuse_design.md §2)
 #    2. 继承源 run 的池缓存 (cluster_cache 双文件) + 注入其全部已测点
-#    3. 调 run_search.sh 跑主实验:
+#    3. 调 scratch 阶段 (runs/stages/scratch.sh) 跑主实验:
 #       新实验轮次的 d20 搜索 (guided, 从历史地基上继续)
 #       → d28 两臂 (climb/random) → 报告
 #
@@ -18,10 +19,10 @@
 #    例: "20,10" = 新增第 1 轮 20 个 + 第 2 轮 10 个 d20 实验;
 #        历史 30 点地基 + 30 新点 → 总实验数 60, 其中要跑的 30.
 #
-#  用法: 编辑下方 EDIT 块 → ./runs/run_extend_search.sh
-#        干跑: LAUNCH=0 ./runs/run_extend_search.sh (校验+注入+打印, 不发射)
+#  用法: 编辑下方 EDIT 块 → bash runs/continue.sh search
+#        干跑: LAUNCH=0 bash runs/continue.sh search (校验+注入+打印, 不发射)
 #  · 注入只发生一次 (新 run 无 search_state 时); 中断后重跑本命令 = 续跑
-#  · 其余发射参数 (NPU_PER_EXP/REMOTE_*/...) 在 run_search.sh 的 EDIT 块
+#  · 其余发射参数 (NPU_PER_EXP/REMOTE_*/...) 在 scratch 阶段的 EDIT 块
 # ═══════════════════════════════════════════════════════════════════
 set -euo pipefail
 
@@ -31,11 +32,11 @@ HISTORY_RUN="${HISTORY_RUN:-}"       # 复用源 run; 留空 = 运行时列出�
 CONFIGS_PER_ITER="${CONFIGS_PER_ITER:-20,10}"   # 新增实验轮次 (不含历史)
 K_ENHANCED="${K_ENHANCED:-15}"       # 须与源池一致 (自动校验, 不一致拒绝发射)
 LAUNCH="${LAUNCH:-1}"                # 0=干跑
-# 传给 run_search.sh (其余发射参数在它的 EDIT 块):
+# 传给 scratch 阶段 (其余发射参数在它的 EDIT 块):
 export EXP_NAME K_ENHANCED
 # ───────────────────────────────────────────────────────────────────
 
-CLIMBMIX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CLIMBMIX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$CLIMBMIX_DIR"
 OUTPUT_DIR="$CLIMBMIX_DIR/result/${EXP_NAME}_current"
 
@@ -330,4 +331,4 @@ if [ "$LAUNCH" != "1" ]; then
 fi
 
 # 注入完成后进入主流程 (state 已在 → run_search.sh 走续跑路径, 从新实验第 1 轮开始)
-exec bash runs/run_search.sh
+exec bash runs/stages/scratch.sh

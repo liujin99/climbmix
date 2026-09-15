@@ -2,7 +2,7 @@
 """single-pass (epoch<=1) guard verification — measure_train_tokens /
 read_total_batch_size / check_single_pass / derive CLI e2e / fingerprint
 neutrality / wiring presence in run_climbmix.sh + dispatch + target_runner
-+ run_arm_only.sh (single-knob on the arm-reuse path) / proxy single-knob
++ the arm stage runs/stages/arm.sh (single-knob on the arm-reuse path) / proxy single-knob
 (PROXY_NUM_ITERATIONS derived from PROXY_TARGET_TOKENS) / large-scale
 sampler smoke (runs/run_large_scale_sample.sh).
 
@@ -287,8 +287,8 @@ check("shell: TARGET_TOKENS=0 aborts at launch",
       r.returncode != 0 and "invalid for target arms" in r.stdout + r.stderr,
       (r.stdout + r.stderr).strip()[:100])
 
-# ── 8. run_arm_only.sh: single-knob on the arm-reuse path ──────────────
-arm_sh = os.path.join(REPO, "runs/run_arm_only.sh")
+# ── 8. runs/stages/arm.sh: single-knob on the arm-reuse path ────────────
+arm_sh = os.path.join(REPO, "runs/stages/arm.sh")
 arm = open(arm_sh).read()
 check("arm-reuse: external TARGET_STEPS rejected (same rule)",
       "no longer a knob" in arm)

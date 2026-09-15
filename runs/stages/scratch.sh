@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════
-#  主实验: d20 搜索 + d28 两臂 (climb/random) + 报告
+#  阶段 scratch: 全新实验 — 从头跑完整条链 (bash runs/continue.sh scratch)
+#    池 → 聚类 → d20 搜索 → 混料 → 双臂 (climb/random) 训练评测 → 报告
+#
 #  状态驱动 — 同一命令覆盖两种情形, 重跑即续:
 #    · 从零:      新 EXP_NAME
 #    · 中断继续:  同 EXP_NAME 重跑本命令 (exp .done / search_state /
 #                 指纹三级断点自动续, 不从头来)
 #  复用历史实验热启动 (inject 旧 run 结果为新 run 地基):
-#    → runs/run_extend_search.sh
+#    → bash runs/continue.sh search
 #
-#  用法: 编辑下方 EDIT 块 → ./runs/run_search.sh
-#        后台: nohup ./runs/run_search.sh > run.log 2>&1 &
-#        干跑: LAUNCH=0 ./runs/run_search.sh (校验+打印, 不启动)
-#  其他阶段 (continue-from 家族): run_extend_search.sh (d20 增量续搜) /
-#    run_trainval.sh (d28 训练验证轮: 新预算/换seed, 住 trainval/ 子目录) /
-#    run_arm_only.sh (补一个臂) / run_eval_only.sh (只评测)
+#  用法: 编辑下方 EDIT 块 → bash runs/continue.sh scratch
+#        后台: nohup bash runs/continue.sh scratch > run.log 2>&1 &
+#        干跑: LAUNCH=0 bash runs/continue.sh scratch (校验+打印, 不启动)
+#  家族 (continue.sh <stage>, 每个 stage = 重入点, 跑完其后所有步骤):
+#    scratch(本) / search / mix / arm / eval
+#  主管道引擎: runs/run_climbmix.sh (本阶段 exec 它; 高级直接路径)
 # ═══════════════════════════════════════════════════════════════════
 set -euo pipefail
 
@@ -65,7 +67,7 @@ export EXP_NAME CONFIGS_PER_ITER K_ENHANCED ADAPTIVE_CONFIGS ADAPTIVE_COMPACT \
        REMOTE_FLAVOR REMOTE_POOL_NAME
 # ───────────────────────────────────────────────────────────────────
 
-CLIMBMIX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CLIMBMIX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$CLIMBMIX_DIR"
 OUTPUT_DIR="$CLIMBMIX_DIR/result/${EXP_NAME}_current"
 
@@ -83,7 +85,7 @@ if [ -f "$OUTPUT_DIR/search_state.json" ]; then
     echo "  → 检测到已有 search_state — 续跑 (三级断点, 不从头来)"
 else
     echo "  → 从零开始"
-    echo "    (要基于已有 d20 实验结果做增量实验? 用 runs/run_extend_search.sh)"
+    echo "    (要基于已有 d20 实验结果做增量实验? 用 bash runs/continue.sh search)"
 fi
 
 if [ "$LAUNCH" != "1" ]; then
