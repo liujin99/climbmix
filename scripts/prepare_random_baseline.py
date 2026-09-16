@@ -141,6 +141,36 @@ def _done_matches(done: dict, *, seed: int, requested_tokens: int,
     return done.get("weights_id") == weights_id
 
 
+def _write_shards(train_texts, val_texts, output_dir, n_shards, shard_size,
+                  rg_size, workers=None):
+    """Write the selection shards (+ the tail val shard) in a thread pool.
+
+    pyarrow write+compression releases the GIL, so workers overlap the
+    per-shard write cost that dominated the old serial loop (prod4
+    2026-09-16: 398 shards single-core on a 192-vCPU host). Content per
+    shard is index-sliced — parallel vs serial output is byte-identical
+    (asserted in test_prod4_fixes.py)."""
+    from multiprocessing.pool import ThreadPool
+
+    def _atomic_write(name, table, rg):
+        shard_path = os.path.join(output_dir, name)
+        tmp_path = shard_path + ".tmp.parquet"
+        pq.write_table(table, tmp_path, row_group_size=rg)
+        os.replace(tmp_path, shard_path)
+
+    def _write_train(i):
+        start = i * shard_size
+        end = min(start + shard_size, len(train_texts))
+        _atomic_write(f"shard_{i:05d}.parquet",
+                      pa.table({"text": train_texts[start:end]}), rg_size)
+
+    w = workers or max(1, int(os.environ.get("CLIMB_MIX_WRITE_WORKERS") or "8"))
+    with ThreadPool(w) as pool:
+        pool.map(_write_train, range(n_shards))
+    _atomic_write(f"shard_{n_shards:05d}.parquet",
+                  pa.table({"text": val_texts}), 1)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Baseline-arm STEM shards from cluster weights "
@@ -293,19 +323,8 @@ def main():
         for f in leftovers:
             os.remove(os.path.join(args.output_dir, f))
 
-    def _atomic_write(name, table, rg):
-        shard_path = os.path.join(args.output_dir, name)
-        tmp_path = shard_path + ".tmp.parquet"
-        pq.write_table(table, tmp_path, row_group_size=rg)
-        os.replace(tmp_path, shard_path)
-
-    for i in range(n_shards):
-        start = i * shard_size
-        end = min(start + shard_size, n_train)
-        shard_texts = train_texts[start:end]
-        _atomic_write(f"shard_{i:05d}.parquet", pa.table({"text": shard_texts}), rg_size)
-
-    _atomic_write(f"shard_{n_shards:05d}.parquet", pa.table({"text": val_texts}), 1)
+    _write_shards(train_texts, val_texts, args.output_dir, n_shards,
+                  shard_size, rg_size)
 
     with open(done_marker, "w") as f:
         json.dump({

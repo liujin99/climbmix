@@ -66,6 +66,7 @@ import re
 import subprocess
 import sys
 import time
+from multiprocessing.pool import ThreadPool
 from typing import Dict, List, Optional
 
 REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -217,23 +218,43 @@ def mixture_obs_uri(arm_root: str, data_dir: str) -> str:
 
 
 def upload_dir_if_missing(obs, local_dir: str, obs_uri: str,
-                          label: str) -> int:
-    """Idempotent per-file upload (stat skip). Returns files uploaded."""
+                          label: str, workers: int = None) -> int:
+    """Idempotent upload (per-file stat skip), parallel over the missing set.
+
+    prod4 2026-09-16: the sequential loop pushed 567-668 mixture shards
+    one-by-one through the FUSE mount — single-stream throughput, ~1% CPU
+    on a 192-vCPU submit host. The stat pass stays sequential (cheap
+    metadata reads); the MISSING set uploads through a thread pool (the
+    mount backend is plain filesystem copies — thread-safe; moxing/esdk
+    backends not documented thread-safe can pin CLIMB_UPLOAD_WORKERS=1).
+    Returns files uploaded."""
     if not os.path.isdir(local_dir):
         raise SystemExit(f"✗ {label}: local dir missing: {local_dir}")
     files = sorted(f for f in os.listdir(local_dir)
                    if os.path.isfile(os.path.join(local_dir, f)))
     if not files:
         raise SystemExit(f"✗ {label}: no files in {local_dir}")
-    n = 0
-    for f in files:
-        uri = f"{obs_uri.rstrip('/')}/{f}"
-        if not obs.stat(uri):
-            obs.upload_file(os.path.join(local_dir, f), uri)
-            n += 1
-            print(f"  [{label}] uploaded {f} ({n}/{len(files)})", flush=True)
+    base = obs_uri.rstrip("/")
+    missing = [f for f in files if not obs.stat(f"{base}/{f}")]
+    n = len(missing)
     if n == 0:
         print(f"  [{label}] all {len(files)} files already on OBS — skip")
+        return 0
+    w = workers if workers is not None else max(
+        1, int(os.environ.get("CLIMB_UPLOAD_WORKERS") or "8"))
+    if w == 1:
+        for i, f in enumerate(missing, 1):
+            obs.upload_file(os.path.join(local_dir, f), f"{base}/{f}")
+            print(f"  [{label}] uploaded {f} ({i}/{n})", flush=True)
+    else:
+        def _up(f):
+            obs.upload_file(os.path.join(local_dir, f), f"{base}/{f}")
+
+        with ThreadPool(w) as pool:
+            for i, _ in enumerate(pool.imap_unordered(_up, missing), 1):
+                if i % 50 == 0 or i == n:
+                    print(f"  [{label}] uploaded {i}/{n} missing "
+                          f"(of {len(files)} total)", flush=True)
     return n
 
 

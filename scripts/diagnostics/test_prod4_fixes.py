@@ -244,6 +244,102 @@ with tempfile.TemporaryDirectory() as td:
     check("clean: --force overrides the guard",
           not os.path.exists(os.path.join(td, "cfg11_mixed")))
 
+# ── 8. parallel writes/uploads: byte-identical determinism ────────────
+import glob as _glob  # noqa: E402
+import pyarrow as pa  # noqa: E402
+import pyarrow.parquet as pq  # noqa: E402
+from climbmix.remote.obs import MockObsStorage  # noqa: E402
+
+
+def _mk_text_dir(d, n_files, docs_per):
+    os.makedirs(d, exist_ok=True)
+    for i in range(n_files):
+        t = pa.table({"text": ["%s-f%d-d%d" % (os.path.basename(d), i, j)
+                               for j in range(docs_per)]})
+        pq.write_table(t, os.path.join(d, "shard_%05d.parquet" % i))
+
+
+def _dir_bytes(d):
+    return {f: open(os.path.join(d, f), "rb").read()
+            for f in sorted(os.listdir(d))}
+
+
+with tempfile.TemporaryDirectory() as td:
+    stem = os.path.join(td, "stem")
+    gen = os.path.join(td, "gen")
+    _mk_text_dir(stem, 4, 50)   # 3 train (last = val) = 150 train docs
+    _mk_text_dir(gen, 2, 50)    # 100 general docs
+    climb_files = sorted(_glob.glob(os.path.join(gen, "shard_*.parquet")))
+    outs = {}
+    for wk in ("1", "8"):
+        os.environ["CLIMB_MIX_WRITE_WORKERS"] = wk
+        od = os.path.join(td, "mixout_" + wk)
+        mix._mix_data_locked(stem, climb_files, od, num_output_files=5,
+                             batch_per_file=20, num_npu=8, stem_ratio=0.7)
+        outs[wk] = _dir_bytes(od)
+    os.environ.pop("CLIMB_MIX_WRITE_WORKERS", None)
+    check("mix_par: 5 train + val + .done produced",
+          sorted(outs["1"]) == sorted(
+              ["shard_%05d.parquet" % i for i in range(6)] + [".done"]),
+          str(sorted(outs["1"])))
+    check("mix_par: workers=8 byte-identical to serial workers=1",
+          outs["1"] == outs["8"])
+
+with tempfile.TemporaryDirectory() as td:
+    train = ["t%d" % i for i in range(250)]
+    val = ["v%d" % i for i in range(10)]
+    out = os.path.join(td, "out")
+    os.makedirs(out)
+    prepare._write_shards(train, val, out, n_shards=3, shard_size=100,
+                          rg_size=6, workers=8)
+    ref = os.path.join(td, "ref")
+    os.makedirs(ref)
+    for i in range(3):
+        s, e = i * 100, min((i + 1) * 100, 250)
+        pq.write_table(pa.table({"text": train[s:e]}),
+                       os.path.join(ref, "shard_%05d.parquet" % i),
+                       row_group_size=6)
+    pq.write_table(pa.table({"text": val}),
+                   os.path.join(ref, "shard_00003.parquet"), row_group_size=1)
+    check("prep_par: parallel _write_shards == serial reference",
+          _dir_bytes(out) == _dir_bytes(ref))
+
+with tempfile.TemporaryDirectory() as td:
+    local = os.path.join(td, "local")
+    os.makedirs(local)
+    for i in range(20):
+        with open(os.path.join(local, "shard_%05d.parquet" % i), "wb") as f:
+            f.write(b"d" * 100)
+    obs = MockObsStorage(os.path.join(td, "obs"))
+    for i in range(5):  # pre-place 5 -> dedup must skip them
+        obs.upload_file(os.path.join(local, "shard_%05d.parquet" % i),
+                        "obs://b/mix/shard_%05d.parquet" % i)
+    n = dispatch.upload_dir_if_missing(obs, local, "obs://b/mix", "t",
+                                       workers=8)
+    check("upload_par: returns missing count (15)", n == 15)
+    check("upload_par: all 20 present after parallel upload",
+          all(obs.stat("obs://b/mix/shard_%05d.parquet" % i)
+              for i in range(20)))
+    n2 = dispatch.upload_dir_if_missing(obs, local, "obs://b/mix", "t",
+                                        workers=8)
+    check("upload_par: dedup re-run returns 0", n2 == 0)
+    n3 = dispatch.upload_dir_if_missing(obs, local, "obs://b/mix2", "t",
+                                        workers=1)
+    check("upload_par: serial path (workers=1) works", n3 == 20)
+
+    class _FailObs(MockObsStorage):
+        def upload_file(self, p, u):
+            if "shard_00007" in u:
+                raise RuntimeError("boom")
+            super().upload_file(p, u)
+
+    try:
+        dispatch.upload_dir_if_missing(_FailObs(os.path.join(td, "obs3")),
+                                       local, "obs://b/mix", "t", workers=4)
+        check("upload_par: worker failure propagates loud", False)
+    except RuntimeError:
+        check("upload_par: worker failure propagates loud", True)
+
 # ── summary ───────────────────────────────────────────────────────────
 print()
 if FAILED:

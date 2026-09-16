@@ -398,8 +398,21 @@ def _mix_data_locked(stem_dir, climb_files, output_dir, num_output_files, batch_
     random.seed(42)
     current = []
     file_idx = 0
-    total = num_output_files * batch_per_file
-    pbar = tqdm(desc=f"  Mixing {Path(stem_dir).name}", total=total)
+    # Parallel parquet writes (2026-09-16): the interleave loop below is
+    # UNCHANGED and stays sequential — random.random() call order and the
+    # generator draw order are the determinism contract. Each finished
+    # batch is handed to a worker; pyarrow write+compression releases the
+    # GIL, so workers overlap the ~0.35s/shard write cost that dominated
+    # the old single-core profile (28K docs/s on a 192-vCPU host, ~1% CPU).
+    # Byte-identical to the serial writer, asserted in test_prod4_fixes.py.
+    write_workers = max(1, int(os.environ.get("CLIMB_MIX_WRITE_WORKERS") or "8"))
+    pbar = tqdm(desc=f"  Mixing {Path(stem_dir).name}",
+                total=num_output_files, unit="shard")
+    pool = ThreadPool(write_workers)
+    pending = []
+
+    def _write_batch(idx, texts):
+        _atomic_write(f"shard_{idx:05d}.parquet", pa.table({"text": texts}))
 
     try:
         while file_idx < num_output_files:
@@ -409,17 +422,22 @@ def _mix_data_locked(stem_dir, climb_files, output_dir, num_output_files, batch_
                 txt = next(climb_gen)
 
             current.append(txt)
-            pbar.update(1)
 
             if len(current) >= batch_per_file:
-                _atomic_write(f"shard_{file_idx:05d}.parquet", pa.table({"text": current}))
+                pending.append(pool.apply_async(_write_batch,
+                                                (file_idx, current)))
+                pbar.update(1)
                 current = []
                 file_idx += 1
     finally:
         if current and file_idx < num_output_files:
-            _atomic_write(f"shard_{file_idx:05d}.parquet", pa.table({"text": current}))
+            pending.append(pool.apply_async(_write_batch, (file_idx, current)))
+            pbar.update(1)
             file_idx += 1
-
+        for fut in pending:
+            fut.get()  # write failures propagate BEFORE any .done marker
+        pool.close()
+        pool.join()
         del stem_gen
         del climb_gen
         pbar.close()
