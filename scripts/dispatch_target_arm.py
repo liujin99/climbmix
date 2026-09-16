@@ -217,6 +217,29 @@ def mixture_obs_uri(arm_root: str, data_dir: str) -> str:
     return f"{arm_root}/mixture_data_k{shard_content_key(data_dir)}"
 
 
+def _default_upload_workers(obs) -> int:
+    """Upload concurrency default, backend-aware + env-overridable.
+
+    The mount backend (production submit host: the OBS bucket FUSE-mounted
+    as a filesystem) and the filesystem-backed MockObs are plain copies —
+    safe at any concurrency; the real ceiling is the OBS link / mount
+    daemon, calibrated empirically (the progress lines print MB/s). The
+    esdk/moxing SDK backends share ONE client object across calls (thread
+    safety not documented) — clamped to 4. CLIMB_UPLOAD_WORKERS beats
+    everything (prod4 measurement: the old serial loop did 600 files in
+    10+ min ~= one ~28MB/s stream)."""
+    env = os.environ.get("CLIMB_UPLOAD_WORKERS")
+    if env:
+        try:
+            return max(1, int(env))
+        except ValueError:
+            pass
+    impl = getattr(obs, "impl", "")
+    if impl in ("moxing", "esdk"):
+        return 4
+    return 16
+
+
 def upload_dir_if_missing(obs, local_dir: str, obs_uri: str,
                           label: str, workers: int = None) -> int:
     """Idempotent upload (per-file stat skip), parallel over the missing set.
@@ -224,9 +247,7 @@ def upload_dir_if_missing(obs, local_dir: str, obs_uri: str,
     prod4 2026-09-16: the sequential loop pushed 567-668 mixture shards
     one-by-one through the FUSE mount — single-stream throughput, ~1% CPU
     on a 192-vCPU submit host. The stat pass stays sequential (cheap
-    metadata reads); the MISSING set uploads through a thread pool (the
-    mount backend is plain filesystem copies — thread-safe; moxing/esdk
-    backends not documented thread-safe can pin CLIMB_UPLOAD_WORKERS=1).
+    metadata reads); the MISSING set uploads through a thread pool.
     Returns files uploaded."""
     if not os.path.isdir(local_dir):
         raise SystemExit(f"✗ {label}: local dir missing: {local_dir}")
@@ -240,8 +261,11 @@ def upload_dir_if_missing(obs, local_dir: str, obs_uri: str,
     if n == 0:
         print(f"  [{label}] all {len(files)} files already on OBS — skip")
         return 0
-    w = workers if workers is not None else max(
-        1, int(os.environ.get("CLIMB_UPLOAD_WORKERS") or "8"))
+    w = workers if workers is not None else _default_upload_workers(obs)
+    missing_bytes = sum(os.path.getsize(os.path.join(local_dir, f))
+                        for f in missing)
+    mb = missing_bytes / 2 ** 20
+    t0 = time.time()
     if w == 1:
         for i, f in enumerate(missing, 1):
             obs.upload_file(os.path.join(local_dir, f), f"{base}/{f}")
@@ -253,8 +277,14 @@ def upload_dir_if_missing(obs, local_dir: str, obs_uri: str,
         with ThreadPool(w) as pool:
             for i, _ in enumerate(pool.imap_unordered(_up, missing), 1):
                 if i % 50 == 0 or i == n:
+                    dt = time.time() - t0
+                    rate = mb * i / n / max(dt, 1e-9)
                     print(f"  [{label}] uploaded {i}/{n} missing "
-                          f"(of {len(files)} total)", flush=True)
+                          f"(of {len(files)} total) — {rate:.0f} MB/s, "
+                          f"ETA {(n - i) * dt / max(i, 1):.0f}s", flush=True)
+    dt = time.time() - t0
+    print(f"  [{label}] upload done: {n} files, {mb:.0f} MB in {dt:.0f}s "
+          f"({mb / max(dt, 1e-9):.0f} MB/s over {w} workers)", flush=True)
     return n
 
 

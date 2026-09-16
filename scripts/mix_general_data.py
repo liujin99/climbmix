@@ -405,7 +405,7 @@ def _mix_data_locked(stem_dir, climb_files, output_dir, num_output_files, batch_
     # GIL, so workers overlap the ~0.35s/shard write cost that dominated
     # the old single-core profile (28K docs/s on a 192-vCPU host, ~1% CPU).
     # Byte-identical to the serial writer, asserted in test_prod4_fixes.py.
-    write_workers = max(1, int(os.environ.get("CLIMB_MIX_WRITE_WORKERS") or "8"))
+    write_workers = max(1, int(os.environ.get("CLIMB_MIX_WRITE_WORKERS") or "16"))
     pbar = tqdm(desc=f"  Mixing {Path(stem_dir).name}",
                 total=num_output_files, unit="shard")
     pool = ThreadPool(write_workers)

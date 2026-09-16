@@ -340,6 +340,25 @@ with tempfile.TemporaryDirectory() as td:
     except RuntimeError:
         check("upload_par: worker failure propagates loud", True)
 
+# ── 9. upload worker defaults: backend-aware, env-first ───────────────
+from types import SimpleNamespace  # noqa: E402
+
+check("upload_def: plain/unknown obs (no impl attr) -> 16",
+      dispatch._default_upload_workers(SimpleNamespace()) == 16)
+check("upload_def: mount backend -> 16",
+      dispatch._default_upload_workers(SimpleNamespace(impl="mount")) == 16)
+check("upload_def: esdk (shared client) -> clamped 4",
+      dispatch._default_upload_workers(SimpleNamespace(impl="esdk")) == 4)
+check("upload_def: moxing (shared client) -> clamped 4",
+      dispatch._default_upload_workers(SimpleNamespace(impl="moxing")) == 4)
+os.environ["CLIMB_UPLOAD_WORKERS"] = "3"
+check("upload_def: env beats backend default",
+      dispatch._default_upload_workers(SimpleNamespace(impl="esdk")) == 3)
+os.environ["CLIMB_UPLOAD_WORKERS"] = "not-a-number"
+check("upload_def: garbage env falls back to backend default",
+      dispatch._default_upload_workers(SimpleNamespace(impl="mount")) == 16)
+os.environ.pop("CLIMB_UPLOAD_WORKERS", None)
+
 # ── summary ───────────────────────────────────────────────────────────
 print()
 if FAILED:

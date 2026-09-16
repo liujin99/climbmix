@@ -164,7 +164,7 @@ def _write_shards(train_texts, val_texts, output_dir, n_shards, shard_size,
         _atomic_write(f"shard_{i:05d}.parquet",
                       pa.table({"text": train_texts[start:end]}), rg_size)
 
-    w = workers or max(1, int(os.environ.get("CLIMB_MIX_WRITE_WORKERS") or "8"))
+    w = workers or max(1, int(os.environ.get("CLIMB_MIX_WRITE_WORKERS") or "16"))
     with ThreadPool(w) as pool:
         pool.map(_write_train, range(n_shards))
     _atomic_write(f"shard_{n_shards:05d}.parquet",
