@@ -84,7 +84,8 @@ from climbmix.pipeline.nanochat_cmds import (  # noqa: E402
     build_target_mid_train_cmd, build_target_eval_cmd)
 from climbmix.remote.remote_executor import RemoteConfig, RemoteExecutor  # noqa: E402
 from climbmix.sampling.single_pass import (  # noqa: E402
-    check_single_pass, measure_train_tokens, read_total_batch_size)
+    check_single_pass, measure_train_tokens, read_meta_key,
+    read_total_batch_size)
 from climbmix.utils.io_utils import shard_content_key  # noqa: E402
 
 
@@ -848,6 +849,53 @@ def main() -> int:
         )
     else:
         upload_dir_if_missing(obs, data_dir, mixture_uri, arm)
+        # ── device-batch identity guard (prod4 2026-09-16) ──────────────
+        # mid_train inherits total_batch_size and max_seq_len from the base
+        # meta; the batch identity is
+        #   total_batch = node_count*8 * device_batch * max_seq_len
+        # and TARGET_STEPS is derived from total_batch — so a
+        # shape-mismatched device_batch (e.g. reusing a 16-node snapshot's
+        # MID_DEVICE_BATCH_SIZE=2 at 8 nodes) silently halves the token
+        # budget while the anneal schedule runs unchanged: 3B becomes 1.5B
+        # and nothing in the logs says so. The correct value is a unique
+        # integer derivable from the same meta mid_train reads — refuse on
+        # mismatch and print it. Escape hatch for deliberate non-standard
+        # batch experiments: MID_DEVICE_BATCH_OK=1.
+        if not os.environ.get("MID_DEVICE_BATCH_OK"):
+            _meta_dir = os.path.join(nanochat_base_dir, "base_checkpoints",
+                                     f"d{target_depth}")
+            _tbs = args.total_batch_size or read_total_batch_size(_meta_dir)
+            _mss = read_meta_key(_meta_dir, "max_seq_len")
+            _micro_eff = (os.environ.get("MID_DEVICE_BATCH_SIZE")
+                          or launch_env.get("MID_DEVICE_BATCH_SIZE") or "1")
+            if _tbs and _mss:
+                _world = node_count * 8 * _mss
+                if _tbs % _world == 0:
+                    _micro_expected = _tbs // _world
+                    try:
+                        _micro_given = int(str(_micro_eff).strip())
+                    except ValueError:
+                        _micro_given = -1
+                    if _micro_given != _micro_expected:
+                        raise SystemExit(
+                            f"✗ [{arm}] MID_DEVICE_BATCH_SIZE={_micro_eff} "
+                            f"does not satisfy the batch identity: "
+                            f"total_batch={_tbs:,} = {node_count} nodes × 8 "
+                            f"ranks × device_batch × max_seq_len={_mss} → "
+                            f"device_batch must be {_micro_expected}. A "
+                            f"mismatched value silently trains "
+                            f"{_micro_given / _micro_expected:.2f}× the "
+                            f"token budget while the anneal schedule runs "
+                            f"unchanged. Rerun with "
+                            f"MID_DEVICE_BATCH_SIZE={_micro_expected} "
+                            f"(or MID_DEVICE_BATCH_OK=1 if this mismatch is "
+                            f"deliberate).")
+                else:
+                    print(f"  ⚠ [{arm}] total_batch={_tbs:,} not divisible "
+                          f"by node_count×8×max_seq_len={_world:,} — "
+                          f"mid_train will bump total_batch; verify this is "
+                          f"intended (see TODO #9 for the non-power-of-2 "
+                          f"node walls)")
         container_data_dir = os.path.join(work_dir, "mixture_data")
         mid_cmd = build_target_mid_train_cmd(
             run_name=f"{arm}_mid",

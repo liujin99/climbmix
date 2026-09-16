@@ -111,6 +111,40 @@ def read_total_batch_size(ckpt_dir: Optional[str]) -> Optional[int]:
     return candidates[0][2]
 
 
+def read_meta_key(ckpt_dir: Optional[str], key: str) -> Optional[int]:
+    """A single int-valued key from the ckpt's meta_*.json files.
+
+    Same resolution policy as read_total_batch_size (newest mtime wins,
+    disagreement warns loudly, missing => None). Used for the keys
+    mid_train INHERITS from the pretrain meta (max_seq_len,
+    device_batch_size) — the device-batch guard derives from them, so a
+    silent wrong value would silently mis-derive the guard itself.
+    """
+    if not ckpt_dir:
+        return None
+    candidates = []
+    for path in glob.glob(os.path.join(ckpt_dir, "meta_*.json")):
+        try:
+            with open(path) as f:
+                meta = json.load(f)
+        except (OSError, ValueError):
+            continue
+        val = meta.get(key)
+        if val:
+            candidates.append(
+                (os.path.getmtime(path), os.path.basename(path), int(val)))
+    if not candidates:
+        return None
+    values = {c[2] for c in candidates}
+    if len(values) == 1:
+        return candidates[0][2]
+    candidates.sort(reverse=True)
+    print(f"  ⚠ meta_*.json disagree on {key} in {ckpt_dir}: "
+          f"{', '.join(f'{c[1]}={c[2]:,}' for c in sorted(candidates, key=lambda c: c[1]))} "
+          f"— using {candidates[0][1]} (newest mtime); verify the ckpt dir")
+    return candidates[0][2]
+
+
 def derive_num_iterations(target_tokens: int, total_batch_size: int) -> int:
     """steps = floor(target_tokens / total_batch_size) — single-knob form.
 
