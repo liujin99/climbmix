@@ -561,7 +561,8 @@ def main() -> int:
 
     if args.node_count is not None:
         _validate_node_count(args.node_count, "--node-count")
-    if args.arm == "base_eval_check" and args.node_count > 1:
+    if args.arm == "base_eval_check" and args.node_count is not None \
+            and args.node_count > 1:
         raise SystemExit("✗ --arm base_eval_check is single-node (eval-only "
                          "anchor; eval is 8-rank calibrated on node 0)")
 
