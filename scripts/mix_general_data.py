@@ -29,6 +29,10 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from tqdm import tqdm
 
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+from climbmix.utils.io_utils import shard_content_key  # noqa: E402
+
 # HF reachability (server findings 2026-09-12/15): the egress proxy
 # CONNECT-tunnels to huggingface.co return 503 bursts (90+ consecutive); only
 # hf-mirror.com is reliable. run_climbmix.sh exports HF_ENDPOINT, but the
@@ -282,6 +286,25 @@ def mix_data(stem_dir, climb_files, output_dir, num_output_files, batch_per_file
                                 num_npu, stem_ratio, allow_general_repeat)
 
 
+def _mix_done_stale(done: dict, *, ratio: float, stem_key: str,
+                    general_key: str) -> bool:
+    """.done staleness guard for a mixed output dir.
+
+    True = stale (remix). Identity = stem_ratio + the stem shard set +
+    the general (ClimbMix) shard set — both sides of the mix. Legacy
+    .done files (pre-2026-09-16, no keys) are unverifiable → stale.
+    Catches the local twin of the OBS landmine: same output dir, new
+    budget upstream (fresh {arm}_shards) or a changed general supply
+    (e.g. the +1 safety shard from calc_climbmix_count) must not
+    silently reuse the old mixture.
+    """
+    if done.get("stem_ratio") is None or float(done["stem_ratio"]) != ratio:
+        return True
+    if done.get("stem_key") != stem_key:
+        return True
+    return done.get("general_key") != general_key
+
+
 def _mix_data_locked(stem_dir, climb_files, output_dir, num_output_files, batch_per_file=BATCH_PER_FILE, num_npu=8, stem_ratio=None, allow_general_repeat=False):
     if not climb_files:
         raise ValueError("No ClimbMix files available. Download failed?")
@@ -295,13 +318,17 @@ def _mix_data_locked(stem_dir, climb_files, output_dir, num_output_files, batch_
     if os.path.exists(done_marker):
         with open(done_marker) as f:
             done_info = json.load(f)
-        recorded = done_info.get("stem_ratio")
-        # A .done from a different ratio is stale output (the pipeline
-        # fingerprint normally archives the dir before we get here; this
-        # guard covers direct CLI reuse of an output dir).
-        if recorded is None or float(recorded) != ratio:
-            print(f"  .done records stem_ratio={recorded}, requested {ratio} "
-                  f"-> remixin (stale output)")
+        # A .done from a different ratio / stem set / general set is stale
+        # output (the pipeline fingerprint normally archives the dir before
+        # we get here; this guard covers direct CLI reuse of an output dir).
+        stem_key = shard_content_key(stem_dir)
+        general_key = shard_content_key(os.path.dirname(climb_files[0]))
+        if _mix_done_stale(done_info, ratio=ratio, stem_key=stem_key,
+                           general_key=general_key):
+            print(f"  .done identity mismatch (ratio={done_info.get('stem_ratio')}"
+                  f" vs {ratio}, stem_key={done_info.get('stem_key', 'legacy')}"
+                  f" vs {stem_key}, general_key={done_info.get('general_key', 'legacy')}"
+                  f" vs {general_key}) -> remixin (stale output)")
         else:
             print(f"  Mix already complete (.done), skipping: {output_dir}")
             return done_info.get("n_train_shards", 0)
@@ -407,7 +434,10 @@ def _mix_data_locked(stem_dir, climb_files, output_dir, num_output_files, batch_
     with open(done_marker, "w") as f:
         json.dump({"n_train_shards": file_idx, "has_val": bool(val_file),
                     "batch_per_file": batch_per_file, "rg_size": rg_size,
-                    "stem_ratio": ratio}, f)
+                    "stem_ratio": ratio,
+                    "stem_key": shard_content_key(stem_dir),
+                    "general_key": shard_content_key(
+                        os.path.dirname(climb_files[0]))}, f)
 
     print(f"  Done: {file_idx} train + 1 val shard -> {output_dir}")
     return file_idx

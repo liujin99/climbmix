@@ -84,6 +84,7 @@ from climbmix.pipeline.nanochat_cmds import (  # noqa: E402
 from climbmix.remote.remote_executor import RemoteConfig, RemoteExecutor  # noqa: E402
 from climbmix.sampling.single_pass import (  # noqa: E402
     check_single_pass, measure_train_tokens, read_total_batch_size)
+from climbmix.utils.io_utils import shard_content_key  # noqa: E402
 
 
 # ── helpers ──────────────────────────────────────────────────────────────
@@ -179,6 +180,40 @@ def run_logged(argv: List[str], env: Optional[Dict[str, str]] = None,
     r = subprocess.run(argv, env=env)
     if r.returncode != 0:
         raise SystemExit(f"✗ command failed (rc={r.returncode}): {' '.join(argv)}")
+
+
+def mix_subprocess_env(base_env: Dict[str, str], launch_env: Dict[str, str],
+                       nanochat_dir: str) -> Dict[str, str]:
+    """Env for the random-arm mix subprocess.
+
+    The mix downloads ClimbMix shards over HTTP; a bare-shell dispatch (no
+    HF_ENDPOINT in the environment) hits the corporate proxy with 503
+    loops (prod3 2026-09-15: the random-arm mix hung overnight on
+    shard_06522/06528, urllib3 Tunnel 503). Priority: caller env >
+    run's launch_env snapshot > hf-mirror house default.
+    """
+    env = dict(base_env)
+    env["NANOCHAT_REPO"] = nanochat_dir
+    env.setdefault("HF_ENDPOINT",
+                   launch_env.get("HF_ENDPOINT") or "https://hf-mirror.com")
+    return env
+
+
+def mixture_obs_uri(arm_root: str, data_dir: str) -> str:
+    """OBS URI for the arm's mixture, content-addressed when data exists.
+
+    upload_dir_if_missing stat-skips per FILE NAME — an unkeyed
+    ``{arm_root}/mixture_data`` aliases every retry of the arm name onto
+    whatever was uploaded first (prod4 2026-09-16: a 3B re-dispatch would
+    have silently trained on the 1136 6B shards from the failed first
+    wave). Keying the dir by the shard set's content key closes that:
+    same mixture -> same key -> dedup still works; any config change
+    (budget/weights/seed/pool) -> new key -> fresh upload. base_check
+    passes no data_dir and keeps the legacy unkeyed path (uploads nothing).
+    """
+    if not data_dir:
+        return f"{arm_root}/mixture_data"
+    return f"{arm_root}/mixture_data_k{shard_content_key(data_dir)}"
 
 
 def upload_dir_if_missing(obs, local_dir: str, obs_uri: str,
@@ -612,8 +647,8 @@ def main() -> int:
                 print("  [random] baseline shards already prepared (.done)")
             random_mixed = os.path.join(output_dir, "random_mixed")
             if not os.path.isfile(os.path.join(random_mixed, ".done")):
-                env_mix = dict(os.environ)
-                env_mix["NANOCHAT_REPO"] = nanochat_dir
+                env_mix = mix_subprocess_env(os.environ, launch_env,
+                                             nanochat_dir)
                 run_logged([
                     "python3", os.path.join(climbmix_dir, "scripts",
                                             "mix_general_data.py"),
@@ -685,7 +720,11 @@ def main() -> int:
 
     prefix = remote.obs_prefix.rstrip("/")
     arm_root = f"{prefix}/target_arms/{arm}"
-    mixture_uri = f"{arm_root}/mixture_data"
+    mixture_uri = mixture_obs_uri(arm_root, data_dir)
+    if data_dir:
+        print(f"  [{arm}] OBS mixture content-keyed: {mixture_uri} "
+              f"(retries with a different budget/weights/seed upload "
+              f"fresh — no silent reuse of stale shards)")
     result_uri = f"{arm_root}/result"
 
     # ── d28 asset: ensure on OBS (one-time bootstrap; flock-serialized —

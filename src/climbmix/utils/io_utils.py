@@ -8,9 +8,43 @@ never a half-finished file that looks "complete" to the skip logic on the
 next restart.
 """
 
+import hashlib
 import json
 import math
 import os
+
+
+def shard_content_key(directory: str, length: int = 12) -> str:
+    """Content-addressed key over the shard_*.parquet set in a directory.
+
+    sha1 of sorted "name:size" lines — any change in the shard set (count,
+    names, sizes) moves the key. Cheap: one listdir + stat pass, no file
+    content is read (name+size is the identity contract between pipeline
+    stages, same blind spot class as the stage fingerprints: a same-size
+    content swap is not detected).
+
+    Consumers:
+      - dispatch_target_arm: OBS mixture dir keying (retry with a different
+        budget/weights/seed must NOT stat-skip onto stale OBS shards — the
+        prod4 2026-09-16 landmine: mixture_uri had no content key, so a
+        3B retry would silently train on the 6B shards uploaded earlier)
+      - prepare_random_baseline / mix_general_data: .done staleness guards
+        (the local twins of the same bug — a .done skip that does not
+        compare the config identity silently reuses old derived data).
+    """
+    if not os.path.isdir(directory):
+        raise ValueError(f"not a directory: {directory}")
+    entries = []
+    for name in os.listdir(directory):
+        if name.startswith("shard_") and name.endswith(".parquet"):
+            entries.append((name, os.path.getsize(os.path.join(directory, name))))
+    if not entries:
+        raise ValueError(f"no shard_*.parquet in {directory}")
+    entries.sort()
+    h = hashlib.sha1()
+    for name, size in entries:
+        h.update(f"{name}:{size}\n".encode("utf-8"))
+    return h.hexdigest()[:length]
 
 
 def _finite_json(obj):

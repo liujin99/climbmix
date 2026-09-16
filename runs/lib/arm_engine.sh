@@ -60,11 +60,40 @@ echo "═══ arm only: ${ARM_NAME} @ ${RUN_DIR} ═══"
 [[ "$ARM_NAME" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "✗ ARM_NAME 必须匹配 [A-Za-z0-9_-]+ (进文件名/tag/OBS 路径)"; exit 1; }
 [ -d "$RUN_DIR" ] || { echo "✗ RUN_DIR 不存在: ${RUN_DIR}"; exit 1; }
 
+# ── HF 镜像防裸壳 (战后清单 #2): mix 拉取 ClimbMix 分片需要 HF_ENDPOINT;
+#    优先级 shell env > run 的 launch_env 快照 > hf-mirror 默认 ──
+if [ -z "${HF_ENDPOINT:-}" ]; then
+    HF_EP_LE="$(python3 - "$RUN_DIR" <<'PY'
+import json, os, sys
+try:
+    print(json.load(open(os.path.join(sys.argv[1], "launch_env.json"))).get("HF_ENDPOINT", ""))
+except (FileNotFoundError, ValueError):
+    print("")
+PY
+)"
+    if [ -n "$HF_EP_LE" ]; then
+        export HF_ENDPOINT="$HF_EP_LE"
+    else
+        export HF_ENDPOINT="https://hf-mirror.com"
+    fi
+fi
+
 MIXED="$RUN_DIR/${ARM_NAME}_mixed"
 
 # ── 选点 + 混合 (仅当 WEIGHTS 给出; 每步 .done 幂等) ──
 if [ -n "$WEIGHTS" ]; then
     echo "  weights: ${WEIGHTS}"
+
+    # ── 磁盘预算 preflight (战后清单 #8; ARM_DISK_CHECK=0 关闭) ──
+    # prod4 教训: 3×6B 臂全链本地落地 ~100G 打穿 /work, winner 混到 95% 阵亡。
+    if [ "${ARM_DISK_CHECK:-1}" = "1" ]; then
+        python3 scripts/check_disk_budget.py \
+            --run-dir "$RUN_DIR" --arm "$ARM_NAME" \
+            --target-tokens "$TARGET_TOKENS" \
+            ${ARM_DISK_HEADROOM_X:+--headroom-x "$ARM_DISK_HEADROOM_X"} \
+            ${ARM_DISK_MIN_FREE_GB:+--min-free-gb "$ARM_DISK_MIN_FREE_GB"} \
+            || { echo "✗ 磁盘预算不足 — 清理 (scripts/clean_derived_data.py) 或 ARM_DISK_CHECK=0 自担风险"; exit 1; }
+    fi
 
     CACHE="$RUN_DIR/cluster_cache.npz"
     DEADLINE=$(( $(date +%s) + WAIT_CACHE_MIN * 60 ))
@@ -178,6 +207,15 @@ fi
 python3 scripts/dispatch_target_arm.py \
     --arm "$ARM_NAME" --output-dir "$RUN_DIR" \
     "${EXTRA[@]+"${EXTRA[@]}"}"
+
+# ── 成功后本地清理 (战后清单 #8; CLEANUP_LOCAL=0 关闭) ──
+# OBS 已有内容键化副本 (mixture_data_k*); 本地 {arm}_shards/{arm}_mixed
+# 每臂 ~31G (3B), 不清就重演 prod4 磁盘打穿。守卫在脚本内 (未成功不删)。
+if [ "${CLEANUP_LOCAL:-1}" = "1" ]; then
+    python3 scripts/clean_derived_data.py \
+        --run-dir "$RUN_DIR" --arms "$ARM_NAME" --apply \
+        || echo "  ⚠ 本地清理未执行 (不影响臂结果; 手动补: python3 scripts/clean_derived_data.py --run-dir ${RUN_DIR} --arms ${ARM_NAME} --apply)"
+fi
 
 if [ "${SKIP_AUTO_REPORT:-0}" = "1" ]; then
     echo "  (SKIP_AUTO_REPORT=1 — 报告由调用方统一渲染)"

@@ -45,6 +45,7 @@ across ranks, so every shard must contain at least num_npu row groups
 """
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -100,6 +101,46 @@ def _parse_weights(spec: str, K: int) -> np.ndarray:
     return arr / arr.sum()
 
 
+def _weights_identity(spec: str) -> str:
+    """Cheap, honest identity of the --weights input.
+
+    A comma list is hashed as the string; a file path (JSON array /
+    optimal_mixture_weights.json) is hashed by CONTENT — the prod4 winner
+    weights file is passed by path and its content is what selects the
+    docs. "" = uniform baseline. Deliberately computed without loading
+    the cluster cache: the .done skip path must stay cheap.
+    """
+    if not spec:
+        return "uniform"
+    if os.path.isfile(spec):
+        with open(spec, "rb") as f:
+            return "file:" + hashlib.sha256(f.read()).hexdigest()[:16]
+    return "str:" + hashlib.sha256(spec.encode("utf-8")).hexdigest()[:16]
+
+
+def _done_matches(done: dict, *, seed: int, requested_tokens: int,
+                  weights_id: str) -> bool:
+    """.done identity guard: same seed, same requested budget, same weights.
+
+    Legacy .done files (pre-2026-09-16) lack weights_id — unverifiable,
+    treated as a mismatch (fail loud; remove the dir or use a new
+    ARM_NAME). requested_target_tokens is compared raw; the legacy
+    resolved target_tokens field is accepted only when it equals the
+    raw request (nonzero budgets — the only mode arm_engine uses).
+    """
+    if done.get("seed") != seed:
+        return False
+    rec_req = done.get("requested_target_tokens")
+    if rec_req is not None:
+        if rec_req != requested_tokens:
+            return False
+    else:
+        rec_tok = done.get("target_tokens")
+        if requested_tokens and rec_tok != requested_tokens:
+            return False
+    return done.get("weights_id") == weights_id
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Baseline-arm STEM shards from cluster weights "
@@ -126,8 +167,29 @@ def main():
 
     done_marker = os.path.join(args.output_dir, ".done")
     if os.path.exists(done_marker):
-        print(f"  Random baseline already complete (.done), skipping")
-        return
+        # Identity guard (2026-09-16): an unconditional skip here was the
+        # LOCAL twin of the OBS stale-mixture landmine — same output dir,
+        # different seed/budget/weights -> silently reuse the old shards.
+        try:
+            with open(done_marker) as f:
+                done_info = json.load(f)
+        except (OSError, ValueError):
+            done_info = {}
+        weights_id = _weights_identity(args.weights)
+        if _done_matches(done_info, seed=args.seed,
+                         requested_tokens=args.target_tokens,
+                         weights_id=weights_id):
+            print(f"  Random baseline already complete (.done), skipping")
+            return
+        raise SystemExit(
+            "ERROR: .done in the output dir was built for a DIFFERENT config "
+            f"(recorded seed={done_info.get('seed')}, "
+            f"tokens={done_info.get('requested_target_tokens', done_info.get('target_tokens'))}, "
+            f"weights_id={done_info.get('weights_id', 'legacy')} vs requested "
+            f"seed={args.seed}, tokens={args.target_tokens}, "
+            f"weights_id={weights_id}). Arm dirs are name-addressed: use a "
+            "new ARM_NAME for a new config, or remove the output dir to "
+            "rebuild.")
 
     random.seed(args.seed)
 
@@ -250,6 +312,8 @@ def main():
             "n_train_shards": n_shards, "val_docs": val_n,
             "rg_size": rg_size, "num_npu": args.num_npu, "seed": args.seed,
             "K": K, "target_tokens": target_tokens,
+            "requested_target_tokens": args.target_tokens,
+            "weights_id": _weights_identity(args.weights),
             "planned_weights": [float(w) for w in weights_vec],
             "effective_doc_shares": [d / n for d in cluster_docs],
             "cluster_docs": cluster_docs,
