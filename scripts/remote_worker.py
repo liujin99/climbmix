@@ -845,6 +845,26 @@ def main() -> int:
                     return mid_rc
                 return finish(mid_rc)
 
+        # ── salvage arming (prod4 2026-09-16 postmortem, job 2e58bdab):
+        # a 128-rank eval crash on one node fails the whole job, and the
+        # platform teardown raced the post-eval uploads — 111 min of
+        # training lost with mid_train_rc unrecorded (-1/-1), so the
+        # dispatch salvage contract (mid_train_rc == 0) never armed. Arm
+        # it the moment training is known good: result.json is tiny and
+        # lands right here (eval_rc absent => -1 => salvage path);
+        # finish() rewrites the full dict later. Master-owned — peers
+        # never write result.json (a second writer would clobber).
+        if not eval_only and node_rank == 0 and mid_rc == 0:
+            try:
+                _local = os.path.join(work, "result.json")
+                with open(_local, "w") as f:
+                    json.dump(res, f, indent=2)
+                storage.upload_file(_local, f"{result_uri}/result.json")
+                print("[worker] salvage armed: result.json "
+                      "(mid_train_rc=0) uploaded pre-eval", flush=True)
+            except Exception:
+                traceback.print_exc()  # best-effort; finish() rewrites it
+
         # ── model relay (multi-node; see the relay section above). Any
         # miss degrades to eval_world=8. Disabled entirely by
         # CLIMBMIX_EVAL_RELAY=0. eval_only specs never get here (they
@@ -870,6 +890,25 @@ def main() -> int:
             else:
                 eval_world = _relay_pull(
                     master_addr, master_port + 2, node_rank, tag_dir) or 8
+
+        # ── checkpoint to OBS BEFORE eval (same postmortem). Placed after
+        # the relay: the peers' 180 s relay-connect window cannot absorb a
+        # GB-scale upload, but once the relay completes the peers wait at
+        # the eval rendezvous, which tolerates a minutes-long master
+        # absence — the platform teardown does not tolerate losing the
+        # race. A storage flake here must not kill the arm: fall through
+        # to the post-eval/exception fallbacks instead.
+        if not eval_only and node_rank == 0 and mid_rc == 0 \
+                and s.get("upload_checkpoint", True) \
+                and not res.get("checkpoint_uploaded"):
+            try:
+                _ckpt_dir = os.path.join(base, "mid_checkpoints", tag)
+                print(f"[worker] uploading mid checkpoint (pre-eval) -> "
+                      f"{result_uri}/mid_checkpoint", flush=True)
+                storage.upload_dir(_ckpt_dir, f"{result_uri}/mid_checkpoint")
+                res["checkpoint_uploaded"] = True
+            except Exception:
+                traceback.print_exc()
 
         if node_count > 1 and node_rank != 0:
             if eval_world != 32:
@@ -957,12 +996,13 @@ def main() -> int:
                     traceback.print_exc()  # log delivery is best-effort
 
         # Node 0 (or any single-node run): land the artifacts. The
-        # checkpoint upload sits AFTER eval so the eval starts on a quiet
-        # machine (no GB-scale upload competing for the mount); the
-        # mid_rc==0 guard keeps eval-failure paths from losing the
-        # checkpoint (an eval-only retry needs it).
+        # checkpoint normally went up pre-eval (salvage arming above);
+        # this block is now the fallback for the path where that upload
+        # was skipped or failed — the mid_rc==0 guard keeps eval-failure
+        # paths from losing the checkpoint (an eval-only retry needs it).
         if not eval_only and s.get("upload_checkpoint", True) \
-                and res["mid_train_rc"] == 0:
+                and res["mid_train_rc"] == 0 \
+                and not res.get("checkpoint_uploaded"):
             ckpt_dir = os.path.join(base, "mid_checkpoints", tag)
             print(f"[worker] uploading mid checkpoint -> "
                   f"{result_uri}/mid_checkpoint", flush=True)
