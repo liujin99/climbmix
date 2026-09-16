@@ -604,9 +604,12 @@ def main() -> int:
     # TARGET_LOAD_OPTIMIZER — a disagreement means this dispatch would run
     # different training semantics than the stage fingerprint recorded:
     # refuse (stale .done markers would lie about what ran).
+    # base_eval_check is exempt: it never trains or loads an optimizer
+    # (eval-only anchor), so a multi-node-shaped run snapshot's fingerprint
+    # is irrelevant to it (prod4 2026-09-16: the anchor died on this check).
     lo_derived = "0" if node_count > 1 else "1"
     lo_recorded = (launch_env.get("TARGET_LOAD_OPTIMIZER") or "").strip()
-    if lo_recorded and lo_recorded != lo_derived:
+    if not base_check and lo_recorded and lo_recorded != lo_derived:
         raise SystemExit(
             f"✗ launch_env TARGET_LOAD_OPTIMIZER={lo_recorded} disagrees "
             f"with node_count={node_count} (derives {lo_derived}) — the "
