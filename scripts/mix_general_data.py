@@ -109,9 +109,18 @@ def detect_shard_size(stem_train_files):
 
 
 def calc_climbmix_count(stem_docs, stem_ratio, max_shards=MAX_CLIMBMIX_SHARDS):
-    """Calculate how many ClimbMix shards are needed for the given STEM doc count."""
+    """Calculate how many ClimbMix shards are needed for the given STEM doc count.
+
+    +1 safety shard: CLIMBMIX_DOCS_PER_SHARD (85K) is an ESTIMATE — real
+    shards average ~84.6K docs, so a bare ceil() can land 1-2K docs short of
+    the draw + binomial margin and the fail-loud general-supply guard refuses
+    to mix (prod4 cfg11 2026-09-16: 44 shards = 3,724,288 docs vs 3,726,000
+    + 8,075 needed — short by 0.046%, entire arm blocked). The extra shard
+    is ~250MB of already-cached download and turns the estimate error into
+    slack instead of a hard stop.
+    """
     needed_climb = stem_docs * (1 - stem_ratio) / stem_ratio
-    n = math.ceil(needed_climb / CLIMBMIX_DOCS_PER_SHARD)
+    n = math.ceil(needed_climb / CLIMBMIX_DOCS_PER_SHARD) + 1
     return max(MIN_CLIMBMIX_SHARDS, min(max_shards, n))
 
 

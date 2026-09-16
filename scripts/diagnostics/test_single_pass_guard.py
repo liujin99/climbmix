@@ -564,8 +564,14 @@ check("mix: ClimbMix shard constant = 85K (measured 2026-09-11)",
       "CLIMBMIX_DOCS_PER_SHARD = 85000" in mix_src)
 check("mix: 85K constant actually drives the shard-count math",
       mix.CLIMBMIX_DOCS_PER_SHARD == 85000
-      and mix.calc_climbmix_count(1_000_000, 0.7) == 6          # ceil(428.6K/85K)
-      and mix.calc_climbmix_count(10_000_000, 0.7) == 50)       # 51 -> cap binds
+      and mix.calc_climbmix_count(1_000_000, 0.7) == 7          # ceil(428.6K/85K)+1
+      and mix.calc_climbmix_count(10_000_000, 0.7) == 50)       # 52 -> cap binds
+check("mix: +1 safety shard clears the real-shard shortfall "
+      "(prod4 cfg11 2026-09-16: 44 estimated = 3,724,288 actual docs, "
+      "short of 3,726,000 + margin by 0.046% — arm blocked)",
+      mix.calc_climbmix_count(8_703_172, 0.7) == 45            # 44 -> 45
+      and 45 * 84643 >= 3_726_000 + mix.binomial_margin(
+          mix.calc_output_files(8_703_172, 10000, 0.7) * 10000, 0.7))
 re_src = open(os.path.join(
     REPO, "src/climbmix/remote/remote_executor.py")).read()
 check("remote: guard wired between mixture prep and upload "
