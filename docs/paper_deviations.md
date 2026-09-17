@@ -28,6 +28,7 @@
 | D14 | 宏簇构造 | 距离合并到固定 K_enhanced(主实验 21 超簇;D.4:K_final 15/21/30 不敏感,15 最优) | **prod2 起默认 `MERGE_STRATEGY=balanced`:容量约束平衡划分到恰好 K_ENHANCED 个宏簇**(distance 仍可选对照) | 本池嵌入空间 = 单一致密连续流形(99% tokens)+ 13 格式孤岛:距离合并在任何 (K,τ) 下都链式塌成巨簇(K=14/21/24/32 实测留 99.0/98.5/98.3/97.5%,去掉 floor 塌到 K=3/99.9%,912/912 次合并全部合法)——搜索空间退化为 ~1 个旋钮(prod1 根因#1);balanced 用 K1000 层已验证的 k-means 机制,构造性保证 max token share ≤ (1+slack)/K;代价:宏簇是连续体的容量切片而非纯主题(语义由 balanced_profile.json 的 fine→anchor cosine 审计)。prod2 = balanced + K=15(对齐 D.4 最优) |
 | D15 | 目标臂优化器状态 | 未记载(论文以外部 base 为冻结起点,无优化器延续概念) | 单节点臂加载 d28 预训练 8-shard 优化器(prod1 行为);多节点臂(TARGET_ARM_NODES=4,ws=32)**冷启动**(`--load-optimizer=0`) | 8-shard moments 在 ws≠8 形状对不上(AdamW reduce_scatter 断言,run 601cdb67),非可选项;两臂同语义(本地兜底同步冷启动),`target_load_optimizer` 进 target 指纹;语义上与论文口径一致(外部 base 本就无优化器状态可载) |
 | D16 | 单遍退火 | consumption ≤ mixture(单遍语义) | prod1/prod2 实测 **~2.5-4 epoch wrap**(loader 日志直证);2026-09-11 修复:steps=TOKENS/tbs + mix 池=预算/0.7 → 构造性单遍 epoch≈0.7 | 三重叠加:tbs 误设(回退值 524,288 当真值,真实 meta 1,048,576)+ mix 定尺寸 bug(池=预算×0.98 非 /0.7)+ ClimbMix 分片常量错 6×(500K vs 实测 85K);详见细节 D16 |
+| D17 | 生成式评测协议 | lm-eval-harness 惯例:`until` 停止串 + 每任务生成预算(GSM8K/MATH 默认 256) | 2026-09-17 起:gsm8k_cot cap 256 + 停止串 `\nAnswer: `;math_cot_500 cap 256→**1024** + 停止串 `\n\nSolution: `;**NLL prompt 预算冻结 1792 与生成预算解耦** | base 模型 few-shot 无 EOS(实测 hit_cap 99.85%@256),答后幻觉轮污染 math rfind-boxed 抽取;gold 实测 30.2% 超 256(p95=643/p99=893)。A/B 实证(d28_random_prod3,8×910B4):旧协议逐位复现、gsm8k 停止串噪声级、math 512→1024 marker 18.8→25.8%;NLL 全程与历史逐位一致。断代边界:仅 math accuracy 列;详见细节 D17 |
 
 ## 细节与出处
 
@@ -146,6 +147,46 @@ tokens/参数 regime,配比转移保真);prod2 实跑 1000Mi/1B 仅作历史复�
   池 = TARGET_TOKENS/0.7 → 构造性单遍 epoch≈0.7,守卫余量 ~30% 吸收尘簇
   短缺(论文的 take-all 不再分配策略同款)。守卫已补接 remote 执行路径
   (此前只接本地路径,而生产搜索全走 remote)。
+
+### D17 生成式评测协议:停止串 + math cap 1024 + NLL 预算冻结(2026-09-17)
+问题链(全部实测):
+- base 模型 few-shot 补全不产生 chat EOS → 生成任务每条顶满预算
+  (gsm8k@256 hit_cap 99.85%),答案后继续幻觉"下一题+下一解";
+- math 抽取器取**最后一个** `\boxed{`(rfind)→ 幻觉轮的 boxed 覆盖真答案;
+  gsm8k 取**第一个** `####` 免疫;两任务 NLL 走 teacher-forcing 独立路径,
+  全程与生成上限无关;
+- math gold 实测 30.2% 超 256 tokens(p50=172/p95=643/p99=893/max=1390)
+  → 截断地板;gsm8k 仅 0.8% 超 256。
+变更(nanochat-npu 分支 `eval-stopstrings-ab`,fa9ab73):
+1. 解码后停止串截断(lm-eval `until` 语义):gsm8k `\nAnswer: `、math
+   `\n\nSolution: `——我们的 exemplar 是裸题面(无 "Question:"/"Problem:"
+   前缀),**分隔符自身再现 = 幻觉边界**;gold 零假阳性(N=1319/500,
+   answer+question 均 0 命中);
+2. math_cot_500 `max_gen_tokens` 256→1024(覆盖 gold p99);gsm8k 保持 256;
+3. **NLL prompt 预算冻结 1792**(历史 max_seq_len-256,`_NLL_FROZEN_GEN_CAP`)
+   与生成预算解耦——生成预算随 cap 缩(prompt few-shot 弹出),NLL 路径
+   逐字节不变,math NLL(该任务当前主信号,w≈0.39)与全部历史点可比;
+4. GEN-DIAG 诊断行(marker_rate/hit_cap/stopped/early_no_marker/avg_shots,
+   跨 rank all_reduce);A/B 旋钮 `--max-gen-tokens`/`--no-stop-strings`
+   (生产 argv 不变,climbmix 零改动)。
+A/B 实证(2026-09-17,d28_random_prod3,8×910B4,全量集,服务器本地):
+- **旧协议复现**:gsm8k acc 0.1190 / NLL 0.6420,与 prod3 32 卡记录
+  逐位一致(0.119030/0.642035)——新代码在旧语义下零漂移;
+- **gsm8k 停止串 on/off**:0.1198 vs 0.1190(噪声级),NLL 不动;
+  stopped=79.9%,early_no_marker=0.15%;
+- **math cap 512 vs 1024**(均带停止串):marker 18.8%→25.8%、
+  acc 0.016→0.022、avg_shots 3.98→2.72、hit_cap 97.8%→94.4%;
+  **NLL 两段均 0.8460**(=历史 0.845960)——解耦金丝雀通过;
+- 512 落选:模型实际生成远比 gold 啰嗦(hit_cap@512=97.8%),gold 长度
+  只是截断率的下界代理。
+语义断代与成本:
+- 断代边界:**仅 math_cot_500 的 accuracy 列**(截断地板移除,数值系统性
+  上移);NLL 列(全部任务)、gsm8k accuracy、4 个 MC 任务零断代;历史
+  搜索点(prod1-4)raw 保留、不重评;
+- math 生成评测成本 ×1.9(707s→1325s @8 卡全量),每个搜索点约 +10 分钟;
+- 有效 shot 数:math 5→~2.7(cap 1024 → prompt 预算 2048-1024);实测
+  格式跟随反而上升(见 marker_rate),A/B 否决了"少 shot 伤指令跟随"的担忧;
+- 引擎级停止串(生成中提前停,省算力)为后续可选优化,未包含。
 
 ### D13 剪枝规则(2026-08-31)
 论文用 fasttext 分类器簇均值 < 3.0 剪枝。我们保留均值阈值
