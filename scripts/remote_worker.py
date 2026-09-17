@@ -789,6 +789,21 @@ def main() -> int:
             mix_dir = os.path.join(work, "mixture_data")
             print(f"[worker] downloading mixture data -> {mix_dir}", flush=True)
             storage.download_dir(s["mixture_data_uri"], mix_dir)
+            # Fail fast when staging pulled nothing: download_dir is
+            # SILENT on an empty/missing prefix (LocalStorage.list_objects
+            # returns [] for a view path that was never linked; mox
+            # exists() likewise) — the 2026-09-12 eval-only postmortem
+            # added this check for checkpoints; the mixture path needed
+            # the same one (prod4 2026-09-17: both 8-node arms burned
+            # ~10 min reaching a dataloader assert with ZERO parquet in
+            # the container while OBS held every file).
+            if not glob.glob(os.path.join(mix_dir, "*.parquet")):
+                raise RuntimeError(
+                    f"mixture staging pulled nothing: no *.parquet under "
+                    f"{mix_dir} (spec mixture_data_uri="
+                    f"{s['mixture_data_uri']!r}) — the OBS prefix or the "
+                    f"boot view is empty; refusing to launch training "
+                    f"into an empty dataloader.")
 
             # Base checkpoint symlink (same semantics as the local executor's
             # _symlink_base_checkpoint: base_checkpoints/{tag} -> d{depth}).
