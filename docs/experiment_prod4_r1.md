@@ -89,4 +89,4 @@ stem NLL（次级）：climb 1.8637 / random 1.8609 / random3b 1.8527。
 - ckpt：`/home/ma-user/work/nanochat_model_dir/mid_checkpoints/d28_{climb,random3b}_prod4`
 - audit/日志：`result/prod4_current/`（`target_arm_*.json`、`mid_train_*.log`、`eval_*.csv`、`launch_env.json`）
 - 提交端日志：`/home/ma-user/work/tmp/prod4_{climb8,random3b8_db1}_arm.log`、`prod4_anchor_eval2.log`
-- OBS：`obs://bucket-pangu-green-guangzhou/s00944147/l00916525/prod/climbmix/prod4/target_arms/{climb,random3b}/mixture_data_k{da5cb5340f9c,8bed4b50e884}`
+- OBS：`<prod-prefix>/prod4/target_arms/{climb,random3b}/mixture_data_k{da5cb5340f9c,8bed4b50e884}`（完整桶前缀属内部值，见服务器 audit / launch_env.json，不入公开仓）
