@@ -22,9 +22,9 @@
 | eval | 4 MC（arc_easy 2376 / arc_challenge 1172 / mmlu_stem 3545 / gpqa_diamond 198）+ 2 生成 CoT（gsm8k_cot 1319 / math_cot_500 500，D17 协议：stop strings + math cap 1024）；锚点 = base ckpt 单节点远端复评 |
 | 产出 | ckpt `mid_checkpoints/d28_{climb,random3b}_prod4`；audit `result/prod4_current/target_arm_{climb,random3b}.json` |
 
-[1] seq/GA 取自当日 dispatch 守卫打印（db=1→GA=8；晨间 db=2/4→GA=4/2 均整除放行后死于 OOM）；落地 log 的 `Inherited max_seq_len` / `Grad accum steps` 行可复核。
+[1] seq/GA 取自当日 dispatch 守卫打印（db=1→GA=8；晨间 db=2/4→GA=4/2 均整除放行后死于 OOM）。**已核对（2026-09-17 晚）**：落地 log 打印 `Inherited max_seq_len=2048` / `Inherited total_batch_size=1048576` / `Grad accum steps: 8`，与守卫打印一致。
 
-训练健康度：dt 3365 ms/步、bf16_mfu 14.42%、311,609 tok/s、175 min/臂、epoch 1——与 09-16 f1bad8c9（同配方 8 节点 db=1）逐位一致，复现性锚点。
+训练健康度：dt 3365 ms/步、bf16_mfu 14.42%、311,609 tok/s、175 min/臂、epoch 1——与 09-16 f1bad8c9（同配方 8 节点 db=1）逐位一致，复现性锚点。峰值内存 24962 MiB ≈ 24.4 GiB（29.49G 卡，余量 ~5.1G）。
 
 ## 2. 主结果（CP4 三臂全景，ref = random）
 
@@ -58,11 +58,11 @@ stem NLL（次级）：climb 1.8637 / random 1.8609 / random3b 1.8527。
 2. **预算匹配对照更强**：climb vs random3b（同为 3B、同日、同 8 节点 db=1 配方）Δ=+0.0325，z≈+3.8。
 3. **赢点结构**：gsm8k_cot .258 vs .119/.108（**2.2-2.4×，主引擎**）+ arc_challenge +.015 + math +.010；负项仅 gpqa（N=198，SE~.03 噪声主导）与 arc_easy -.018。收益集中在推理/CoT 任务——与搜索目标（stem 含双 CoT）一致。
 4. **climb 超基线 +0.023**（0.1972 vs base 0.1738）；random 0.1781 ≈ 基线；random3b .1647 低于基线——提升来自 mixture 本身而非预算。
-5. **噪声/预算标定**：random 两落点差 -0.0134（z -1.57 不显著）——混杂复跑噪声与预算差（ref random 为早前落地臂，计划预算 6B/4 节点恢复路径，以 audit 为准[2]）；无论取哪个 random，climb 双压。
+5. **噪声/预算标定**：random 两落点差 -0.0134（z -1.57 不显著）——混杂复跑噪声与预算差（ref random 为早前落地臂，audit node_count=8；token 预算待核[2]）；无论取哪个 random，climb 双压。
 6. **NLL 反转**：random3b NLL 最低（1.8527）但 stem 最差——次级指标与目标背离又一例，stem_metric 作搜索目标的正确性再确认。
 7. gsm8k 绝对水平较 prod2（.05-.06）大幅上移（.11-.26）：D17 协议（stop strings + math cap 1024）放大 CoT 任务分辨率，混合物间差异同步放大。
 
-[2] 待核：`result/prod4_current/target_arm_random.json`（requested_target_tokens / node_count）。若 ref 实为 3B 同配方，则第 5 条退化为纯复跑噪声标定，不影响 1-4。
+[2] 待核：node_count=8 已从 audit 确认；token 预算字段未见数值匹配（json 全文待 dump）。若 ref 实为 3B 同配方，则第 5 条退化为纯复跑噪声标定，不影响 1-4。另：实测峰值内存 24.4 GiB 高于「静态 15G + db=1 前向 6.4G」朴素和约 3G（分配器 workspace/HCCL 缓冲/碎片），已同步回填 TODO db 判决条目。
 
 ## 4. 时间线（当日事故链 → 落地）
 
