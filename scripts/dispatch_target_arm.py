@@ -848,7 +848,8 @@ def main() -> int:
             nproc_per_node=nproc,
         )
     else:
-        # ── device-batch identity guard rev2, GA-aware (prod4 2026-09-17) ──────────────
+        # ── device-batch identity guard rev3: GA-aware identity + db>=2
+        # memory wall (prod4 2026-09-17) ─────────────────────────────
         # mid_train DERIVES grad_accum_steps = total_batch // (ws × db ×
         # max_seq_len) from the base meta (scripts/mid_train.py), so the
         # token budget (total_batch × TARGET_STEPS) is shape-invariant:
@@ -887,6 +888,28 @@ def main() -> int:
                           f"total_batch={_tbs:,} = {node_count} nodes × 8 "
                           f"ranks × device_batch={_micro_given} × "
                           f"max_seq_len={_mss} × grad_accum={_ga}")
+                    # rev3 (prod4 2026-09-17): identity-legal is not
+                    # memory-legal. db=2/4 passed rev2 at ws=64 (integral
+                    # GA) and OOM'd at the FIRST forward (27.61/27.84G).
+                    # Per-card static ~15G (fp32 masters + grads,
+                    # dtype-verified 2026-08-27) is db- and ws-invariant;
+                    # db=2 forward (~12.8G) tops out the 29.49G cards.
+                    # db=1 is the only empirically working value at every
+                    # tested ws (8/64/128). db>=2 needs a validated memory
+                    # change (e.g. bf16 masters) first — see the TODO
+                    # 2026-09-17 verdict entry. Unreachable at db=1, so
+                    # default launches are unaffected.
+                    if _micro_given >= 2:
+                        raise SystemExit(
+                            f"✗ [{arm}] MID_DEVICE_BATCH_SIZE="
+                            f"{_micro_given} hits the documented db>=2 "
+                            f"forward wall (26.9-27.8G at ws=8 2026-08-28 "
+                            f"and ws=64 2026-09-17; per-card static ~15G "
+                            f"fp32 masters+grads is db/ws-invariant, db=2 "
+                            f"forward ~12.8G tops out 29.49G cards). "
+                            f"Production locks db=1; db>=2 only after a "
+                            f"validated memory change — set "
+                            f"MID_DEVICE_BATCH_OK=1 if this is deliberate.")
                 else:
                     raise SystemExit(
                         f"✗ [{arm}] MID_DEVICE_BATCH_SIZE={_micro_given} "
