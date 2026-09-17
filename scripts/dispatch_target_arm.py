@@ -848,19 +848,19 @@ def main() -> int:
             nproc_per_node=nproc,
         )
     else:
-        upload_dir_if_missing(obs, data_dir, mixture_uri, arm)
-        # ── device-batch identity guard (prod4 2026-09-16) ──────────────
-        # mid_train inherits total_batch_size and max_seq_len from the base
-        # meta; the batch identity is
-        #   total_batch = node_count*8 * device_batch * max_seq_len
-        # and TARGET_STEPS is derived from total_batch — so a
-        # shape-mismatched device_batch (e.g. reusing a 16-node snapshot's
-        # MID_DEVICE_BATCH_SIZE=2 at 8 nodes) silently halves the token
-        # budget while the anneal schedule runs unchanged: 3B becomes 1.5B
-        # and nothing in the logs says so. The correct value is a unique
-        # integer derivable from the same meta mid_train reads — refuse on
-        # mismatch and print it. Escape hatch for deliberate non-standard
-        # batch experiments: MID_DEVICE_BATCH_OK=1.
+        # ── device-batch identity guard rev2, GA-aware (prod4 2026-09-17) ──────────────
+        # mid_train DERIVES grad_accum_steps = total_batch // (ws × db ×
+        # max_seq_len) from the base meta (scripts/mid_train.py), so the
+        # token budget (total_batch × TARGET_STEPS) is shape-invariant:
+        # any db with an integral grad_accum is exactly on-budget (db=4
+        # @8nodes GA=2 ≡ db=8 @8nodes GA=1, both full 2^20-token steps).
+        # rev1 assumed GA=1 and false-aborted legit GA=2 launches (prod4
+        # random3b, 2026-09-17, after a pointless 9GB upload). The real
+        # hazard is non-integral grad_accum: mid_train silently bumps
+        # total_batch up → budget inflates, anneal unchanged, single-pass
+        # pool may starve mid-run. Refuse that; print derived GA on pass;
+        # run BEFORE upload so refusals cost no transfer. Escape hatch:
+        # MID_DEVICE_BATCH_OK=1.
         if not os.environ.get("MID_DEVICE_BATCH_OK"):
             _meta_dir = os.path.join(nanochat_base_dir, "base_checkpoints",
                                      f"d{target_depth}")
@@ -870,32 +870,36 @@ def main() -> int:
                           or launch_env.get("MID_DEVICE_BATCH_SIZE") or "1")
             if _tbs and _mss:
                 _world = node_count * 8 * _mss
-                if _tbs % _world == 0:
-                    _micro_expected = _tbs // _world
-                    try:
-                        _micro_given = int(str(_micro_eff).strip())
-                    except ValueError:
-                        _micro_given = -1
-                    if _micro_given != _micro_expected:
-                        raise SystemExit(
-                            f"✗ [{arm}] MID_DEVICE_BATCH_SIZE={_micro_eff} "
-                            f"does not satisfy the batch identity: "
-                            f"total_batch={_tbs:,} = {node_count} nodes × 8 "
-                            f"ranks × device_batch × max_seq_len={_mss} → "
-                            f"device_batch must be {_micro_expected}. A "
-                            f"mismatched value silently trains "
-                            f"{_micro_given / _micro_expected:.2f}× the "
-                            f"token budget while the anneal schedule runs "
-                            f"unchanged. Rerun with "
-                            f"MID_DEVICE_BATCH_SIZE={_micro_expected} "
-                            f"(or MID_DEVICE_BATCH_OK=1 if this mismatch is "
-                            f"deliberate).")
+                try:
+                    _micro_given = int(str(_micro_eff).strip())
+                except ValueError:
+                    _micro_given = -1
+                if _micro_given <= 0:
+                    raise SystemExit(
+                        f"✗ [{arm}] MID_DEVICE_BATCH_SIZE={_micro_eff!r} is "
+                        f"not a positive integer — cannot verify the batch "
+                        f"identity. Rerun with a valid MID_DEVICE_BATCH_SIZE "
+                        f"(or MID_DEVICE_BATCH_OK=1 if this is deliberate).")
+                _wdb = _world * _micro_given
+                if _tbs % _wdb == 0:
+                    _ga = _tbs // _wdb
+                    print(f"  ✓ [{arm}] batch identity OK: "
+                          f"total_batch={_tbs:,} = {node_count} nodes × 8 "
+                          f"ranks × device_batch={_micro_given} × "
+                          f"max_seq_len={_mss} × grad_accum={_ga}")
                 else:
-                    print(f"  ⚠ [{arm}] total_batch={_tbs:,} not divisible "
-                          f"by node_count×8×max_seq_len={_world:,} — "
-                          f"mid_train will bump total_batch; verify this is "
-                          f"intended (see TODO #9 for the non-power-of-2 "
-                          f"node walls)")
+                    raise SystemExit(
+                        f"✗ [{arm}] MID_DEVICE_BATCH_SIZE={_micro_given} "
+                        f"gives a NON-INTEGRAL grad_accum: "
+                        f"total_batch={_tbs:,} / ({node_count} nodes × 8 "
+                        f"ranks × {_micro_given} × max_seq_len={_mss} = "
+                        f"{_wdb:,}) — mid_train would silently bump "
+                        f"total_batch up and inflate the token budget while "
+                        f"the anneal schedule runs unchanged (single-pass "
+                        f"pool may starve mid-run). Pick a device_batch "
+                        f"that divides total_batch evenly "
+                        f"(or MID_DEVICE_BATCH_OK=1 if this is deliberate).")
+        upload_dir_if_missing(obs, data_dir, mixture_uri, arm)
         container_data_dir = os.path.join(work_dir, "mixture_data")
         mid_cmd = build_target_mid_train_cmd(
             run_name=f"{arm}_mid",
