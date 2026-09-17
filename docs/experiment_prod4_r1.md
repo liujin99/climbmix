@@ -30,12 +30,14 @@
 
 **管线校准**：锚点 323855b4 远端 base stem = **0.1746** vs 本地 0.1738（|Δ|=0.0008 → PASS，阈值 0.002）。
 
+**ref provenance（2026-09-17 晚闭环）**：`eval_random.csv`（mtime 09-16 10:28）与 prod3 归档**逐字节相同**（diff SAME_AS_PROD3）——它是 **prod3 random 臂**（1bda1c2f，SUCCEEDED，4 节点 ws=32、3B/2861 步、cluster_info 与 prod4 逐字节相同、同均匀 α=1/15 家族）的 eval，09-16 晨「cp4 手动渲染」准备期被拷入 prod4_current 作占位 ref。prod4 本轮名为 random 的两次尝试**全部失败**：10c9fc37（7m，ws=64 Muon OOM，即 09-15 夜三臂事故②）与 d9b8dae3（16 节点 random3b 09-16，训练段跑满 2861 步但 eval 死、ckpt 无 salvage 丢失——「后台看着成功」即此）。判定影响见判读 5。
+
 headline（stem_metric，centered；SE_Δ=√2×0.006=0.0085）：
 
 | 臂 | stem | Δvs ref | z | p | tag |
 |---|---|---|---|---|---|
 | climb | **0.1972** | +0.0191 | +2.25 | 0.012 | WINS** |
-| random（ref） | 0.1781 | — | — | — | — |
+| random（ref*，prod3 复刻） | 0.1781 | — | — | — | — |
 | random3b | 0.1647 | -0.0134 | -1.57 | 0.942 | 噪声 |
 
 per-benchmark（raw acc ± 二项 SE）：
@@ -54,15 +56,15 @@ stem NLL（次级）：climb 1.8637 / random 1.8609 / random3b 1.8527。
 
 ## 3. 判读
 
-1. **CLIMB WINS（z=+2.25，~95% 单边）——系列首轮显著**，且跨轮单调改善：prod1 -0.0036（z≈-0.4，噪声）→ prod2 +0.0102（z +1.20）→ prod4 +0.0191（z +2.25）。管线逐轮成熟（评分修正、D17 协议、数据面修复、ws=64 Muon 墙拆除）的红利兑现。
+1. **CLIMB WINS——主判据为预算匹配同日对照 climb vs random3b Δ=+0.0325（z≈+3.8）**；vs prod3 random 复刻 +0.0191（z +2.25，~95% 单边）为第二佐证。系列跨轮单调改善：prod1 -0.0036（z≈-0.4，噪声）→ prod2 +0.0102（z +1.20）→ prod4 +0.0325（同日同码对照）。管线逐轮成熟（评分修正、D17 协议、数据面修复、ws=64 Muon 墙拆除）的红利兑现。
 2. **预算匹配对照更强**：climb vs random3b（同为 3B、同日、同 8 节点 db=1 配方）Δ=+0.0325，z≈+3.8。
 3. **赢点结构**：gsm8k_cot .258 vs .119/.108（**2.2-2.4×，主引擎**）+ arc_challenge +.015 + math +.010；负项仅 gpqa（N=198，SE~.03 噪声主导）与 arc_easy -.018。收益集中在推理/CoT 任务——与搜索目标（stem 含双 CoT）一致。
 4. **climb 超基线 +0.023**（0.1972 vs base 0.1738）；random 0.1781 ≈ 基线；random3b .1647 低于基线——提升来自 mixture 本身而非预算。
-5. **噪声/预算标定**：random 两落点差 -0.0134（z -1.57 不显著）——混杂复跑噪声与预算差（ref random 为早前落地臂，audit node_count=8；token 预算待核[2]）；无论取哪个 random，climb 双压。
+5. **噪声标定（provenance 闭环后更干净）**：0.1781（prod3 复刻）与 0.1647（prod4 random3b）= **两个独立 3B 均匀复刻的纯复跑噪声**（差 -0.0134，z -1.57 不显著；此前担心的预算混杂不存在——prod3 亦为 2861 步）。climb 对两个复刻分别 +0.0191/+0.0325 双压。跨轮小告示：prod3 ref 为 ws=32（total_batch 形状不变量，GA 补偿、训练数学同构）且其 eval 早于 53d0bcd/20b94b0——锚点 PASS（0.1746 vs 0.1738）+ 两复刻互差在噪声内，无系统性偏差证据。
 6. **NLL 反转**：random3b NLL 最低（1.8527）但 stem 最差——次级指标与目标背离又一例，stem_metric 作搜索目标的正确性再确认。
 7. gsm8k 绝对水平较 prod2（.05-.06）大幅上移（.11-.26）：D17 协议（stop strings + math cap 1024）放大 CoT 任务分辨率，混合物间差异同步放大。
 
-[2] 待核：node_count=8 已从 audit 确认；token 预算字段未见数值匹配（json 全文待 dump）。若 ref 实为 3B 同配方，则第 5 条退化为纯复跑噪声标定，不影响 1-4。另：实测峰值内存 24.4 GiB 高于「静态 15G + db=1 前向 6.4G」朴素和约 3G（分配器 workspace/HCCL 缓冲/碎片），已同步回填 TODO db 判决条目。
+[2] 已闭环（2026-09-17 晚）：ref random = prod3 臂（audit：SUCCEEDED、node_count=4、elapsed 18461s、csv 指向 prod3 归档）；prod4_current 里的 FAILED audit（node_count=8）属 10c9fc37 那次 7 分钟阵亡，此前误当 ref 配置。另：实测峰值内存 24.4 GiB 高于「静态 15G + db=1 前向 6.4G」朴素和约 3G（分配器 workspace/HCCL 缓冲/碎片），已同步回填 TODO db 判决条目。
 
 ## 4. 时间线（当日事故链 → 落地）
 
@@ -75,6 +77,7 @@ stem NLL（次级）：climb 1.8637 / random 1.8609 / random3b 1.8527。
 | 18:52 | climb SUCCEEDED 175m → CP4 首报（2 臂） |
 | 18:59 | 锚点重发 323855b4（TARGET_ARM_NODES=1 修复节点数解析链） |
 | 19:27/19:29 | random3b SUCCEEDED 175m → CP4 三臂终报；锚点出分 PASS（晨间 EL0004 未复现，待查项保留） |
+| 当晚 | ref provenance 闭环：eval_random.csv = prod3 臂拷贝件（diff 逐字节同）；prod4 random 两试全败（10c9fc37 7m OOM / d9b8dae3 训满死于 eval） |
 
 工程面：双臂满训 2861 步 + 训后 eval 存活（对照 09-16 16 节点双 run 训满即死于 eval——53d0bcd+20b94b0 修复的首次生产验证）；salvage（bc2cdcf）备而未触发；本地 shards+mixed 29.9 GB 自动清理；服务器树当晚 pull 至 3df386a。
 
@@ -82,7 +85,7 @@ stem NLL（次级）：climb 1.8637 / random 1.8609 / random3b 1.8527。
 
 1. **L0 裁决：A（climb 赢家配比）胜出**——搜索信号传导至 d28 mid-train 成立；插值赢家（predictor_design_space 首发外推点）未翻车，对照 prod1 的未测角落事故。
 2. **L1a = cfg25 + cfg72**（已定案）：热区内部三点对照（插值赢家 / 实测冠军 cfg25 1.2550 / 最近邻 cfg72 1.1297，搜索尺度分）；权重已备 `tmp/cfg{25,72}_weights.json`；可选 16 节点 db=1 赶墙钟（2.12s/步，1.58×，+39% node-minutes）。
-3. 收尾清单：峰值内存实测回填 db 判决条目；ref random 预算核对（脚注[2]）；OBS legacy 孤儿清理（无键 `mixture_data` + 6B random 1136 片）；#11 mfu 探针。
+3. 收尾清单：OBS legacy 孤儿清理（无键 `mixture_data` + 6B random 1136 片）；#11 mfu 探针；可选——把 prod3 复刻 ref 显式登记进 CP4 渲染（当前 eval_random.csv 为拷贝件，报告不知情；防未来误读）。
 
 ## 附录：产物路径
 
