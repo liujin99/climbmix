@@ -28,7 +28,7 @@
 
 ## 2. 主结果（CP4 三臂全景，ref = random）
 
-**管线校准**：锚点 323855b4 远端 base stem = **0.1746** vs 本地 0.1738（|Δ|=0.0008 → PASS，阈值 0.002）。
+**管线校准**：锚点 **d8a43a5d**（16:46 起跑 → 17:24 SUCCEEDED，单节点 37.5m，TARGET_ARM_NODES=1 修复后首发）远端 base stem = **0.1746** vs 本地 0.1738（|Δ|=0.0008 → PASS，阈值 0.002）。勘误：18:59 的 323855b4 为重复提交（当晚仍在排队）——0.1746 非其所产；留其过夜落地可当免费复刻点（若与 0.1746 差 >0.002 再警觉）。
 
 **ref provenance（2026-09-17 晚闭环）**：`eval_random.csv`（mtime 09-16 10:28）与 prod3 归档**逐字节相同**（diff SAME_AS_PROD3）——它是 **prod3 random 臂**（1bda1c2f，SUCCEEDED，4 节点 ws=32、3B/2861 步、cluster_info 与 prod4 逐字节相同、同均匀 α=1/15 家族）的 eval，09-16 晨「cp4 手动渲染」准备期被拷入 prod4_current 作占位 ref。prod4 本轮名为 random 的两次尝试**全部失败**：10c9fc37（7m，ws=64 Muon OOM，即 09-15 夜三臂事故②）与 d9b8dae3（16 节点 random3b 09-16，训练段跑满 2861 步但 eval 死、ckpt 无 salvage 丢失——「后台看着成功」即此）。判定影响见判读 5。
 
@@ -74,8 +74,9 @@ stem NLL（次级）：climb 1.8637 / random 1.8609 / random3b 1.8527。
 | 13:01 | db=4 双臂 step-0 OOM 27.84G（climb 6b2d962b / random3b 65972ece） |
 | 14:45 | db=2 同点 OOM 27.61G（climb e218f73a） |
 | 16:00/16:32 | db=1 双臂入轨（climb 418f1301 / random3b e2fae0c0） |
-| 18:52 | climb SUCCEEDED 175m → CP4 首报（2 臂） |
-| 18:59 | 锚点重发 323855b4（TARGET_ARM_NODES=1 修复节点数解析链） |
+| 16:46-17:24 | 锚点 d8a43a5d SUCCEEDED（TARGET_ARM_NODES=1 修复节点数解析链）→ remote base 0.1746 |
+| 18:52 | climb SUCCEEDED 175m → CP4 首报（2 臂，已含锚点 PASS） |
+| 18:59 | 323855b4 冗余重发（重复提交，当晚仍在队列；留作复刻或可杀） |
 | 19:27/19:29 | random3b SUCCEEDED 175m → CP4 三臂终报；锚点出分 PASS（晨间 EL0004 未复现，待查项保留） |
 | 当晚 | ref provenance 闭环：eval_random.csv = prod3 臂拷贝件（diff 逐字节同）；prod4 random 两试全败（10c9fc37 7m OOM / d9b8dae3 训满死于 eval） |
 
@@ -84,7 +85,7 @@ stem NLL（次级）：climb 1.8637 / random 1.8609 / random3b 1.8527。
 ## 5. 结论与下一步
 
 1. **L0 裁决：A（climb 赢家配比）胜出**——搜索信号传导至 d28 mid-train 成立；插值赢家（predictor_design_space 首发外推点）未翻车，对照 prod1 的未测角落事故。
-2. **L1a = cfg25 + cfg72**（已定案）：热区内部三点对照（插值赢家 / 实测冠军 cfg25 1.2550 / 最近邻 cfg72 1.1297，搜索尺度分）；权重已备 `tmp/cfg{25,72}_weights.json`；可选 16 节点 db=1 赶墙钟（2.12s/步，1.58×，+39% node-minutes）。
+2. **L1a = cfg25 + cfg72**（已定案，**2026-09-17 晚已发射**，8 节点 db=1 与 R1 同形）：热区内部三点对照（插值赢家 / 实测冠军 cfg25 1.2550 / 最近邻 cfg72 1.1297，搜索尺度分）；可选 16 节点 db=1 赶墙钟（2.12s/步，1.58×，+39% node-minutes）。**地板不对称注记（发射前核对，照跑）**：cfg25 = 稀疏无地板（C10 .781/C0 .123/C12 .071/C8 .010 + 微量 4 簇，历史实测点原样）vs cfg72 = 0.01 地板带（9 簇 0.0092 + C10 .659/C11 .135/C5 .082，引导采样带原样）vs 赢家 = 12×0.9% 地板——地板政策是三点各自身份的一部分而非 bug；双臂选点均按配额命中 3.000B、零权簇为"权重说 0"非供给饿死、单遍成立。判读告示：若 cfg25 胜出，"地板伤赢家"与"点优劣"为并列候选解释（呼应赢家选择记档 ②c），L1a 不分离也不需分离（决策问题 = 该发哪个真实配置）。
 3. 收尾清单：OBS legacy 孤儿清理（无键 `mixture_data` + 6B random 1136 片）；#11 mfu 探针；可选——把 prod3 复刻 ref 显式登记进 CP4 渲染（当前 eval_random.csv 为拷贝件，报告不知情；防未来误读）。
 
 ## 附录：产物路径
