@@ -21,6 +21,8 @@ set -euo pipefail
 RUN_DIR="${RUN_DIR:-result/prod3_current}"        # 主 run 目录
 ARM_NAME="${ARM_NAME:-fixratio_v1}"               # 臂名 [A-Za-z0-9_-]+ (random/climb/自定义)
 WEIGHTS="${WEIGHTS:-}"                            # 空 = 不选点不混合, 直接重发已有臂
+LABEL_SOURCE="${LABEL_SOURCE:-cluster}"           # cluster = 搜索簇(cluster_cache.npz);
+                                                   # domain = 四域(schema domain_names, 配 WEIGHTS 域名键)
 TARGET_TOKENS="${TARGET_TOKENS:-2B}"              # token 预算: 选点大小 + 步数派生的唯一真源
                                                   # (与 run 快照不同时, 下方自动重派生 TARGET_STEPS)
 STEM_RATIO="${STEM_RATIO:-0.7}"
@@ -83,6 +85,7 @@ MIXED="$RUN_DIR/${ARM_NAME}_mixed"
 # ── 选点 + 混合 (仅当 WEIGHTS 给出; 每步 .done 幂等) ──
 if [ -n "$WEIGHTS" ]; then
     echo "  weights: ${WEIGHTS}"
+    echo "  label source: ${LABEL_SOURCE}"
 
     # ── 磁盘预算 preflight (战后清单 #8; ARM_DISK_CHECK=0 关闭) ──
     # prod4 教训: 3×6B 臂全链本地落地 ~100G 打穿 /work, winner 混到 95% 阵亡。
@@ -127,6 +130,7 @@ PY
             --output-dir "$SHARDS" \
             --cluster-cache "$CACHE" \
             --schema config/schema_stem.yaml \
+            --label-source "$LABEL_SOURCE" \
             --target-tokens "$TARGET_TOKENS" \
             --seed "$SEED" --num-npu "$NUM_NPU" \
             --weights "$WEIGHTS"

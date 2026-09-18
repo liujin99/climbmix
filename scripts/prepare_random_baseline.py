@@ -66,27 +66,37 @@ from climbmix.sampling.data_selector import select_data_by_mixture
 from climbmix.utils.token_estimate import parse_token_count
 
 
-def _parse_weights(spec: str, K: int) -> np.ndarray:
+def _parse_weights(spec: str, K: int, label_names=None) -> np.ndarray:
     """Custom mixture weights for a baseline arm (docs/reuse_design.md §4.4).
 
-    Accepts a comma list ("0.25,0.25,0.25,0.25"), a JSON array file, or an
-    optimal_mixture_weights.json dict ({"C0": w0, ...} — cluster labels
-    sorted numerically). Returns the normalized K-vector; uniform = the
-    paper's random baseline (default when --weights is absent).
+    Accepts a comma list ("0.25,0.25,0.25,0.25"), a JSON array file, or a
+    dict file. Dict keys are either C0..C{k-1} (optimal_mixture_weights.json
+    format, cluster labels sorted numerically) or — when label_names is
+    given (--label-source domain) — the schema's domain names, ordered by
+    that list (e.g. 数学/化学/生物学/物理 per config/schema_stem.yaml);
+    a domain absent from the dict means weight 0 (sparse dicts OK).
+    Returns the normalized K-vector; uniform = the paper's random
+    baseline (default when --weights is absent).
     """
     if os.path.isfile(spec):
         with open(spec) as f:
             data = json.load(f)
         if isinstance(data, dict):
-            try:
-                items = sorted(
-                    data.items(),
-                    key=lambda kv: int(str(kv[0]).lstrip("Cc")))
-            except ValueError:
-                raise SystemExit(
-                    "ERROR: --weights dict keys must be C0..C{k-1} "
-                    "(optimal_mixture_weights.json format)")
-            vec = [float(v) for _, v in items]
+            if label_names is not None and data and all(
+                    str(k) in label_names for k in data.keys()):
+                vec = [float(data.get(name, 0.0)) for name in label_names]
+            else:
+                try:
+                    items = sorted(
+                        data.items(),
+                        key=lambda kv: int(str(kv[0]).lstrip("Cc")))
+                except ValueError:
+                    hint = (" or one of " + "/".join(label_names)
+                            if label_names is not None else "")
+                    raise SystemExit(
+                        "ERROR: --weights dict keys must be C0..C{k-1} "
+                        "(optimal_mixture_weights.json format)" + hint)
+                vec = [float(v) for _, v in items]
         else:
             vec = [float(v) for v in data]
     else:
@@ -119,16 +129,21 @@ def _weights_identity(spec: str) -> str:
 
 
 def _done_matches(done: dict, *, seed: int, requested_tokens: int,
-                  weights_id: str) -> bool:
-    """.done identity guard: same seed, same requested budget, same weights.
+                  weights_id: str, label_source: str = "cluster") -> bool:
+    """.done identity guard: same seed, same requested budget, same weights,
+    same label source.
 
     Legacy .done files (pre-2026-09-16) lack weights_id — unverifiable,
     treated as a mismatch (fail loud; remove the dir or use a new
-    ARM_NAME). requested_target_tokens is compared raw; the legacy
-    resolved target_tokens field is accepted only when it equals the
-    raw request (nonzero budgets — the only mode arm_engine uses).
+    ARM_NAME). Legacy files without label_source predate --label-source
+    and were all cluster mode, so the "cluster" default is safe.
+    requested_target_tokens is compared raw; the legacy resolved
+    target_tokens field is accepted only when it equals the raw request
+    (nonzero budgets — the only mode arm_engine uses).
     """
     if done.get("seed") != seed:
+        return False
+    if done.get("label_source", "cluster") != label_source:
         return False
     rec_req = done.get("requested_target_tokens")
     if rec_req is not None:
@@ -178,9 +193,17 @@ def main():
                     "--weights: any fixed ratio, docs/reuse_design.md §4.4)")
     parser.add_argument("--data-dir", required=True)
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--cluster-cache", required=True,
+    parser.add_argument("--cluster-cache", default=None,
                         help="cluster_cache.npz from the search stage "
-                             "(final_labels, pool doc order)")
+                             "(final_labels, pool doc order); required for "
+                             "--label-source cluster, unused for domain")
+    parser.add_argument("--label-source", choices=["cluster", "domain"],
+                        default="cluster",
+                        help="cluster = search-stage K-means labels "
+                             "(cluster_cache.npz final_labels, default); "
+                             "domain = the parquet domain column cached in "
+                             "metadata_cache.npz (category_name mapped via "
+                             "schema domain_names, e.g. 数学/化学/生物学/物理)")
     parser.add_argument("--schema", default=None,
                         help="column schema YAML (default: manager's default)")
     parser.add_argument("--target-tokens", type=parse_token_count, default=0,
@@ -208,7 +231,8 @@ def main():
         weights_id = _weights_identity(args.weights)
         if _done_matches(done_info, seed=args.seed,
                          requested_tokens=args.target_tokens,
-                         weights_id=weights_id):
+                         weights_id=weights_id,
+                         label_source=args.label_source):
             print(f"  Random baseline already complete (.done), skipping")
             return
         raise SystemExit(
@@ -227,28 +251,53 @@ def main():
     mm = ShardMetadataManager(args.data_dir, schema=schema,
                               cache_dir=args.data_dir)
 
-    labels = np.load(args.cluster_cache,
-                     allow_pickle=False)["final_labels"].astype(np.int64)
-    if len(labels) != mm.num_docs:
-        raise SystemExit(
-            f"ERROR: cluster cache has {len(labels):,} labels but the pool has "
-            f"{mm.num_docs:,} docs. The data pool changed after the cluster "
-            f"cache was written — rerun the search stage (the fingerprint gate "
-            f"normally prevents this).")
+    if args.label_source == "cluster":
+        if not args.cluster_cache:
+            raise SystemExit(
+                "ERROR: --label-source cluster requires --cluster-cache "
+                "(cluster_cache.npz from the search stage)")
+        labels = np.load(args.cluster_cache,
+                         allow_pickle=False)["final_labels"].astype(np.int64)
+        if len(labels) != mm.num_docs:
+            raise SystemExit(
+                f"ERROR: cluster cache has {len(labels):,} labels but the pool has "
+                f"{mm.num_docs:,} docs. The data pool changed after the cluster "
+                f"cache was written — rerun the search stage (the fingerprint gate "
+                f"normally prevents this).")
+        label_names = None
+    else:
+        if schema is None or not getattr(schema, "domain_names", None):
+            raise SystemExit(
+                "ERROR: --label-source domain requires --schema with "
+                "domain_names (e.g. config/schema_stem.yaml: "
+                "数学/化学/生物学/物理)")
+        # The metadata cache's label array IS the parquet domain column
+        # (category_name -> int via schema domain_names order) — the 15
+        # K-means labels live in the search stage's cluster_cache.npz.
+        # Same array the cache was built from, so alignment is by
+        # construction (no second file to drift).
+        labels = np.asarray(mm.cluster_labels, dtype=np.int64)
+        label_names = list(schema.domain_names)
 
     token_counts = mm.estimate_token_counts()
     K = len(np.unique(labels[labels >= 0]))
+    if args.label_source == "domain" and K != len(label_names):
+        raise SystemExit(
+            f"ERROR: domain labels have {K} distinct values but the schema "
+            f"defines {len(label_names)} domains ({'/'.join(label_names)}) — "
+            f"pool/schema mismatch")
     target_tokens = args.target_tokens or int(token_counts.sum())
 
     if args.weights:
-        weights_vec = _parse_weights(args.weights, K)
+        weights_vec = _parse_weights(args.weights, K, label_names=label_names)
         mode = "custom fixed-ratio baseline (docs/reuse_design.md §4.4)"
     else:
         weights_vec = np.full(K, 1.0 / K, dtype=np.float64)
         mode = "equal-weight baseline (paper App. C.1 random)"
 
-    print(f"\n[Random] {mode}: K={K} clusters, "
-          f"target_tokens={target_tokens:,}")
+    axis = "domains" if args.label_source == "domain" else "clusters"
+    print(f"\n[Random] {mode} [label source: {args.label_source}]: "
+          f"K={K} {axis}, target_tokens={target_tokens:,}")
     print(f"[Random] planned weights: "
           + ", ".join(f"{w:.4f}" for w in weights_vec))
 
@@ -273,7 +322,8 @@ def main():
         if short:
             shortfall.append(k)
         marker = "  <- SHORTFALL (took all docs, no duplication)" if short else ""
-        print(f"  [{k:>2d}] avail {avail_docs[k]:>9,} docs "
+        kname = label_names[k] if label_names is not None else f"{k:>2d}"
+        print(f"  [{kname}] avail {avail_docs[k]:>9,} docs "
               f"({cluster_tokens[k] if short else quota_tokens[k]:>12,} tok) "
               f"-> took {cluster_docs[k]:>9,} docs{marker}")
     if shortfall:
@@ -332,6 +382,7 @@ def main():
             "rg_size": rg_size, "num_npu": args.num_npu, "seed": args.seed,
             "K": K, "target_tokens": target_tokens,
             "requested_target_tokens": args.target_tokens,
+            "label_source": args.label_source,
             "weights_id": _weights_identity(args.weights),
             "planned_weights": [float(w) for w in weights_vec],
             "effective_doc_shares": [d / n for d in cluster_docs],
