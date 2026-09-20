@@ -133,18 +133,18 @@ fallback: GPTConfig → formula estimate → DEPTH_INFO table).
 climbmix/
 ├── docs/
 │   ├── experiment_prod*.md            # Per-round experiment records (reader-facing report up front, dev details at the back)
-│   ├── paper_deviations.md             # 与论文 (arXiv:2504.13161) 的逐项偏差 + 一致性审计
-│   ├── scoring_metric_design.md        # SNR 评分设计 + proxy/target 训练量对比
-│   ├── proxy_and_model_analysis.md     # 分析文档
-│   ├── embedding_performance.md        # 嵌入性能
-│   └── nan_investigation.md            # stella NaN 修复调查
+│   ├── paper_deviations.md             # Itemized deviations from the paper (arXiv:2504.13161) + consistency audit
+│   ├── scoring_metric_design.md        # SNR-weighted scoring design + proxy/target training-budget comparison
+│   ├── proxy_and_model_analysis.md     # Proxy/target model-size analysis
+│   ├── embedding_performance.md        # Embedding throughput notes
+│   └── nan_investigation.md            # stella NaN fix investigation
 ├── runs/                                # Shell scripts
-│   ├── run_experiment.sh               # 入口: 跑一个实验 (完整链; 从零/断点续跑)
-│   ├── run_extend_experiment.sh        # 入口: 扩展实验 (复用已有实验 d20 已测点, 增量搜索)
-│   ├── run_extend_traineval.sh         # 入口: 扩展训练评测 (同一配比, 变 token/base/参数的对比轮)
-│   ├── run_extend_eval.sh              # 入口: 扩展评测 (换评测基准集, 不训练)
-│   ├── run_climbmix.sh                  # 主管道引擎 (run_experiment 背后; 高级直接路径)
-│   ├── lib/                            # 共享库 + 内部引擎 (arm_engine/stage_gate/...)
+│   ├── run_experiment.sh               # Entry: run one full experiment (complete chain; from-scratch / crash-resume)
+│   ├── run_extend_experiment.sh        # Entry: extension search (reuse a prior experiment's measured d20 points, incremental search)
+│   ├── run_extend_traineval.sh         # Entry: extension train+eval (same mixture, vary token budget / base / params)
+│   ├── run_extend_eval.sh              # Entry: extension eval (swap the benchmark suite, no training)
+│   ├── run_climbmix.sh                  # Main pipeline engine (behind run_experiment; advanced direct path)
+│   ├── lib/                            # Shared library + internal engines (arm_engine/stage_gate/...)
 │   ├── speedrun_climbmix.sh             # End-to-end validation (minimal data + steps)
 │   ├── smoke_test.sh                    # Logic smoke test (CPU)
 │   └── train_base_model.sh             # Generate base checkpoint (NPU)
@@ -192,25 +192,35 @@ DEPTH=28  bash runs/train_base_model.sh   # d28 target checkpoint
 # Step 2: End-to-end validation first (minimal data, ~minutes)
 bash runs/speedrun_climbmix.sh
 
-# Step 3: Production experiments — 入口家族, 参数 (EDIT 块) 就在每个脚本头部
+# Step 3: Production experiments — the entry-point family; parameters live in
+#   the EDIT block at the top of each script
 #   LAUNCH=0 <cmd> = dry-run (validate + print, no execution)
-# ── 实验级: 跑一个完整实验 ──
-bash runs/run_experiment.sh          # 跑一个实验: 池(不变则复用嵌入)→聚类→d20搜索→混料→双臂→报告
-                                     #   状态驱动: 从零 / 断点续跑 = 重跑同命令
-bash runs/run_extend_experiment.sh   # 扩展实验: 复用已有实验的 d20 已测点→增量搜索→后续全链 (HISTORY_RUN=旧实验)
-# ── 扩展级: 对已有实验追加, 非必经下一站 ──
-bash runs/run_extend_traineval.sh    # 扩展训练评测: 同一最优配比, 变 token预算/base_model/训练参数的
-                                     #   双臂对比训练→评测→报告 (SCALE_TOKENS=20B NODES=8)
-bash runs/run_extend_eval.sh         # 扩展评测: 对既有 ckpt 换评测基准集→报告, 不训练
-# 一次性: 把 "obs_prod_base" (生产 OBS 根前缀) 写进 ~/.config/climbmix/remote_ma.json
-# (与 secret 同文件) — 之后所有发射免填 REMOTE_OBS_PREFIX (自动拼 /<run_name>)。
-# 原始入口 (run_experiment 的底层引擎, 全参数 env 驱动):
+# ── Experiment level: run one full experiment ──
+bash runs/run_experiment.sh          # Full chain: pool (embeddings reused if the
+                                     #   pool is unchanged) → clustering → d20
+                                     #   search → mixing → two arms → report;
+                                     #   state-driven: from-scratch / crash-resume
+                                     #   = re-run the same command
+bash runs/run_extend_experiment.sh   # Extension search: reuse a prior experiment's
+                                     #   measured d20 points → incremental search →
+                                     #   full downstream chain (HISTORY_RUN=<old run>)
+# ── Extension level: append to an existing experiment (not a mandatory next stop) ──
+bash runs/run_extend_traineval.sh    # Extension train+eval: same optimal mixture,
+                                     #   vary token budget / base_model / training
+                                     #   params in a two-arm comparison
+                                     #   train→eval→report (SCALE_TOKENS=20B NODES=8)
+bash runs/run_extend_eval.sh         # Extension eval: re-evaluate existing ckpts on
+                                     #   a different benchmark suite → report, no training
+# One-time setup: put "obs_prod_base" (the production OBS root prefix) into
+# ~/.config/climbmix/remote_ma.json (same file as the secret) — after that,
+# every launch omits REMOTE_OBS_PREFIX (auto-appended /<run_name>).
+# Raw entry (the engine behind run_experiment, fully env-driven):
 bash runs/run_climbmix.sh
 ```
 
 Each script auto-checks dependencies, NPU availability, disk space, and exits with instructions if anything is missing.
 
-## Crash Resume (断点续跑)
+## Crash Resume
 
 Both runners are resumable: **re-run the same command after an interruption.**
 
