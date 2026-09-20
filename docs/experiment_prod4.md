@@ -1,12 +1,6 @@
 # prod4 实验记录（d20 搜索 → d28 验证全家）
 
-**版本**：v6（2026-09-20 单文件双读者版：**前半读者面（TL;DR + §1–§7）= 收官报告**，可直接转录 wiki；**后半开发者面（§8–§11）** = 复现性/时间线/工程细节/产物索引。显示名全文统一，产物名见 §1 映射表。沿革：v1 = 09-17 R1 首记；v2 = 09-20 家族全景 + 搜索各自成档；v3 = 合并"一轮一文档"；v4 = L1a 落地判决；v5 = 收官 + 算法层指令；v6 = 双读者重排）
-**日期线**：09-15 池/聚类/历史注入 → 09-16 搜索收官 + 赢家终选 → 09-17 R1 双臂落地 + L1a 发射 → 09-18 L1b 发射 + eval 协议合并 → 09-19 T1 双复刻发射 → 09-20 家族落地 → 09-20 10:59/11:06 L1a（climb-cfg72/climb-cfg25）落地 → 9 臂全景 → 判读会收官
-**代码基线**：搜索 = 指纹 `.fingerprint_search`（09-15 21:52；历史注入 identity 记 scoring_commit `dda6239`）；臂 R1 = climbmix `bf9690c`→`3df386a` / nanochat-npu `20b94b0` / boot shell climbmix-ma `146f465` / worker tar `a7c56792`；L1b+T1 = climbmix `b93bb97`（worktree 部署绕行主树冻结，产物同落 prod4_current）
-**协议口径**：全批臂 eval = 旧协议（dispatch 时绑定资产，同批直接可比）；新协议（dev-data-mix `0c1229f`，D17）激活后统一补测（§7）
-**关联记档**：proxy 选型 = `docs/proxy_and_model_analysis.md`；评分设计 = `docs/scoring_metric_design.md`；D14（balanced K15）/ D17（eval 协议）= `paper_deviations.md`；TODO 09-17「db≥2 内存墙判决」（R1 = 判决后首个全净轮）等条目
-
-**定位**：prod4 = CLIMBmix 算法的一轮完整验证实验（d20 代理搜索 → d28 九臂验证）。目标是**算法设计的可迁移结论**——算法将运行于其他数据池（非 STEM 基准、更大的池），单轮跑赢是证据不是目的，要求结果一直的好。
+prod4 = CLIMBmix 算法的一轮完整验证实验（2026-09-15 → 09-20，d20 代理搜索 → d28 九臂验证）。目标是**算法设计的可迁移结论**——算法将运行于其他数据池（非 STEM 基准、更大的池），单轮跑赢是证据不是目的，要求结果一直的好。
 
 ## TL;DR
 
@@ -41,7 +35,7 @@
 | 预算 | TARGET_TOKENS=3B → 2861 步 × total_batch 2²⁰ tokens/步（实测 1.048M tok/步 = tok/s×dt 闭合） |
 | 并行 | 8 节点 × 8 卡 = ws=64；MID_DEVICE_BATCH_SIZE=1（生产锁）；grad_accum=8（seq 2048）[4] |
 | 配方锁定 | LR/wd 链自预训练 meta 继承 × √(2²⁰/B_REF) batch 缩放；lrm 线性退火 1→0；--load-optimizer=0 |
-| eval | STEM 套件：4 MC（arc_easy 2376 / arc_challenge 1172 / mmlu_stem 3545 / gpqa_diamond 198）+ 2 生成 CoT（gsm8k_cot 1319 / math_cot_500 500）；复合分 = 6 任务 Centered 均值；eval db=16 / core_bs=8、全量（max_per_task=-1）；**旧协议**（math cap 256、无停止串截断——D17 新协议激活后统一补测）；锚点 = base ckpt 单节点远端复评 |
+| eval | STEM 套件：4 MC（arc_easy 2376 / arc_challenge 1172 / mmlu_stem 3545 / gpqa_diamond 198）+ 2 生成 CoT（gsm8k_cot 1319 / math_cot_500 500）；复合分 = 6 任务 Centered 均值；eval db=16 / core_bs=8、全量（max_per_task=-1）；**旧协议**（math cap 256、无停止串截断——D17 新协议激活后统一补测，附录 E）；锚点 = base ckpt 单节点远端复评 |
 
 训练健康度（R1 锚点）：dt 3365 ms/步、bf16_mfu 14.42%、311,609 tok/s、175 min/臂、epoch 1——与 09-16 f1bad8c9 逐位一致；峰值内存 24962 MiB ≈ 24.4 GiB（余量 ~5.1G）。
 
@@ -59,8 +53,6 @@
 作业台账（全部 SUCCEEDED、rc 全 0）：climb-终选 418f1301 / random3b e2fae0c0（09-17）；climb-cfg25 5bcebdb6 / climb-cfg72 727b08df（09-17 发射，62h 含排队）；natural b21c9cb2 / domainfix 0be0e8c5（09-18 12:07/12:08，worktree 发射）；climb-终选-rep / random3b-rep（09-19 晚 SEED=43）。落地时刻（eval CSV mtime）：natural/domainfix 09-20 04:10/04:23、random3b-rep/climb-终选-rep 08:01/08:08、climb-cfg72/climb-cfg25 10:59/11:06。
 
 ## 3. 搜索阶段执行记录（d20，09-15 → 09-16，总 8.35h）
-
-数据源：`result/prod4_current/` 的 report.md 全文 + search_state.json 摘要 + search.log 迭代/终选行（2026-09-20 服务器提取）。
 
 ### 3a. 搜索配置
 
@@ -196,7 +188,7 @@ uniform 家族带（random3b ×2 + natural + domainfix）= .1647–.1833，四�
 - random3b 摆 +.0185，几乎全由 gpqa 单任务低抽贡献（Centered −.0505→+.0168，Δ+.067 ≈ 13/198 样本）
 - **诚实表述：gap = 0.016–0.032 带，符号双种子一致**；单种子 0.0324 高估幅度，方向结论不变
 
-### 4d. L1a 热区三点判决（同一 CLIMB 搜索的三种配方：终选插值点 vs 两个实测点；09-20 10:59/11:06 落地，62h 含排队）
+### 4d. L1a 热区三点判决（同一 CLIMB 搜索的三种配方：终选插值点 vs 两个实测点）
 
 | 点 | d20 搜索分 | d28 STEM（seed42） | 备注 |
 |---|---|---|---|
@@ -223,7 +215,7 @@ uniform 家族带（random3b ×2 + natural + domainfix）= .1647–.1833，四�
 | 生物学 | 375,000,000 | 323,420 | 16,633,772 | ~1,160 |
 | 物理 | 450,000,000 | 300,322 | 15,346,595 | ~1,498 |
 
-交叉账全平：四域实选合计 4,094,357 = 总选样；池 docs 合计 116,109,960 = 全池 116.1M（四域完整划分）；实际 3,000,014,542 tok vs 3B = +14,542（0.0005%，文档粒度）；无 shortfall。结构观察：① 数学池内 token 份额 ~40% est → 配 60% = 主动加码 +20pp（手工值设计意图）；② 域文档长度异质（物理 ~1498 vs 化学 ~489 est tok/doc）。实现细节（标签源/代码位置）见 §10。
+交叉账全平：四域实选合计 4,094,357 = 总选样；池 docs 合计 116,109,960 = 全池 116.1M（四域完整划分）；实际 3,000,014,542 tok vs 3B = +14,542（0.0005%，文档粒度）；无 shortfall。结构观察：① 数学池内 token 份额 ~40% est → 配 60% = 主动加码 +20pp（手工值设计意图）；② 域文档长度异质（物理 ~1498 vs 化学 ~489 est tok/doc）。实现细节（标签源/代码位置）见附录 C。
 
 **base 对比分析：能力换位（"训完低于 base 是否正常"）**——混合偏数学/代码簇的继续预训练做**能力换位**：生成类大涨、MC 知识类小遗忘；gsm8k 增益够大净赚（climb-终选 +.023），不够则净亏（random3b −.010）。
 
@@ -254,7 +246,7 @@ random3b 净亏分解（Centered Δ vs base）：gpqa −.0673 / arc_challenge �
 
 ## 6. 算法层结论与设计指令（可迁移八条）
 
-**框架（用户定案）**：目标是 CLIMBmix 算法本身的最优设计——算法将运行于其他数据池（非 STEM 基准、更大的池），单轮跑赢是证据不是目的，**要求结果一直的好**。
+目标是 CLIMBmix 算法本身的最优设计——算法将运行于其他数据池（非 STEM 基准、更大的池），单轮跑赢是证据不是目的，**要求结果一直的好**。
 
 | # | prod4 证据 | 算法层结论 | 设计指令（下轮 / 换池） |
 |---|---|---|---|
@@ -276,11 +268,9 @@ random3b 净亏分解（Centered Δ vs base）：gpqa −.0673 / arc_challenge �
 5. **eval 协议激活**（收官后随时可执行，不阻塞新轮设计）：① pull 两树 + 重建 tarball + worktree 退役；② 8 ckpt（climb-终选/-rep、random3b/-rep、natural、domainfix、climb-cfg25/cfg72）新协议补测 ~40min/臂，新 CSV 名不覆盖；③ 此后新轮全走新协议，跨轮趋势链按 D17 脚注。climb-cfg72 的领先由 gsm8k（协议不变量、逐位可复现）承载，激活后排名大概率保持。
 6. 收尾余项：OBS 孤儿清理、家族臂训练健康度抽查（dt/mfu vs R1 锚点）、dataset.py.bak 删除确认、口径确证与 round-2 可选项（热区配置 d20 逐任务表 / predictor 超参行 / 终选块全文）、CP4 渲染器 ref 占位债。
 
----
+# 附录
 
-# 开发者面（§8–§11：复现性 / 时间线 / 工程细节 / 产物）
-
-## 8. 复现性机器（本轮全跑通，固化为每轮标准动作）
+## A. 复现性机器（每轮标准动作）
 
 - **锚点**：远端 eval 管线用 base ckpt 对账——预期 0.1746（d8a43a5d，09-17），worktree 复评 0.174590（09-18），4 位吻合。
 - **seed-pair 复刻**：关键臂双种子（42/43）测 gap 带而非单点（§4c）。
@@ -288,7 +278,7 @@ random3b 净亏分解（Centered Δ vs base）：gpqa −.0673 / arc_challenge �
 - **数据面交叉账**：域 id 目检、配额 token 精确、选样合计对账（domainfix 四域账全平，§4e）。
 - **代码血统**：臂与搜索靠权重文件内容哈希衔接（`weights_id` 入 `.done` 身份，权重文件传路径按内容哈希）。
 
-## 9. 时间线
+## B. 时间线
 
 | 时刻 | 事件 |
 |---|---|
@@ -310,23 +300,24 @@ random3b 净亏分解（Centered Δ vs base）：gpqa −.0673 / arc_challenge �
 | 09-20 04:10/04:23 | natural/domainfix 落地 |
 | 09-20 08:01/08:08 | random3b-rep/climb-终选-rep 落地 → 家族全景判读 |
 | 09-20 10:59/11:06 | L1a 落地（727b08df/5bcebdb6，SUCCEEDED，62h 含排队）→ CP4 9 臂全景 |
-| 09-20 | 判读会收官：四判决闭环 + 八条设计指令 + 下一轮路线（本版 v6） |
+| 09-20 | 判读会收官：四判决闭环 + 八条设计指令 + 下一轮路线 |
 
-工程面：家族四臂全部训满 2861 步 + 训后 eval 存活；worktree 双部署（climbmix_lb/nanochat_lb）全轮零事故；本地 shards+mixed 自动清理（domainfix `.done` 即被清，验证改走发射日志，§4e/§10）。
+工程面：家族四臂全部训满 2861 步 + 训后 eval 存活；worktree 双部署（climbmix_lb/nanochat_lb）全轮零事故；本地 shards+mixed 自动清理（domainfix `.done` 即被清，验证改走发射日志）。
 
-## 10. 工程与口径细节（脚注集中区）
+## C. 工程与口径细节（脚注集中区）
 
 - **[1] Best Score 双口径**：report.md 迭代表的 Best Score 为**迭代时实时口径**；search_state.json accumulated 终值为重排口径（最佳实测 = cfg25 1.2550，§3c）。两口径差异（第 1 轮实时 1.3335 vs 重排后历史最佳 1.2550）与评分修正历史一致，判读一律以 state 终值 + TODO 09-17 条为准；口径确证列 round-2 可选项。
 - **[2] online_eval 第 2 轮退化**：记录 n=38 / spearman=None（代码 nan→None 路径，退化情形未记）。
 - **[3] 终选 6B 产物与 3B 臂的血统**：验证臂 3B 预算用 `optimal_mixture_weights.json` 经 `prepare_random_baseline --weights` 重新选样，不直接消费 `sampled_dataset.parquet`（12.3 GB 赢家 6B 口径选样）；血统靠权重文件内容哈希衔接（`weights_id` 入 `.done` 身份）。
 - **[4] 落地 log 核对**：`Inherited max_seq_len=2048` / `Inherited total_batch_size=1048576` / `Grad accum steps: 8`，与 dispatch 守卫打印一致。
+- **搜索数据源**：report.md 全文 + search_state.json 摘要 + search.log 迭代/终选行（2026-09-20 服务器提取）。
 - **323855b4 冗余提交**（09-17 18:59 重复提交）：落地未留独立产物（同臂重复提交幂等语义），对账职能已由 09-18 复评完成。
 - **ref provenance**：`eval_random.csv`（0.1781）= prod3 random 臂逐字节拷贝件（09-16 晨 CP4 手动渲染时拷入作占位 ref）。**09-20 判读会决定：prod3 random 移出 prod4 对比轴，仅作跨轮佐证**——climb-终选对其 +0.0191（z +2.25）；跨轮告示：prod3 ref 为 ws=32（形状不变量）且 eval 早于 53d0bcd，锚点 PASS + 复刻互差在噪声内缓释。CP4 渲染器仍以它为默认 ref（占位债，判读一律 prod4 内对比）。
 - **NLL 聚合口径**：R1 原记录的 stem NLL 1.86x 系另一聚合口径（保留历史不混用）；本 doc §4b 用 5 任务均值（mmlu nan 除外）。
 - **domainfix 实现细节**：标签源 = `prepare_random_baseline.py --label-source domain`（:200, :268-280）——parquet `category_name` → schema `domain_names` id（数学=0/化学=1/生物学=2/物理=3），读 metadata_cache.npz `cluster_labels` 键（与 15 簇 K-means 标签**不同源**）；配比出处 = quadmix `run_stem_quadmix_vs_manual.sh:40`（数学=60:物理=15:化学=12.5:生物学=12.5）；执行 = 与 CLIMB 臂同一选样器 `select_data_by_mixture`（:305-308），shortfall take-all 不重复不重分配（本次未触发）。`.done` 被 clean_derived_data 按设计清除 → 验证走发射日志 plan 块（`prod4_domainfix_arm.log`）。
 - **家族臂训练健康度**：明细未逐一摘录（各臂 `mid_train_*.log`），收尾抽查项（dt/mfu vs R1 锚点）。
 
-## 11. 产物索引（服务器产物名 = artifact 名，与 §1 显示名对照）
+## D. 产物索引（服务器产物名 = artifact 名，与 §1 显示名对照）
 
 - run 目录：`result/prod4_current/`；自动报告 `report.md` + `predictor_scatter.png` + `domain_distribution.png`
 - 搜索结构化：`search_state.json`（111 点权重+分数+逐任务 acc/nll、predictor_eval 含 held-out (pred, actual) pairs、online_eval、pruning_history、history_seed identity）、`search.log`（13.4 MB）、`optimal_mixture_weights.json`、`pipeline_summary.json`、`cluster_info.json`、`balanced_profile.json`、`cluster_cache.npz`（929 MB，final_labels）、`sampled_dataset.parquet`（12.3 GB，赢家 6B 选样）；逐实验 `exp_0054`–`exp_0110`
@@ -336,3 +327,11 @@ random3b 净亏分解（Centered Δ vs base）：gpqa −.0673 / arc_challenge �
 - 本地重评（新协议预演）：`/home/ma-user/work/tmp/reeval_0918/{climb,random3b}_new_protocol.csv`
 - worktree（保留至激活）：`/home/ma-user/work/climbmix_lb@b93bb97`、`/home/ma-user/work/nanochat_lb@0c1229f`
 - OBS：`<prod-prefix>/prod4/target_arms/{climb,random3b,natural,domainfix,climb_rep,random3b_rep}/mixture_data_k*`（完整桶前缀属内部值，见服务器 audit / launch_env.json，不入公开仓）
+
+## E. 记录沿革与代码基线
+
+- **版本**：v1 = 09-17 R1 首记 → v2 = 09-20 家族全景 + 搜索各自成档 → v3 = 合并"一轮一文档" → v4 = L1a 落地判决 → v5 = 收官 + 算法层指令 → v6 = 双读者重排 → **v7 = 头部去杂（本版，元信息移附录）**
+- **日期线**：09-15 池/聚类/历史注入 → 09-16 搜索收官 + 赢家终选 → 09-17 R1 双臂落地 + L1a 发射 → 09-18 L1b 发射 + eval 协议合并 → 09-19 T1 双复刻发射 → 09-20 家族落地 → 09-20 10:59/11:06 L1a 落地 → 9 臂全景 → 判读会收官
+- **代码基线**：搜索 = 指纹 `.fingerprint_search`（09-15 21:52；历史注入 identity 记 scoring_commit `dda6239`）；臂 R1 = climbmix `bf9690c`→`3df386a` / nanochat-npu `20b94b0` / boot shell climbmix-ma `146f465` / worker tar `a7c56792`；L1b+T1 = climbmix `b93bb97`（worktree 部署绕行主树冻结，产物同落 prod4_current）
+- **协议口径**：全批臂 eval = 旧协议（dispatch 时绑定资产，同批直接可比）；新协议（dev-data-mix `0c1229f`，D17）激活后统一补测（§7）
+- **关联记档**：proxy 选型 = `docs/proxy_and_model_analysis.md`；评分设计 = `docs/scoring_metric_design.md`；D14（balanced K15）/ D17（eval 协议）= `paper_deviations.md`；TODO 09-17「db≥2 内存墙判决」（R1 = 判决后首个全净轮）等条目
