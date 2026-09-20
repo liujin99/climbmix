@@ -16,8 +16,7 @@
 Automated framework that discovers, evaluates, and refines data mixtures
 for language model pre-training through embedding-driven clustering and
 iterative bootstrapping, using **nanochat-npu** as the training backend via
-**method A** (subprocess calls) on an **8-node × 8-NPU Ascend production
-cluster (64 NPUs)** — a full 9-arm validation round consumes
+**method A** (subprocess calls) — a full 9-arm validation round consumes
 **≈1,800 NPU-hours**.
 
 The CLIMB premise is validated at target-model scale in our production
@@ -35,9 +34,8 @@ appendix.
 
 All arms: d28 (~2.5B), 3B tokens, identical training recipe and eval
 protocol; STEM = centered-accuracy mean over 6 tasks (4 MC + 2 generative
-CoT); seed pairs where marked. Round cost: **≈1,800 NPU-hours** on the
-8-node × 8-NPU Ascend cluster (d20 search stage + 8 target arms +
-anchor/failed launches included).
+CoT); seed pairs where marked. Round cost: **≈1,800 NPU-hours**
+(d20 search stage + 8 target arms + anchor/failed launches included).
 
 | Arm | STEM | gsm8k_cot |
 |---|---|---|
