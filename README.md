@@ -6,9 +6,12 @@
 > commercial applications. The original paper and official data can be found at:
 > [https://research.nvidia.com/labs/lpr/climb/](https://research.nvidia.com/labs/lpr/climb/)
 
-> **Paper**: Shizhe Diao et al. (NVIDIA, NeurIPS 2025)
+> **Paper**: *Nemotron-CLIMB: CLustering-based Iterative Data Mixture
+> Bootstrapping for Language Model Pre-training* — Shizhe Diao et al.
+> (NVIDIA, NeurIPS 2025)
 >
-> [arXiv:2504.13161](https://arxiv.org/abs/2504.13161)
+> [arXiv:2504.13161](https://arxiv.org/abs/2504.13161) ·
+> [Project page](https://research.nvidia.com/labs/lpr/climb/)
 
 Automated framework that discovers, evaluates, and refines data mixtures
 for language model pre-training through embedding-driven clustering and
