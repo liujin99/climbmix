@@ -1,0 +1,54 @@
+cff-version: 1.2.0
+message: >-
+  If you build on this reproduction, please cite it as below, and cite
+  the original Nemotron-CLIMB paper listed under preferred-citation.
+title: CLIMBmix
+authors:
+  - alias: liujin99
+repository-code: "https://github.com/liujin99/climbmix"
+license: Apache-2.0
+keywords:
+  - data-mixture
+  - pretraining-data
+  - mid-training
+  - llm-pretraining
+  - reproduction
+preferred-citation:
+  type: article
+  title: >-
+    Nemotron-CLIMB: CLustering-based Iterative Data Mixture Bootstrapping
+    for Language Model Pre-training
+  authors:
+    - family-names: Diao
+      given-names: Shizhe
+    - family-names: Yang
+      given-names: Yu
+    - family-names: Fu
+      given-names: Yonggan
+    - family-names: Dong
+      given-names: Xin
+    - family-names: Su
+      given-names: Dan
+    - family-names: Kliegl
+      given-names: Markus
+    - family-names: Chen
+      given-names: Zijia
+    - family-names: Belcak
+      given-names: Peter
+    - family-names: Suhara
+      given-names: Yoshi
+    - family-names: Yin
+      given-names: Hongxu
+    - family-names: Patwary
+      given-names: Mostofa
+    - family-names: Lin
+      given-names: Yingyan
+    - family-names: Kautz
+      given-names: Jan
+    - family-names: Molchanov
+      given-names: Pavlo
+  year: 2025
+  journal: "Advances in Neural Information Processing Systems (NeurIPS 2025); arXiv:2504.13161"
+  identifiers:
+    - type: doi
+      value: "10.48550/arXiv.2504.13161"

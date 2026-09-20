@@ -74,40 +74,52 @@ Full report: [docs/experiment_prod4.md](docs/experiment_prod4.md).
 
 ## Algorithm Pipeline
 
+What the production rounds actually run. Every deliberate deviation from
+the paper's defaults is itemized in
+[docs/paper_deviations.md](docs/paper_deviations.md) (D1–D17).
+
 ```
 STEM Data Pool (100B parquet, 116M docs, 1000 shards)
   ↓
 Embedding Cluster (stella_en_400M_v5 → FAISS K-means K_init=1000 →
-   prune (threshold 3.0) + band merge (τ=0.9) → K ∈ [3, 15]; per-run
-   merge_profile.json + printed tuning advice)
+   prune (avg threshold 3.0 + per-column floor 2.0) → macro clusters:
+   MERGE_STRATEGY=balanced, capacity-constrained partition to exactly
+   K=15 — D14: distance merging chain-collapses on this pool's single
+   continuous manifold; distance mode is kept only as a paper-faithful
+   control. Per-run audit: balanced_profile.json)
   ↓
-Iterative Bootstrapping Search:
-  Iteration 1: Dirichlet sample 20 configs → d20 proxy train+eval → fit predictor
-  Iteration 2: Predictor-guided 10 configs → d20 proxy train+eval → update predictor
-  Iteration 3: Predictor-guided  5 configs → d20 proxy train+eval → final predictor
-  (8 experiments in parallel, 1 NPU each; token-capped data selection, default 200M/exp;
-   production rounds: history-injected [54, 36, 18] configs @ 400M single-pass)
+Iterative Bootstrapping Search — warm-started (docs/reuse_design.md):
+   prod4 = 54 history-injected measured points (inherited from prod3,
+   zero NPU cost) + [36, 18] fresh configs; each = d20 proxy train+eval
+   with single-pass token-capped selection (400M/exp in prod4; code
+   default 640M = 80% of the paper's ~800M)
   ↓
 Each proxy experiment: 70% STEM (by cluster weights) + 30% ClimbMix general
-  (adaptive 3-50 shards, reverse download from shard 6542 → avoids pretrain overlap)
+   (adaptive 3-50 shards, reverse download from shard 6542 → avoids pretrain overlap)
   ↓
-Predictor ranks candidates → optimal mixture α*
+Final selection: LightGBM predictor argmin over the design space
+   (4 concentration levels × 25K Dirichlet candidates + 5K refine near
+   the argmin) → optimal mixture α*
   ↓
-Target training: d28 mid-train with α* + 30% ClimbMix (same mixing)
+Target arms: d28 mid-train with α* + 30% ClimbMix (same mixing) vs
+   uniform-cluster baseline (equal weights 1/K, paper App. C.1; same
+   token cap and same shortfall policy, seed 42)
   ↓
-STEM benchmark eval (arc_easy, arc_challenge, mmlu_stem, gpqa_diamond, gsm8k_cot, math_cot_500)
-  + random-baseline comparison (equal cluster weights 1/K, paper App. C.1;
-    same token cap and same shortfall policy as the CLIMB arm, seed 42)
-  ↓
-Output: report + sampled_dataset.parquet + target_result.json
+STEM benchmark eval (arc_easy, arc_challenge, mmlu_stem, gpqa_diamond,
+   gsm8k_cot, math_cot_500) → report + sampled_dataset.parquet
 ```
+
+prod4's key negative result sits exactly at the final-selection step:
+both *measured* top configs beat the never-measured extrapolated winner
+(a soft winner's curse). Next-round priority is a best-measured fallback
+with a no-claim guard — see [Results](#results--round-reports).
 
 ## Key Design Choices
 
 - **method A**: ProxyRunner/TargetRunner call nanochat `mid_train.py` + `base_eval.py` as subprocesses
-- **d20 proxy** (435.2M scaling, 1000 iterations) → **d28 target** (auto-detected from `meta_*.json`)
-- **8 parallel experiments**: `--npu-per-exp 1` runs 8 proxy experiments concurrently on 8 NPUs (set 0 = sequential, all NPUs per experiment)
-- **Token caps**: `--proxy-target-tokens 200M` / `--target-tokens 1B` cap data selection (0 = all available — never leave 0 on the full 100B-token pool; suffix syntax `2B/10M/500K` supported)
+- **d20 proxy** (435.2M scaling) → **d28 target** (~1.5B scaling, auto-detected from `meta_*.json`); training steps are **derived from token budgets** — steps = tokens / total_batch_size (read from ckpt meta); the old step knobs are gone (launch aborts if set)
+- **8 parallel experiments**: `--npu-per-exp 1` runs 8 proxy experiments concurrently on 8 NPUs (set 0 = sequential, all NPUs per experiment); production fleets also mix in remote jobs (docs/remote_setup.md)
+- **Token caps**: `--proxy-target-tokens 640M` / `--target-tokens 2B` cap data selection (0 = all available — never leave 0 on the full 100B-token pool; suffix syntax `2B/10M/500K` supported)
 - **70% STEM + 30% ClimbMix**: adaptive shard count (`calc_climbmix_count`, clamped [3, 50]), not full 400B
 - **Reverse-order download**: shards from MAX_SHARD (6542) backwards, avoids overlap with pretrain (shards 0-999)
 - **Stream-based mixing**: `stream_texts_uniform` + `endless_generator`, memory-efficient
@@ -139,6 +151,8 @@ climbmix/
 ├── docs/
 │   ├── experiment_prod*.md            # Per-round experiment records (reader-facing report up front, dev details at the back)
 │   ├── paper_deviations.md             # Itemized deviations from the paper (arXiv:2504.13161) + consistency audit
+│   ├── remote_setup.md                 # Remote-fleet setup + embedding wave/merge operations
+│   ├── reuse_design.md                 # Cross-run reuse design (warm start, extension scripts)
 │   ├── scoring_metric_design.md        # SNR-weighted scoring design + proxy/target training-budget comparison
 │   ├── proxy_and_model_analysis.md     # Proxy/target model-size analysis
 │   ├── embedding_performance.md        # Embedding throughput notes
@@ -156,10 +170,18 @@ climbmix/
 │       └── large_scale_sample.sh       # Large-scale sampling from a finished run's optimal mixture (no training)
 ├── scripts/
 │   ├── run_climb.py                     # CLI entry point
+│   ├── dispatch_target_arm.py           # Remote target-arm dispatch (three-layer fallback)
+│   ├── inject_history.py                # Warm-start seed builder (history reuse)
+│   ├── rescore_search.py                # Re-rank a finished search under a new scoring formula
+│   ├── derive_target_steps.py           # steps = tokens / total_batch_size (single source of truth)
+│   ├── gen_natural_weights.py           # Natural (pool-proportional) baseline weights
 │   ├── mix_general_data.py             # Adaptive shard download + stream mixing
 │   ├── prepare_shards.py               # parquet → nanochat shards (val = last shard)
+│   ├── prepare_random_baseline.py       # Random / fixed-weight baseline data prep
+│   ├── check_disk_budget.py             # Arm-launch disk preflight
+│   ├── clean_derived_data.py            # Post-upload local cleanup (guarded, dry-run default)
 │   ├── get_model_info.py               # Auto-detect scaling params from meta_*.json
-│   └── prepare_random_baseline.py       # Random baseline data prep
+│   └── diagnostics/                     # Test suites + ops probes
 └── src/climbmix/
     ├── core/
     │   ├── types.py                     # Config + auto_detect_depth_info + DEPTH_INFO
@@ -289,19 +311,20 @@ python scripts/run_climb.py --help
 
 # Key options:
 --proxy-depth 20          # nanochat model depth (20=435M scaling, production default)
---target-depth 28         # Target model depth (auto-detected from meta_*.json)
---proxy-num-iterations 1000  # Fixed training steps (not ratio-based)
+--target-depth 28         # Target model depth (~1.5B scaling, auto-detected from meta_*.json)
+--proxy-target-tokens 640M # Per-experiment data budget; steps DERIVED = tokens/tbs
+                           #   (610 steps @ tbs 1,048,576; 800M = paper-equivalent)
 --proxy-lr-scale 1.0      # Annealing LR scale (1.0 = continue from base)
 --proxy-warmup 0.0        # No re-warmup (CLIMB annealing)
 --proxy-warmdown 0.9      # 90% warmdown for annealing
---proxy-target-tokens 200M # Per-experiment data cap (0 = all; accepts 2B/10M/500K/1.5B)
---target-tokens 1B        # Cap for final target data selection (0 = all)
+--target-tokens 2B        # Target data cap (1907 steps derived; prod1/2 ran 1B historically)
 --K-init 1000             # Initial K-means clusters before prune+merge
---K-enhanced 3            # Cluster-count floor (safety bound; set to paper's K for fixed-K semantics)
---K-max 15                # Cluster-count cap; K_final = clamp(natural_K(0.9), 3, 15)
+--K-enhanced 15           # Macro-cluster count (balanced partition to exactly K; production)
+--K-max 15                # Distance-mode cap only; balanced mode: K_max ≡ K_enhanced
 --configs-per-iter 20,10,5  # Search: 20 random + 10+5 predictor-guided
+                           #   (warm-start rounds: first slot = history points)
 --npu-per-exp 1           # NPUs per proxy experiment (0=all sequential; 1=8 parallel)
---device-type npu          # NPU (default) or cpu
+--device-type npu         # NPU (default) or cpu
 --nanochat-base-dir /path  # Checkpoint storage (default: /home/ma-user/work/nanochat_model_dir)
 --general-data-dir /path   # ClimbMix shard cache dir
 --stem-ratio 0.7           # 70% STEM + 30% ClimbMix (default)
@@ -318,6 +341,38 @@ python scripts/run_climb.py --help
 - **sentence-transformers**: for embedding (stella_en_400M_v5); NPU inference may require torch_npu, fallback to CPU
 - **faiss-cpu**: for K-means clustering
 - **torch_npu**: optional, for Ascend NPU support
+
+## Environment & Limitations
+
+This repository is the **companion code of a research report**, not an
+out-of-the-box product. Honest scope:
+
+**Fully available here** — the complete pipeline code (embedding,
+clustering, search, scoring, sampling, single-pass guards), the launcher
+family, the diagnostics test suites, per-round experiment records with
+every number, and the paper-deviation ledger
+([docs/paper_deviations.md](docs/paper_deviations.md)).
+
+**Not runnable as-is outside the original environment**, by design:
+
+- **Ascend 910B NPUs + CANN** — training and eval go through nanochat-npu
+  and torch_npu; there is no CUDA or CPU training path.
+- **nanochat-npu** (external backend repo) must be present at the
+  configured path with its base checkpoints.
+- **Data pools are not redistributed** (data-governance policy): the
+  100B STEM parquet pool, the ClimbMix general shards, and all model
+  weights stay private. Mixtures are reproducible in *composition*
+  (cluster weights + selection rules are fully specified), not in raw
+  bytes.
+- **The remote fleet** needs an OBS-compatible object store plus a
+  private job-dispatch backend adapter (`REMOTE_BACKEND_MODULE`); a mock
+  backend (`REMOTE_BACKEND=mock`) exists for local end-to-end
+  simulation.
+- The launch config (`~/.config/climbmix/remote_ma.json`) holds secrets
+  and OBS prefixes and never enters git.
+
+Reading order for reproduction purposes:
+README → docs/experiment_prodN.md → docs/paper_deviations.md → source.
 
 ## License
 
