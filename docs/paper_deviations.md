@@ -29,6 +29,7 @@
 | D15 | 目标臂优化器状态 | 未记载(论文以外部 base 为冻结起点,无优化器延续概念) | 单节点臂加载 d28 预训练 8-shard 优化器(prod1 行为);多节点臂(TARGET_ARM_NODES=4,ws=32)**冷启动**(`--load-optimizer=0`) | 8-shard moments 在 ws≠8 形状对不上(AdamW reduce_scatter 断言,run 601cdb67),非可选项;两臂同语义(本地兜底同步冷启动),`target_load_optimizer` 进 target 指纹;语义上与论文口径一致(外部 base 本就无优化器状态可载) |
 | D16 | 单遍退火 | consumption ≤ mixture(单遍语义) | prod1/prod2 实测 **~2.5-4 epoch wrap**(loader 日志直证);2026-09-11 修复:steps=TOKENS/tbs + mix 池=预算/0.7 → 构造性单遍 epoch≈0.7 | 三重叠加:tbs 误设(回退值 524,288 当真值,真实 meta 1,048,576)+ mix 定尺寸 bug(池=预算×0.98 非 /0.7)+ ClimbMix 分片常量错 6×(500K vs 实测 85K);详见细节 D16 |
 | D17 | 生成式评测协议 | lm-eval-harness 惯例:`until` 停止串 + 每任务生成预算(GSM8K/MATH 默认 256) | 2026-09-17 起:gsm8k_cot cap 256 + 停止串 `\nAnswer: `;math_cot_500 cap 256→**1024** + 停止串 `\n\nSolution: `;**NLL prompt 预算冻结 1792 与生成预算解耦** | base 模型 few-shot 无 EOS(实测 hit_cap 99.85%@256),答后幻觉轮污染 math rfind-boxed 抽取;gold 实测 30.2% 超 256(p95=643/p99=893)。A/B 实证(d28_random_prod3,8×910B4):旧协议逐位复现、gsm8k 停止串噪声级、math 512→1024 marker 18.8→25.8%;NLL 全程与历史逐位一致。断代边界:仅 math accuracy 列;详见细节 D17 |
+| D18 | 生成式评测解码批(2026-09-20) | lm-eval-harness 批大小为实现参数(与复现无关) | gen batch 默认 **8→16**(CLI 与 evaluate_core 签名同翻,全库单一默认):**分数中性非位等** — 批→GEMM 切分→求和序→近平局 argmax 翻面 ~5/1319 行(实证 gsm8k 158/1319、math 11/500 对题数恒等);NLL 列(teacher-forced)不受批影响、逐位一致 | 生成 eval 吞吐 -18%(叠加同批位等优化 -41%:172→102ms/解码步);**代际边界**:prod1-4 落地 CSV + R1 补测 = b8 era,激活补测起 = b16 era(补测直接吃新默认,与未来轮同配);跨代对账语义 = NLL 逐位 + 生成 acc 噪声级(±1 题 ≈ ±0.0008 ≪ seed-pair 带 ±0.016-0.032)。详见细节 D18 |
 
 ## 细节与出处
 
@@ -311,6 +312,42 @@ speedrun 不变。
   静默失败);worker 修复 = 下载/symlink 后校验 model_*.pt,缺即报带
   架构说明的错;eval-only 的 ckpt 必须走输入侧(ckpt_src → 资产挂载/
   exp 输入快照,base 锚点一直如此)。
+
+### D18 生成式评测解码批默认 8→16:分数中性非位等 + 代际边界(2026-09-20)
+
+背景:nanochat-npu `eval-gen-perf` 分支(guard 会话,tip `b723442`,基于
+dev-data-mix@0c1229f)合并的主 agent 裁决记录。五提交 C1-C5:权重预转
+bf16(每次加载位等自检)/ 无同步 ragged-decode KV 快路径 / 贪心解码
+流水线化 / 停止串引擎早停(仅贪心路径,分数可证不变)+ GEN-DIAG 日志
+6→7 槽(+avg_gen_len) / `--gen-batch-size` CLI。
+
+- **协议语义变化仅在批默认**:C1-C4 数值位等——旧协议全量 ×6 逐位复现
+  (gsm8k 0.1190/0.6420、math 0.0180/0.8460)、C2 on/off 位等、NLL 全
+  程逐位——性能部分不属偏差。**b16 默认**(主 agent 裁决方案 (a):CLI
+  与 evaluate_core 签名同翻,全库单一默认,不留"CLI 16 / 函数 8"分裂
+  隐患)使生成列 acc 与 b8 历史不再逐位:批大小→GEMM 切分→浮点求和
+  序→近平局 argmax 翻面(~5/1319 行;分数恒等实证:gsm8k 158/1319、
+  math 11/500 对题数不变,GEN-DIAG 小幅漂移属预期)。
+- **NLL 列免疫**:teacher-forced 全序列路径与生成批无关,所有 run 的
+  nll 列逐位一致——对账不变量栈(NLL 逐位 + 锚点 4 位)完整保留。
+- **性能**:每解码步 172→102ms(**-41%**;归因 KV 快路径 ~53ms / 贪心
+  流水线 10ms / 权重预转 7ms);b16 再 **-18%**(新协议 8 卡
+  d28_random_prod3:gsm8k 490→416s、math 754→603s);每步成本模型
+  F≈34ms(launch)+7.1ms/行两次实测验证;b32 外推仅 -8% 且 KV 按 2048
+  全长预分配会顶爆 HBM,不做。单臂新协议 eval 参考耗时 ~30min。
+- **代际边界**:b8 era = prod1-4 落地 CSV + R1 补测(位等复现域,历史
+  记录);b16 era = **激活补测起**(裁决:补测不钉 b8、直接吃新默认,
+  与未来所有轮同配——避免"补测 8 + 未来 16"双批星号;R1 位等对账已
+  完成入档,无需重做)。跨代对账语义:NLL 逐位 / 生成 acc 噪声级
+  (±1 题 ≈ ±0.0008 ≪ seed-pair 带 ±0.016-0.032,任何判决不改变方向)。
+- **climbmix 侧适配核查(2026-09-20)**:全仓 grep 零按位置解析 GEN-DIAG
+  的代码(仅本文档提及);数据流全走 CSV 且 CSV 指标列不变 → CP4/
+  panorama 渲染不受影响。
+- 逃生门:`NANOCHAT_EVAL_WEIGHTCAST=0` / `NANOCHAT_KV_FAST=0` /
+  `NANOCHAT_GEN_PIPELINED=0`(C1/C2/C3);批大小按需 `--gen-batch-size`。
+- 执行状态:guard 会话按本裁决执行(ff `b723442` → dev-data-mix + 单行
+  默认翻 16 提交 + 清 wip_claims + 删 gatescripts 临时分支);最终
+  dev-data-mix tip SHA 待回传,回填激活序列记录(现记 0c1229f)。
 
 ## 已核对一致(正向审计)
 
