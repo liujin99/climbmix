@@ -15,19 +15,57 @@ for language model pre-training through embedding-driven clustering and
 iterative bootstrapping, using **nanochat-npu** (8×910B Ascend NPU) as the
 training backend via **method A** (subprocess calls).
 
-## Experiment Reports
+The CLIMB premise is validated at target-model scale in our production
+rounds: search-found mixtures beat uniform / natural / domain-ratio
+baselines by **+0.014–0.031 STEM** on a d28 (~2.5B) model at a 3B-token
+mid-training budget — see [Results](#results--round-reports).
 
-Each production round gets a single record file (`docs/experiment_prodN.md`)
-whose front half is a reader-friendly closeout report (Chinese; also mirrored
-to the internal wiki) and back half holds developer details (timelines,
-protocol caveats, artifact paths).
+## Results & Round Reports
 
-- [prod4 (2026-09-20)](docs/experiment_prod4.md) — CLIMB premise validated at
-  d28 scale: search-found mixtures beat uniform/natural/domain-ratio baselines
-  by +0.014–0.031 STEM. The selection mechanism's argmin extrapolation adds
-  nothing over measured configs (soft winner's curse) — selection-policy fixes
-  (best-measured fallback + no-claim guard) are the priority before the next
-  search round. 9 arms, seed-pair replication, full verification stack.
+Each production round gets one record file (`docs/experiment_prodN.md`):
+a reader-friendly closeout report up front, developer details in the
+appendix.
+
+### prod4 (2026-09) — winner-validation round, 9 arms
+
+All arms: d28 (~2.5B), 3B tokens, identical training recipe and eval
+protocol; STEM = centered-accuracy mean over 6 tasks (4 MC + 2 generative
+CoT); seed pairs where marked.
+
+| Arm | STEM | gsm8k_cot |
+|---|---|---|
+| **CLIMB-cfg72** (measured search config, rank #2) | **0.2142** | **0.3116** |
+| **CLIMB-cfg25** (measured search config, rank #1) | 0.2066 | 0.2714 |
+| CLIMB-winner (interpolated selection, seed 42/43) | 0.1972 / 0.1990 | 0.2578 / 0.2381 |
+| uniform-cluster baseline (seed 42/43) | 0.1647 / 0.1833 | 0.1077 / 0.1228 |
+| natural (pool-proportional) | 0.1705 | 0.1069 |
+| domain-ratio (external manual ratio, math 60%) | 0.1804 | 0.1289 |
+| base model (no mid-training, reference) | 0.1746 | 0.0273 |
+
+Key findings:
+
+- **CLIMB premise validated at target scale** — search-found mixtures beat
+  every non-search baseline by +0.014–0.031 STEM; gains concentrate in
+  generative math reasoning (gsm8k 2.4–2.9× the uniform family, 11× the
+  base model).
+- **Novel finding: the selection mechanism is the weak link** — the
+  predictor's argmin extrapolation over the design space added nothing over
+  *measured* configs (both measured points beat the never-measured
+  interpolated winner; a soft winner's curse, presaged by the predictor's
+  thin response in exactly the directions the winner extrapolated).
+  Next-round priority: best-measured fallback + no-claim guard. The paper
+  does not discuss this failure mode.
+- **Domain-level ratios are not a substitute** — a hand-tuned 4-domain
+  mixture (math 60%) lands inside the uniform band; the win comes from
+  cluster-level structure, not "more math".
+- **Rigor as a standing policy** — seed-pair replication (gaps reported as
+  bands), remote-eval anchor reconciliation (4-decimal match), eval-protocol
+  freeze within a round, quota-exact data cross-accounting.
+
+Cross-round trajectory (CLIMB vs uniform, same-day budget-matched):
+prod1 −0.004 → prod2 +0.010 → prod4 +0.016–0.032.
+
+Full report: [docs/experiment_prod4.md](docs/experiment_prod4.md).
 
 ## Algorithm Pipeline
 
@@ -42,7 +80,8 @@ Iterative Bootstrapping Search:
   Iteration 1: Dirichlet sample 20 configs → d20 proxy train+eval → fit predictor
   Iteration 2: Predictor-guided 10 configs → d20 proxy train+eval → update predictor
   Iteration 3: Predictor-guided  5 configs → d20 proxy train+eval → final predictor
-  (8 experiments in parallel, 1 NPU each; token-capped data selection, default 200M/exp)
+  (8 experiments in parallel, 1 NPU each; token-capped data selection, default 200M/exp;
+   production rounds: history-injected [54, 36, 18] configs @ 400M single-pass)
   ↓
 Each proxy experiment: 70% STEM (by cluster weights) + 30% ClimbMix general
   (adaptive 3-50 shards, reverse download from shard 6542 → avoids pretrain overlap)
@@ -73,16 +112,20 @@ Output: report + sampled_dataset.parquet + target_result.json
 - **NPU support**: `device_type=npu`, embedding tries `torch_npu` first, fallback to CPU (192 threads)
 - **Self-contained**: `get_model_info.py` + `mix_general_data.py` in `scripts/`, no external repo dependency
 
-## nanochat Model Sizes
+## Model Sizes (nanochat backend)
 
-| depth | scaling(M) | total(M) | VE占比 | CLIMB对标 |
-|-------|-----------|---------|--------|----------|
-| 20 | 435.2 | 896.5 | 51.5% | proxy (production) |
-| 24 | 729.8 | 1384.1 | 43.6% | 56% of CLIMB 1.3B |
-| 28 | auto-detect | auto-detect | — | target (from meta_*.json) |
+| depth | scaling (M) | total (M) | VE share | role |
+|-------|------------|-----------|----------|------|
+| 20 | 435.2 | 896.5 | 46.8% | proxy (production) |
+| 24 | 729.8 | 1,384.1 | 43.7% | 56% of CLIMB 1.3B (scaling) |
+| 28 | 1,477 | 2,481 | 37.9% | target (production), ~1.1× CLIMB 1.3B (scaling) |
 
-VE (Value Embeddings) 占 ~50% 参数但不参与核心计算。对标 CLIMB 时看 **scaling_params**。
-d28 参数从 checkpoint `meta_*.json` 自动读取（三层 fallback: GPTConfig → 公式估算 → DEPTH_INFO 表）。
+VE (Value Embeddings) sit on alternating layers and hold a large share of the
+parameters without participating in the core matmul FLOPs — compare against
+the paper in **scaling_params**. The d28 row is measured from the production
+checkpoint (dtype audit: 182 fp32 transformer matrices + bf16 embeddings +
+fp32 lm_head); depth is auto-detected from `meta_*.json` (three-level
+fallback: GPTConfig → formula estimate → DEPTH_INFO table).
 
 ## Project Structure
 
