@@ -345,9 +345,11 @@ bf16(每次加载位等自检)/ 无同步 ragged-decode KV 快路径 / 贪心解
   panorama 渲染不受影响。
 - 逃生门:`NANOCHAT_EVAL_WEIGHTCAST=0` / `NANOCHAT_KV_FAST=0` /
   `NANOCHAT_GEN_PIPELINED=0`(C1/C2/C3);批大小按需 `--gen-batch-size`。
-- 执行状态:guard 会话按本裁决执行(ff `b723442` → dev-data-mix + 单行
-  默认翻 16 提交 + 清 wip_claims + 删 gatescripts 临时分支);最终
-  dev-data-mix tip SHA 待回传,回填激活序列记录(现记 0c1229f)。
+- 执行状态(2026-09-20 已完成,主 agent 直接执行):dev-data-mix = `0c1229f` →
+  ff `b723442`(C1-C5 五提交)→ `6e5baa2`(默认翻 16,方案 (a) 单默认);
+  guard.list 已清、gatescripts 临时分支已删;本地全套测试绿(新增 4 套
+  41/41 + test_gen_eval_stops 20/20 + test_eval_barrier_flush 5/5)。
+  **激活序列 pull 目标更新为 `6e5baa2`**(原记 0c1229f)。
 
 ## 已核对一致(正向审计)
 
