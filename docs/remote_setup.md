@@ -47,7 +47,7 @@ RemoteExecutor (remote_executor.py)         scheduler — platform-neutral
 - Run `python3 scripts/check_repo_secrets.py` before pushing anything
   that touched `remote/`, `scripts/`, or `docs/`.
 
-The launch fail-fast (`runs/run_climbmix.sh`, real backend): resolve the
+The launch fail-fast (`runs/run_experiment.sh`, real backend): resolve the
 bundle and run its `validate(remote_config)` at launch — gateway/auth/
 image mistakes die with a clear message instead of mid-search.
 
@@ -107,7 +107,7 @@ manually to `{obs_prefix}/assets_big/` — see your backend repo's README
 for its boot shell's expected layout; `scripts/dispatch_remote.py
 --check-assets` verifies the full set.
 
-## 3. Launch knobs (`runs/run_climbmix.sh`)
+## 3. Launch knobs (`runs/run_experiment.sh`)
 
 | Knob | Meaning |
 |---|---|
@@ -139,7 +139,7 @@ for its boot shell's expected layout; `scripts/dispatch_remote.py
    back off and retry; the in-flight peak matches the intended slots.
    The wave also verifies the two-anchor throughput prediction T(4) ≈
    5.3h incidentally and calibrates the pool-full error code.
-4. Green → `REMOTE_ENABLED=1 ... bash runs/run_climbmix.sh`.
+4. Green → `REMOTE_ENABLED=1 ... bash runs/run_experiment.sh`.
 
 ## 4b. Multi-node pool embedding (TODO E — `scripts/embed_dispatch.py`)
 
@@ -173,7 +173,7 @@ Prerequisites (once, on the submit host):
 - The EMBED wave's own assets — the pool parquet set (197 GB, DATA,
   not a package asset) and the stella model dir — are PER-LAUNCH
   mounts, not global config: they stage into embed jobs only, via
-  `embed_dispatch.py --pool-uri/--model-uri` (the `runs/embed_wave.sh`
+  `embed_dispatch.py --pool-uri/--model-uri` (the `runs/infra/embed_wave.sh`
   `POOL_URI`/`MODEL_URI` env knobs). Keep them OUT of the global
   backend config on purpose: every job class stages the global set, so
   a 197 GB pool there would be pulled into every proxy-train job too.
@@ -195,7 +195,7 @@ Where the finished embeddings live (three tiers):
    `<EMBEDDING_CACHE_DIR>/<content-key>/` as the SHARDED format:
    `manifest.json` (the publish gate) + one `block_<unit>.npy` per
    unit (~7.5 GB each, globally consecutive rows) — the exact key
-   run_climbmix.sh Step 1 hits (written there by
+   run_experiment.sh Step 1 hits (written there by
    `scripts/embed_merge.py`, see below). Point `EMBEDDING_CACHE_DIR`
    at the production tree (e.g. `<data-mix-run>/climbmix/cache/
    embeddings`) and the cache investment lives with production.
@@ -231,9 +231,9 @@ Re-use semantics — the cache is a one-time investment:
   is deliberately OUT of the key: ALL ClimbMix experiments on the same
   pool share ONE embedded pool — each run's Step 1 cache-hits and
   continues from clustering onward.
-- Pool GREW by appending shards: re-run `runs/embed_wave.sh` (old
+- Pool GREW by appending shards: re-run `runs/infra/embed_wave.sh` (old
   units' partials are resume-skipped — only the new shards' units get
-  embedded) + re-run `runs/embed_merge.sh` (fresh cache at the new
+  embedded) + re-run `runs/infra/embed_merge.sh` (fresh cache at the new
   key). Incremental cost = embed(new docs) + one merge. Structural
   changes (insert/delete/reorder shards) shift unit boundaries and
   global offsets → the merge fails loudly; that's a new pool and a
@@ -244,9 +244,9 @@ Re-use semantics — the cache is a one-time investment:
 Smoke (one 8-card job, 2 shards, ~10 min end to end — verifies the
 mount-read → NPU fp16 math → upload chain; `--compare-local` re-embeds
 the same shards through climbmix's own single-card path and demands
-byte-identical output). The `runs/embed_wave.sh` wrapper carries the
+byte-identical output). The `runs/infra/embed_wave.sh` wrapper carries the
 boilerplate; every knob is an env var (MAX_JOBS, UNIT_SHARDS, ... —
-same convention as run_climbmix.sh). Smoke cadence: the FULL compare
+same convention as run_experiment.sh). Smoke cadence: the FULL compare
 re-embeds the whole unit on one local card (~40 min — the gold bar,
 run it once per environment); `SMOKE_SAMPLES=2048` compares a random
 2048-doc sample instead (~1 min — the per-document attention path
@@ -257,7 +257,7 @@ use when iterating on dispatch/boot plumbing):
 ```
 SMOKE=2 REMOTE_CONFIG=<backend repo>/config/remote_config.json \
     POOL_URI=obs://<bucket>/<pool dir> \
-    MODEL_URI=obs://<bucket>/<pkg>/stella bash runs/embed_wave.sh
+    MODEL_URI=obs://<bucket>/<pkg>/stella bash runs/infra/embed_wave.sh
 # 等价的裸命令 (wrapper 内部执行):
 # python3 scripts/embed_dispatch.py \
 #     --remote-config <backend repo>/config/remote_config.json \
@@ -279,8 +279,8 @@ resume-skipped). submit() rejections (pool full) back off and retry
 with the RemoteConfig `submit_retry_*` knobs.
 
 ```
-bash runs/embed_wave.sh                  # MAX_JOBS=6 默认 (POOL_URI/MODEL_URI 同烟雾)
-MAX_JOBS=8 bash runs/embed_wave.sh       # 64 卡
+bash runs/infra/embed_wave.sh                  # MAX_JOBS=6 默认 (POOL_URI/MODEL_URI 同烟雾)
+MAX_JOBS=8 bash runs/infra/embed_wave.sh       # 64 卡
 SHARD_OFFSET=160 FORCE=1 ...             # 续波 / 强制重发
 ```
 
@@ -302,9 +302,9 @@ RAM > local /tmp > the cache dir), cutting per-unit mount IO from
 ~40-70 min — the log's per-unit ETA lines calibrate it live):
 
 ```
-bash runs/embed_merge.sh
-MERGE_WORKERS=4 bash runs/embed_merge.sh     # 挂载并发不扩展时降档
-# wrapper 默认: --data-dir = run_climbmix.sh 的 DATA_DIR,
+bash runs/infra/embed_merge.sh
+MERGE_WORKERS=4 bash runs/infra/embed_merge.sh     # 挂载并发不扩展时降档
+# wrapper 默认: --data-dir = run_experiment.sh 的 DATA_DIR,
 #   --cache-dir = 同名 EMBEDDING_CACHE_DIR 旋钮 (指向生产树即落生产缓存)
 #   npz 暂存: MERGE_TMP_DIR=auto (/dev/shm > /tmp > cache 目录)
 # 产物: <EMBEDDING_CACHE_DIR>/<key>/{manifest.json, block_<unit>.npy × 63}
@@ -385,7 +385,7 @@ REMOTE_BACKEND_MODULE=<backend_pkg>:create_backend \
 REMOTE_OBS_PREFIX=obs://<bucket>/climbmix_prod \
 NPU_PER_EXP=4 \
 REMOTE_MAX_JOBS=6 \
-bash runs/run_climbmix.sh
+bash runs/run_experiment.sh
 # image/pool default to the platform config; REMOTE_IMAGE/REMOTE_POOL_NAME
 # override per launch. REMOTE_NPU_PER_JOB defaults to NPU_PER_EXP (=4,
 # fleet-wide k); REMOTE_LOCAL_PARALLEL defaults to 1 (local 8 cards =

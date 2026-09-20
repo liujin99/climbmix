@@ -22,7 +22,7 @@ hit written at `<EMBEDDING_CACHE_DIR>/<content-key>/embedding_cache.npy`
 (the key hashes shard names+sizes+model+truncate-len — see
 CLIMBPipeline._pool_embedding_cache_dir). Set EMBEDDING_CACHE_DIR to
 the production tree (e.g. <data-mix-run>/climbmix/cache/embeddings)
-and the merge lands exactly where run_climbmix.sh Step 1 looks. The
+and the merge lands exactly where run_experiment.sh Step 1 looks. The
 OBS unit partials (~475 GB) are the durable tier: keep them — a wiped
 local disk re-merges in ~1-2h instead of re-embedding 40h.
 

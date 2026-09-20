@@ -44,7 +44,7 @@ GENERAL_DATA_DIR="${GENERAL_DATA_DIR:-$NANOCHAT_BASE_DIR/climbmix_shards}"
 NUM_NPU="${NUM_NPU:-8}"
 # ───────────────────────────────────────────────────────────────────
 
-# TARGET_STEPS 非旋钮 (与 run_climbmix.sh 同规则): 步数来自 run 的
+# TARGET_STEPS 非旋钮 (与 run_experiment.sh 同规则): 步数来自 run 的
 # launch_env.json; TARGET_TOKENS 覆盖 run 预算时由下方推导块重派生。
 if [ -n "${TARGET_STEPS:-}" ]; then
     echo "✗ TARGET_STEPS=${TARGET_STEPS} is no longer a knob — set the budget instead (TARGET_TOKENS=3B re-derives steps)."

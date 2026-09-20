@@ -57,7 +57,7 @@ OBS 内部分两区，判据 = 生产者 + 再生成本 + 生命周期不同：
 - **池身份（内容级，第一前提）**：K 相同 ≠ 池相同——权重向量活在簇空间里，两个不同池各自聚成 K=15，同一权重指代的是不同文档集合。池身份 = `pool_embedding_cache_key`（sha256 of 全部分片名+大小、嵌入模型、截断长度、采样数，`utils/embed_cache.py`——与 pool-keyed 缓存同源，每个 run 的 search.log 都记录过）。`runs/run_extend_experiment.sh` 发射前自动核验：源 key（search.log 记录）vs 当前 key（现场扫 DATA_DIR 计算），不等**拒绝发射**；源无 search.log 时退回 DATA_DIR 路径级比对（不等亦拒绝）。局限（与指纹同级）：同名同大小的内容替换检测不到。
 - **K（池维度）**：注入工具硬校验 + `_load_state` 已有的 n_clusters 守卫（不匹配 → 丢弃状态重新开始）。
 - **池内容**：新 run 的 `cluster_cache.npz` **必须从旧 run 复制，不重新生成**（cluster 重生成有随机性，参数相同池子也可能不同）。注入工具对 `--pool` 指定的 cache 计算 sha256 记入种子溯源块；缓存继承 = 双文件（`cluster_cache.npz` + `cluster_info_cache.json`，缺一会触发重新聚类）。
-- **训练/eval 配置**：`runs/run_extend_experiment.sh` 自动 diff 源 run 的 `launch_env.json` 语义键 vs 当前发射参数（env 覆盖 > run_climbmix.sh EDIT 块默认值），不一致逐键列出并拒绝；`DATA_DIR`/`GENERAL_DATA_DIR` 路径不同仅警告（内容终审由池 key 把关）。
+- **训练/eval 配置**：`runs/run_extend_experiment.sh` 自动 diff 源 run 的 `launch_env.json` 语义键 vs 当前发射参数（env 覆盖 > run_experiment.sh EDIT 块默认值），不一致逐键列出并拒绝；`DATA_DIR`/`GENERAL_DATA_DIR` 路径不同仅警告（内容终审由池 key 把关）。
 
 **数据模型：raw 与 derived 分离**。`search_state.json` 里的 `accumulated_per_benchmark`（每任务原始 acc/NLL）是**不可变事实**；`accumulated_scores` 是 raw × 评分公式的**派生物**，可随公式版本重算（这正是 rescore 存在的理由；prod2 的 w 单位 bug 教训）。
 
@@ -119,11 +119,11 @@ python3 scripts/inject_history.py \
    - `n_clusters = K`、`accumulated_configs / per_benchmark / scores` = 历史点；
    - **丢弃**源 run 的 `predictor_eval / online_eval / pruning_history / last_c_eff`（旧 run 的诊断记录，轮次编号与新上下文冲突，只会误导报告；溯源进种子块）；
    - `history_seed` 溯源块：`{source_runs, n_points, pool_sha256, scoring_commit, injected_at}`。
-5. 新 run 发射时 shell 无条件传 `--resume-search`（run_climbmix.sh Step 3），bootstrapper `_load_state` 读到种子 → `_refit_predictor` 在历史点上重拟合 → **iter2 起直接 guided 采样**，exp id 从 N+ 开始，`_reconstruct_iteration_results` 把历史点归位为 iter1（后续崩溃恢复的归因也正确）。
+5. 新 run 发射时 shell 无条件传 `--resume-search`（run_experiment.sh Step 3），bootstrapper `_load_state` 读到种子 → `_refit_predictor` 在历史点上重拟合 → **iter2 起直接 guided 采样**，exp id 从 N+ 开始，`_reconstruct_iteration_results` 把历史点归位为 iter1（后续崩溃恢复的归因也正确）。
 
 bootstrapper 改动（最小）：`_save_state`/`_load_state` 增加 `history_seed` 字段往返；`_load_state` 看到种子时大声打印来源。种子在后续每次 `_save_state` 中原样保留。
 
-**发射预算语义**：`CONFIGS_PER_ITER` 永远 = **本 run 自己的轮次计划**。热启动时历史点是"地基"不算轮次：search 阶段自动把历史数补进底层列表头（地基占 iter1）并打印预算分解。prod3 想要"30 历史 + 30 新点" → `CONFIGS_PER_ITER="20,10"`（新实验第 1 轮 20、第 2 轮 10）→ 壳内规范化为底层 `30,20,10` 并打印 `总实验数 = 30 历史 + 30 新 = 60`。兼容写法：第 1 槽恰好等于历史数时视为"含历史"写法，不重复补。中断续跑同一命令同一写法（壳从 state 的 `history_seed` 识别注入型 run 并自动补槽）。注意：手动谱直接跑 `run_climbmix.sh` 没有壳的规范化，必须写含历史的完整列表。
+**发射预算语义**：`CONFIGS_PER_ITER` 永远 = **本 run 自己的轮次计划**。热启动时历史点是"地基"不算轮次：search 阶段自动把历史数补进底层列表头（地基占 iter1）并打印预算分解。prod3 想要"30 历史 + 30 新点" → `CONFIGS_PER_ITER="20,10"`（新实验第 1 轮 20、第 2 轮 10）→ 壳内规范化为底层 `30,20,10` 并打印 `总实验数 = 30 历史 + 30 新 = 60`。兼容写法：第 1 槽恰好等于历史数时视为"含历史"写法，不重复补。中断续跑同一命令同一写法（壳从 state 的 `history_seed` 识别注入型 run 并自动补槽）。注意：手动谱直接跑 `run_experiment.sh` 没有壳的规范化，必须写含历史的完整列表。
 
 ### 4.3 re-eval（换/补基准集，`scripts/re_eval_history.py`，待实现）
 
@@ -209,7 +209,7 @@ TARGET_TOKENS=3B MID_DEVICE_BATCH_SIZE=1 bash runs/lib/arm_engine.sh
 
 ## 7. 待办（不阻塞复用主线）
 
-- ~~preflight 校验 `REMOTE_OBS_PREFIX` 末尾含 run 名~~（已由 scratch 阶段启动校验覆盖；preflight 层——直接跑 `run_climbmix.sh` 的路径——仍待加）；
+- ~~preflight 校验 `REMOTE_OBS_PREFIX` 末尾含 run 名~~（已由 scratch 阶段启动校验覆盖；preflight 层——直接跑 `run_experiment.sh` 的路径——仍待加）；
 - `mark_completed` 尾部自动上传精选产物 → `{prefix}/archive/<run>/` + `MANIFEST.json`；
 - re-eval 工具实现（§4.3，等 mmlu 上游）；
 - `_save_state` 增补 `pool_cache_sha256`（当前由注入工具写入 `history_seed` 承担）。
@@ -265,7 +265,7 @@ python3 scripts/inject_history.py \
 #    - 候选池 = 复制的 cluster_cache.npz（不是重新聚类）
 #    - 代码：评分公式修复已含（e8f22f2 之后）
 
-# 3) 发射 — 注意: 手动谱直接跑 run_climbmix.sh, 没有壳的槽位规范化,
+# 3) 发射 — 注意: 手动谱直接跑 run_experiment.sh, 没有壳的槽位规范化,
 #    必须写含历史的完整列表 (第 1 槽=30 历史); 一键路径
 #    (run_experiment.sh) 才能用 "只写新点计划" 的简写 "20,10"。
 #    OBS 前缀一次性配置后可省略:
@@ -273,7 +273,7 @@ python3 scripts/inject_history.py \
 EXP_NAME=prod3 K_ENHANCED=15 NPU_PER_EXP=8 REMOTE_MAX_JOBS=10 \
 CONFIGS_PER_ITER="30,20,10" ADAPTIVE_CONFIGS=1 ADAPTIVE_COMPACT=1 REMOTE_LOCAL_PARALLEL=1 \
 REMOTE_OBS_PREFIX=obs://<bucket>/<user>/climbmix/prod3 \
-nohup bash runs/run_climbmix.sh &
+nohup bash runs/run_experiment.sh &
 
 # 4) 臂（照旧，可选多节点）
 nohup python3 scripts/dispatch_target_arm.py --arm random &

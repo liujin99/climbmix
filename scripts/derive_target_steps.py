@@ -3,7 +3,7 @@
 
 steps = TARGET_TOKENS // total_batch_size; total_batch_size is read from
 the base ckpt's meta_*.json (never guessed — a wrong value silently
-changes the arm's training length). Shared by runs/run_climbmix.sh (main
+changes the arm's training length). Shared by runs/run_experiment.sh (main
 pipeline) and runs/lib/arm_engine.sh (arm reuse under a different budget)
 so the formula lives in exactly one place:
 climbmix.sampling.single_pass.derive_num_iterations.

@@ -16,7 +16,7 @@
 #       平台配置 job_priority (默认 1); priority-0 坑
 #    3. 资产挂载活性 — REMOTE_ASSET_MOUNTS 每个 obs:// uri stat 得到;
 #       搜索舰队要求 d20 在列 (asset-死路径坑 + d20-漏挂坑)
-#    4. 进程清洁 — run_climbmix.sh / dispatch_target_arm.py /
+#    4. 进程清洁 — run_experiment.sh / dispatch_target_arm.py /
 #       arm_watcher 残留 → 红灯 (先杀后取消!)
 #    5. audit 短路 — target_arm_random.json 非 SUCCEEDED 会拒绝重发
 #    6. 非终态历史作业 — 先杀 dispatcher 再 API cancel
@@ -246,7 +246,7 @@ def main():
 
     # ── 4. 进程清洁 ────────────────────────────────────────────────
     print("── 4. leftover processes ──")
-    for pat in ("run_climbmix.sh", "dispatch_target_arm.py", "arm_watcher"):
+    for pat in ("run_experiment.sh", "dispatch_target_arm.py", "arm_watcher"):
         r = subprocess.run(["pgrep", "-af", pat],
                            capture_output=True, text=True)
         lines = [l for l in r.stdout.splitlines() if l.strip()]

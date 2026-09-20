@@ -144,15 +144,16 @@ climbmix/
 │   ├── embedding_performance.md        # Embedding throughput notes
 │   └── nan_investigation.md            # stella NaN fix investigation
 ├── runs/                                # Shell scripts
-│   ├── run_experiment.sh               # Entry: run one full experiment (complete chain; from-scratch / crash-resume)
+│   ├── run_experiment.sh               # Entry: run one full experiment (complete chain; from-scratch / crash-resume; pipeline engine included)
 │   ├── run_extend_experiment.sh        # Entry: extension search (reuse a prior experiment's measured d20 points, incremental search)
 │   ├── run_extend_traineval.sh         # Entry: extension train+eval (same mixture, vary token budget / base / params)
 │   ├── run_extend_eval.sh              # Entry: extension eval (swap the benchmark suite, no training)
-│   ├── run_climbmix.sh                  # Main pipeline engine (behind run_experiment; advanced direct path)
 │   ├── lib/                            # Shared library + internal engines (arm_engine/stage_gate/...)
-│   ├── speedrun_climbmix.sh             # End-to-end validation (minimal data + steps)
-│   ├── smoke_test.sh                    # Logic smoke test (CPU)
-│   └── train_base_model.sh             # Generate base checkpoint (NPU)
+│   └── infra/                          # Outside the experiment lifecycle: one-time infrastructure + downstream export
+│       ├── train_base_model.sh         # Generate base checkpoints (one-time, NPU)
+│       ├── embed_wave.sh               # Full-pool embedding wave dispatch (per pool version)
+│       ├── embed_merge.sh              # Merge embedding partials into the Step-1 cache
+│       └── large_scale_sample.sh       # Large-scale sampling from a finished run's optimal mixture (no training)
 ├── scripts/
 │   ├── run_climb.py                     # CLI entry point
 │   ├── mix_general_data.py             # Adaptive shard download + stream mixing
@@ -190,14 +191,11 @@ climbmix/
 ## Quick Start
 
 ```bash
-# Step 1: Generate base checkpoints (NPU)
-DEPTH=20  bash runs/train_base_model.sh   # d20 proxy checkpoint
-DEPTH=28  bash runs/train_base_model.sh   # d28 target checkpoint
+# Step 1: Generate base checkpoints (one-time, NPU)
+DEPTH=20  bash runs/infra/train_base_model.sh   # d20 proxy checkpoint
+DEPTH=28  bash runs/infra/train_base_model.sh   # d28 target checkpoint
 
-# Step 2: End-to-end validation first (minimal data, ~minutes)
-bash runs/speedrun_climbmix.sh
-
-# Step 3: Production experiments — the entry-point family; parameters live in
+# Step 2: Production experiments — the entry-point family; parameters live in
 #   the EDIT block at the top of each script
 #   LAUNCH=0 <cmd> = dry-run (validate + print, no execution)
 # ── Experiment level: run one full experiment ──
@@ -219,8 +217,6 @@ bash runs/run_extend_eval.sh         # Extension eval: re-evaluate existing ckpt
 # One-time setup: put "obs_prod_base" (the production OBS root prefix) into
 # ~/.config/climbmix/remote_ma.json (same file as the secret) — after that,
 # every launch omits REMOTE_OBS_PREFIX (auto-appended /<run_name>).
-# Raw entry (the engine behind run_experiment, fully env-driven):
-bash runs/run_climbmix.sh
 ```
 
 Each script auto-checks dependencies, NPU availability, disk space, and exits with instructions if anything is missing.
@@ -272,7 +268,7 @@ Both runners are resumable: **re-run the same command after an interruption.**
   | eval / report | `.done` marker / idempotent | minutes / 0 |
 - **Not resumable**: inside a single nanochat training run (1000 steps) —
   interrupted trainings restart from step 0 by design.
-- **Experiment isolation**: `EXP_NAME=myexp bash runs/run_climbmix.sh` scopes
+- **Experiment isolation**: `EXP_NAME=myexp bash runs/run_experiment.sh` scopes
   the output dir (`result/myexp`), proxy tags (`climbmix_myexp_*`) and target
   tags (`d28_climb_myexp`) so parallel/sequential experiments never overwrite
   each other. Valid chars: `[A-Za-z0-9_-]`.

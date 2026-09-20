@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Embed unit merger (TODO E) — assemble OBS unit partials into the
-canonical pool embedding cache that run_climbmix.sh Step 1 reads.
+canonical pool embedding cache that run_experiment.sh Step 1 reads.
 
 The dispatcher (scripts/embed_dispatch.py) banks per-unit
 partial_block.npz files under {obs_prefix}/embed_units/ (~475 GB

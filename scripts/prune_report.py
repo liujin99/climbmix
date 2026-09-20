@@ -37,7 +37,7 @@ Full-pool mode (analyze EVERY doc — the pre-production cache warm-up):
   # cache + ~48 GB transient tmp (space freed at exit); RAM stays <20 GB —
   # embeddings never materialize in RAM. The cache dir this writes (key:
   # shard manifest + model + truncate-len, no sample component) is EXACTLY
-  # the key run_climbmix.sh Step 1 uses (EMBEDDING_SAMPLE_SIZE=0 default),
+  # the key run_experiment.sh Step 1 uses (EMBEDDING_SAMPLE_SIZE=0 default),
   # so the 4.3 h is paid once for discovery AND production. Cache-hit
   # re-runs npz-load 48 GB into RAM (fat-RAM hosts) instead of re-embedding.
 
@@ -124,7 +124,7 @@ def main():
     parser.add_argument("--embedding-truncate-len", type=int, default=512)
     parser.add_argument("--embedding-cache-dir", default=None,
                         help="pool-cache root (default: <repo>/cache/embeddings, "
-                             "same as run_climbmix.sh)")
+                             "same as run_experiment.sh)")
     parser.add_argument("--output-dir", default=None,
                         help="default: <repo>/result/prune_report")
     args = parser.parse_args()

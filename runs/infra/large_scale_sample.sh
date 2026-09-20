@@ -5,12 +5,12 @@
 #  项目的事, 不在本仓库范围)。
 #
 #  流程定位:
-#    ① 搜索最优配比 (含 1.5B 验证)   = run_climbmix.sh 全流程 (已有)
+#    ① 搜索最优配比 (含 1.5B 验证)   = run_experiment.sh 全流程 (已有)
 #    ② 大规模采样, 输出最终数据集    = 本脚本
 #    ③ 大规模验证                    = 下游项目 (不在范围)
 #
-#  用法: 编辑下方 EDIT 块 → ./runs/run_large_scale_sample.sh
-#    RUN_DIR=result/<run> TARGET_TOKENS=20B ./runs/run_large_scale_sample.sh
+#  用法: 编辑下方 EDIT 块 → ./runs/infra/large_scale_sample.sh
+#    RUN_DIR=result/<run> TARGET_TOKENS=20B ./runs/infra/large_scale_sample.sh
 #  干跑 (校验 + 打印命令, 不执行): LAUNCH=0
 # ═══════════════════════════════════════════════════════════════════
 set -euo pipefail

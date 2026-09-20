@@ -4,13 +4,13 @@
 #
 #  用法:
 #    POOL_URI=obs://<池目录> MODEL_URI=obs://<stella目录> \
-#        bash runs/embed_wave.sh   # 全量波 (池分片 ÷ UNIT_SHARDS 个单元)
-#    SMOKE=2 bash runs/embed_wave.sh          # 烟雾: 前 2 片单单元 + 全量比对 (~50 min)
+#        bash runs/infra/embed_wave.sh   # 全量波 (池分片 ÷ UNIT_SHARDS 个单元)
+#    SMOKE=2 bash runs/infra/embed_wave.sh          # 烟雾: 前 2 片单单元 + 全量比对 (~50 min)
 #    SMOKE=2 SMOKE_SAMPLES=2048 ...           # 快速烟囟: 抽样比对 (~12 min)
 #    SMOKE=2 SMOKE_COMPARE=0 ...              # 纯远程烟囟 (~10 min, 无比对)
-#    MAX_JOBS=8 bash runs/embed_wave.sh       # 并发单元数 (8×8=64 卡)
-#    FORCE=1 bash runs/embed_wave.sh          # 忽略 OBS 已有 partial 强制重发
-#    SHARD_OFFSET=160 bash runs/embed_wave.sh # 续波: 跳过前 160 片 (10 单元)
+#    MAX_JOBS=8 bash runs/infra/embed_wave.sh       # 并发单元数 (8×8=64 卡)
+#    FORCE=1 bash runs/infra/embed_wave.sh          # 忽略 OBS 已有 partial 强制重发
+#    SHARD_OFFSET=160 bash runs/infra/embed_wave.sh # 续波: 跳过前 160 片 (10 单元)
 #
 #  POOL_URI/MODEL_URI 是 per-launch 直挂 (只 stage 进本波的 job, 不进
 #  全局后端配置 — 池 197G 绝不能让别的 job 类也白拉)。
@@ -22,8 +22,8 @@
 #  重跑同一命令只重试失败单元 (OBS 上已有 partial 的单元自动跳过)。
 #  submit 被池满拒绝 → 按 RemoteConfig 的 submit_retry_* 退避重试。
 #
-#  波跑绿后 → bash runs/embed_merge.sh (把 partials 拼成 Step-1 缓存)。
-#  语义旋钮 (EMBEDDING_MODEL/TRUNCATE_LEN/EMB_DIM) 必须与 run_climbmix.sh
+#  波跑绿后 → bash runs/infra/embed_merge.sh (把 partials 拼成 Step-1 缓存)。
+#  语义旋钮 (EMBEDDING_MODEL/TRUNCATE_LEN/EMB_DIM) 必须与 run_experiment.sh
 #  一致 — 它们进 cache-key, 不一致 = 缓存 miss = 重新嵌入 40h。
 # ═══════════════════════════════════════════════════════════════════════
 set -euo pipefail
@@ -42,7 +42,7 @@ NPU_PER_JOB="${NPU_PER_JOB:-8}"
 FLAVOR="${FLAVOR:-}"                   # 空 = 用后端配置的默认 flavor
 JOB_TIMEOUT_S="${JOB_TIMEOUT_S:-7200}"
 
-# ── 嵌入语义 (与 run_climbmix.sh 对齐) ──
+# ── 嵌入语义 (与 run_experiment.sh 对齐) ──
 EMBEDDING_MODEL="${EMBEDDING_MODEL:-NovaSearch/stella_en_400M_v5}"
 TEXT_COL="${TEXT_COL:-text}"
 BATCH_SIZE="${BATCH_SIZE:-512}"

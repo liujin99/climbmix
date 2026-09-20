@@ -38,7 +38,7 @@ Execution shapes (all marker-idempotent, safe to re-run):
                  touches NO arm markers (an anchor, not an arm). Always
                  single-node.
 
-Three-layer fallback contract with runs/run_climbmix.sh run_arm(): a
+Three-layer fallback contract with runs/run_experiment.sh run_arm(): a
 non-zero exit without .done_mid_train_<arm> makes the main script fall
 back to the local torchrun path. A salvage path exists: a job whose
 training succeeded but eval failed (result.json mid_train_rc == 0) lands
@@ -52,7 +52,7 @@ and exits 0 without submitting. A prior FAILED attempt short-circuits
 (exit 1, local fallback) unless --retry-failed.
 
 Config sources (priority): CLI args > environment variables >
-$OUTPUT_DIR/launch_env.json (written by run_climbmix.sh on every launch —
+$OUTPUT_DIR/launch_env.json (written by run_experiment.sh on every launch —
 makes the separate nohup independent of the launching shell) +
 $OUTPUT_DIR/remote_config.json (the search fleet's RemoteConfig).
 """
@@ -95,7 +95,7 @@ def load_launch_env(output_dir: str) -> Dict[str, str]:
     path = os.path.join(output_dir, "launch_env.json")
     if not os.path.isfile(path):
         raise SystemExit(
-            f"✗ launch_env.json not found at {path} — run via run_climbmix.sh "
+            f"✗ launch_env.json not found at {path} — run via run_experiment.sh "
             f"(it writes the snapshot every launch) or export the env vars")
     with open(path) as f:
         env = json.load(f)
@@ -107,7 +107,7 @@ def load_launch_env(output_dir: str) -> Dict[str, str]:
 
 
 def launch_env_target_steps(launch_env: Dict[str, str]) -> str:
-    """TARGET_STEPS from launch_env (run_climbmix.sh DERIVES it from
+    """TARGET_STEPS from launch_env (run_experiment.sh DERIVES it from
     TARGET_TOKENS — the single source of truth). Empty = malformed
     snapshot: fail loudly, never fall back to a default step count (a
     wrong count silently changes the arm's training length)."""
@@ -115,7 +115,7 @@ def launch_env_target_steps(launch_env: Dict[str, str]) -> str:
     if not steps:
         raise SystemExit(
             "✗ launch_env.json carries no TARGET_STEPS — launch via "
-            "runs/run_climbmix.sh (it derives the value from TARGET_TOKENS)")
+            "runs/run_experiment.sh (it derives the value from TARGET_TOKENS)")
     return steps
 
 
@@ -151,7 +151,7 @@ def parse_npu_env_block(path: str) -> Dict[str, str]:
 
 def build_spec_env(launch_env: Dict[str, str], job_env: Dict[str, str]) -> Dict[str, str]:
     """spec.env = npu_env block + the script-level exports that matter in
-    the container (mirrors run_climbmix.sh's export block; node-level CANN
+    the container (mirrors run_experiment.sh's export block; node-level CANN
     paths are the container image's business — deliberately absent)."""
     env = parse_npu_env_block(
         os.path.join(launch_env.get("CLIMBMIX_DIR", REPO_ROOT),
@@ -601,7 +601,7 @@ def main() -> int:
     if base_check and node_count > 1:
         raise SystemExit("✗ base_eval_check is single-node (eval-only anchor)")
     # The optimizer-loading semantics DERIVE from node_count (ws!=8 cannot
-    # load the 8-shard d28 optimizer). run_climbmix.sh fingerprints
+    # load the 8-shard d28 optimizer). run_experiment.sh fingerprints
     # TARGET_LOAD_OPTIMIZER — a disagreement means this dispatch would run
     # different training semantics than the stage fingerprint recorded:
     # refuse (stale .done markers would lie about what ran).
@@ -735,7 +735,7 @@ def main() -> int:
         # Single-pass (epoch<=1) guard, BEFORE submitting a multi-hour job:
         # nanochat's loader wraps silently when the mixture runs out, so
         # TARGET_STEPS x total_batch_size must not exceed the measured pool
-        # (src/climbmix/sampling/single_pass.py). run_climbmix.sh guards the
+        # (src/climbmix/sampling/single_pass.py). run_experiment.sh guards the
         # same condition on its side — this copy covers the independently
         # launched dispatch process (nohup ... --arm random).
         tbs = args.total_batch_size or read_total_batch_size(

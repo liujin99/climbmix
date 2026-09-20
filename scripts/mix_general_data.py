@@ -35,9 +35,9 @@ from climbmix.utils.io_utils import shard_content_key  # noqa: E402
 
 # HF reachability (server findings 2026-09-12/15): the egress proxy
 # CONNECT-tunnels to huggingface.co return 503 bursts (90+ consecutive); only
-# hf-mirror.com is reliable. run_climbmix.sh exports HF_ENDPOINT, but the
+# hf-mirror.com is reliable. run_experiment.sh exports HF_ENDPOINT, but the
 # pre-launched random-arm dispatch (spawned by run_search.sh BEFORE exec'ing
-# run_climbmix.sh) and direct CLI invocations do not inherit it. This module is
+# run_experiment.sh) and direct CLI invocations do not inherit it. This module is
 # the ONLY download entry point, and dataset.py bakes BASE_URL from the env at
 # import time — so default it here, before that import. Override with an
 # explicit HF_ENDPOINT to use the origin.

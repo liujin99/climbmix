@@ -7,7 +7,7 @@ pool: nanochat's loader wraps silently on exhaustion, so an over-budget
 config re-samples documents with no signal (see
 src/climbmix/sampling/single_pass.py for the full rationale).
 
-Usage (run_climbmix.sh run_arm / manual preflight):
+Usage (run_experiment.sh run_arm / manual preflight):
     python3 scripts/check_single_pass.py \
         --data-dir $OUTPUT_DIR/climb_mixed \
         --num-iterations $TARGET_STEPS \

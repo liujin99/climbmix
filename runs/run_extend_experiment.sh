@@ -108,10 +108,12 @@ print(' + '.join(f'第 {i+1} 轮 {p} 个' for i, p in enumerate(ps)))")
     export CONFIGS_PER_ITER
 }
 
-# 当前发射参数的解析: env 覆盖 > run_climbmix.sh EDIT 块默认值
-# (默认值里的 $VAR 引用递归展开; 输出 "key=value" 行, 供下面两个核验函数共用)
+# 当前发射参数的解析: env 覆盖 > run_experiment.sh 的 ${VAR:-默认} 声明面
+# (2026-09-20 引擎并入后, 该文件同时含 EDIT 块与引擎默认; 后者后置胜出,
+#  解析结果与原 run_climbmix.sh 逐键一致; 默认值里的 $VAR 引用递归展开;
+#  输出 "key=value" 行, 供下面两个核验函数共用)
 _current_launch_params() {
-    python3 - "$CLIMBMIX_DIR/runs/run_climbmix.sh" <<'PY'
+    python3 - "$CLIMBMIX_DIR/runs/run_experiment.sh" <<'PY'
 import os, re, sys
 pat = re.compile(r'^([A-Z][A-Z0-9_]+)="\$\{[A-Z0-9_]+:-(.*?)}"', re.M)
 defaults = dict(pat.findall(open(sys.argv[1], encoding="utf-8").read()))
@@ -239,7 +241,7 @@ SKIP = {"EXP_NAME", "OUTPUT_DIR", "NUM_NPU", "NPU_PER_EXP",
         "DATA_DIR", "GENERAL_DATA_DIR"}
 # 警告级: 数据路径 — 路径不同内容可能相同, 终审在池 key
 WARN = {"DATA_DIR", "GENERAL_DATA_DIR"}
-# 当前侧补全不在 EDIT 块的派生键 (TARGET_BASE_CKPT 在 run_climbmix.sh
+# 当前侧补全不在 EDIT 块的派生键 (TARGET_BASE_CKPT 在 run_experiment.sh
 # 体内派生, 解析器看不见 → 合成同公式避免误报)
 if "TARGET_BASE_CKPT" in src and not cur.get("TARGET_BASE_CKPT"):
     nb, td = cur.get("NANOCHAT_BASE_DIR", ""), cur.get("TARGET_DEPTH", "28")

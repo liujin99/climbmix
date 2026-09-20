@@ -1,7 +1,7 @@
 # ═══════════════════════════════════════════════════════════════════════
 #  target_arm.sh — d28 目标臂 (climb/random) 训练 + 评测的共享 shell 库
 #
-#  被 runs/run_climbmix.sh Step 6+7 (本地执行路径 / 远端失败兜底) 与
+#  被 runs/run_experiment.sh Step 6+7 (本地执行路径 / 远端失败兜底) 与
 #  scripts/dispatch_target_arm.py (远端路径的 argv 事实来源) 共同使用:
 #  本文件的 torchrun argv 与
 #  src/climbmix/pipeline/nanochat_cmds.py 的 build_target_mid_train_cmd /
@@ -9,7 +9,7 @@
 #  scripts/diagnostics/test_prod2_runtime.py 强制保证 (PATH 桩 torchrun
 #  双侧捕获比对)。
 #
-#  所需环境变量 (run_climbmix.sh 主管道已导出):
+#  所需环境变量 (run_experiment.sh 主管道已导出):
 #    CLIMBMIX_DIR  NANOCHAT_DIR  NANOCHAT_BASE_DIR  OUTPUT_DIR
 #    TARGET_BASE_CKPT  (= base_checkpoints/d28 的绝对路径)
 #    NUM_NPU  TARGET_STEPS  TARGET_LR_SCALE  TARGET_WARMUP  TARGET_WARMDOWN

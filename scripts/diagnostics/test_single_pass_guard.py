@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """single-pass (epoch<=1) guard verification — measure_train_tokens /
 read_total_batch_size / check_single_pass / derive CLI e2e / fingerprint
-neutrality / wiring presence in run_climbmix.sh + dispatch + target_runner
+neutrality / wiring presence in run_experiment.sh + dispatch + target_runner
 + the arm engine runs/lib/arm_engine.sh (single-knob on the arm-reuse path) / proxy single-knob
 (PROXY_NUM_ITERATIONS derived from PROXY_TARGET_TOKENS) / large-scale
-sampler smoke (runs/run_large_scale_sample.sh).
+sampler smoke (runs/infra/large_scale_sample.sh).
 
 Standalone (repo convention: no pytest infra). Run:
     python3 scripts/diagnostics/test_single_pass_guard.py
@@ -181,11 +181,11 @@ check("fingerprint: target_runner still target-only",
 check("fingerprint: classifier self-excluded",
       _stages_for("src/climbmix/utils/fingerprint.py") == set())
 
-# ── 6. wiring: run_climbmix.sh / dispatch / target_runner ─────────────────
-sh = os.path.join(REPO, "runs", "run_climbmix.sh")
+# ── 6. wiring: run_experiment.sh / dispatch / target_runner ─────────────────
+sh = os.path.join(REPO, "runs", "run_experiment.sh")
 r = subprocess.run(["bash", "-n", sh], capture_output=True, text=True)
 src = open(sh).read()
-check("shell: run_climbmix.sh bash -n", r.returncode == 0, r.stderr[:120])
+check("shell: run_experiment.sh bash -n", r.returncode == 0, r.stderr[:120])
 check("shell: run_arm guards before dispatch AND fallback",
       "check_single_pass.py" in src and "single-pass guard failed" in src)
 
@@ -236,7 +236,7 @@ for tokens, tbs in ((1_000_000_000, 1_048_576), (2_000_000_000, 1_048_576),
     check(f"derive+guard: T={tokens:,} stays single-pass", ok,
           f"steps={steps}, epochs_x100={info.get('epochs_x100')}")
 
-# e2e composition exactly as the run_climbmix.sh heredoc does it:
+# e2e composition exactly as the run_experiment.sh heredoc does it:
 with tempfile.TemporaryDirectory() as ck:
     with open(os.path.join(ck, "meta_x.json"), "w") as f:
         json.dump({"total_batch_size": 1024}, f)
@@ -366,8 +366,8 @@ with tempfile.TemporaryDirectory() as base:
           and "PROXY_NUM_ITERATIONS=999 is no longer a knob" in r.stdout + r.stderr,
           (r.stdout + r.stderr).strip()[-120:])
 
-# ── 10. run_large_scale_sample.sh: decoupled production sampler ──────
-lss = os.path.join(REPO, "runs/run_large_scale_sample.sh")
+# ── 10. large_scale_sample.sh: decoupled production sampler ──────
+lss = os.path.join(REPO, "runs/infra/large_scale_sample.sh")
 lsrc = open(lss).read()
 check("lss: data-only by contract (no training/dispatch/eval)",
       "dispatch_target_arm" not in lsrc and "mid_train" not in lsrc)

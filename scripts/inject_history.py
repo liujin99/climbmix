@@ -7,7 +7,7 @@ search_state.json is seeded with the old runs' RAW measurements
 ("iteration 1"). The new run then:
 
   - refits its predictor over history + new points at resume
-    (run_climbmix.sh always passes --resume-search),
+    (run_experiment.sh always passes --resume-search),
   - samples iteration 2+ predictor-guided, deduped against history
     (run_iteration's existing_flats),
   - allocates exp ids from len(accumulated) onward — no collisions,

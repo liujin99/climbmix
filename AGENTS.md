@@ -32,7 +32,7 @@
   files this session intends to change.
 - **Commit small & fast**: land a change once it's tested — minimize the
   dirty window the other session can accidentally sweep.
-- **Shared files** (runs/run_climbmix.sh, scripts/dispatch_target_arm.py,
+- **Shared files** (runs/run_experiment.sh, scripts/dispatch_target_arm.py,
   src/climbmix/pipeline/target_runner.py, src/climbmix/utils/fingerprint.py,
   …): check `git status` for the other session's dirty edits BEFORE
   editing; coordinate through the user when both need the same file.

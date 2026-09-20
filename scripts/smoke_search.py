@@ -10,7 +10,7 @@ LightGBM refits, held-out val split, predictor-guided sampling, top-N
 pruning, verbatim M-of-N, online backtest, state persistence) under two
 geometries:
 
-  main   20,10,5   N=35   (runs/run_climbmix.sh production default)
+  main   20,10,5   N=35   (runs/run_experiment.sh production default)
   paper  64,32,16  N=112  (paper: "64, 32, and 16 candidates ... 112")
 
 With truth known we check what a real run cannot: predictor health AND

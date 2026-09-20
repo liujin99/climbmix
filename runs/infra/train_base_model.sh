@@ -10,8 +10,8 @@
 # Time: d10 ~0.6h, d14 ~4h, d18 ~15h, d24 ~29h
 #
 # Usage:
-#   DEPTH=10  bash runs/train_base_model.sh
-#   DEPTH=24  bash runs/train_base_model.sh
+#   DEPTH=10  bash runs/infra/train_base_model.sh
+#   DEPTH=24  bash runs/infra/train_base_model.sh
 # ──────────────────────────────────────────────────────────────
 
 # Source CANN env BEFORE set -euo pipefail (set_env.sh may have commands

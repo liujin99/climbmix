@@ -18,7 +18,7 @@
 #    CP3  选料 (h≈12.5): "Selection mode:" 行已打印 (NO-SIGNAL GUARD 未触发
 #         时为 predictor_design_space)
 #    CP4  交付 (h≈23.5): 两臂 eval CSV + (可选) 远端 base 锚点对比
-#  熔断建议: 红灯项集中出现时 pkill -f run_climbmix.sh + 杀 dispatch,
+#  熔断建议: 红灯项集中出现时 pkill -f run_experiment.sh + 杀 dispatch,
 #  重跑同命令恢复 (步骤级 .done / 迭代级 search_state / 实验级 meta.json)。
 # ═══════════════════════════════════════════════════════════════════════
 set -uo pipefail

@@ -4,9 +4,9 @@
 #  (TODO E; scripts/embed_merge.py 的壳)
 #
 #  用法 (波次跑绿后):
-#    bash runs/embed_merge.sh
-#    FORCE=1 bash runs/embed_merge.sh                  # 覆盖已有缓存重拼
-#    UPLOAD_BACKUP=obs://<bk>/<dir>/ bash runs/embed_merge.sh
+#    bash runs/infra/embed_merge.sh
+#    FORCE=1 bash runs/infra/embed_merge.sh                  # 覆盖已有缓存重拼
+#    UPLOAD_BACKUP=obs://<bk>/<dir>/ bash runs/infra/embed_merge.sh
 #
 #  产物 (分片格式 sharded-v1, 落 EMBEDDING_CACHE_DIR/<key>/):
 #    manifest.json            — 发布闸门 (cache 存在 ⇔ 它存在且完整)
@@ -19,7 +19,7 @@
 #  语义: 校验分片覆盖 (每片恰好一次 + num_docs/全局偏移对账 + manifest
 #  交叉核对 model/truncate_len) → 并行逐单元下载→写块→sidecar 记账
 # (断点续跑按块, 断裂块重新下载, sidecar 分片名漂移即大声失败) → 并行
-# 逐块全池验证 → 原子发布 manifest。之后 run_climbmix.sh 的 Step 1 直接
+# 逐块全池验证 → 原子发布 manifest。之后 run_experiment.sh 的 Step 1 直接
 # 缓存命中, 跳过 ~40h 嵌入。
 #
 #  并行与中转 (合并是 IO 密集, 非 CPU): MERGE_WORKERS 个进程并发取单元/
@@ -40,7 +40,7 @@
 #
 #  注意:
 #    - 语义旋钮 (EMBEDDING_MODEL/TRUNCATE_LEN/EMB_DIM/UNIT_SHARDS) 必须与
-#      embed_wave.sh 一致; DATA_DIR 必须就是 run_climbmix.sh 的 DATA_DIR
+#      embed_wave.sh 一致; DATA_DIR 必须就是 run_experiment.sh 的 DATA_DIR
 #      (cache-key 从该目录的分片清单计算)。
 #    - OBS 上的单元 partials 有意保留 (本地盘被清后 ~1-2h 重拼 vs 40h 重嵌)。
 # ═══════════════════════════════════════════════════════════════════════
@@ -52,7 +52,7 @@ CLIMBMIX_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 REMOTE_CONFIG="${REMOTE_CONFIG:-}"
 SHARD_INFO="${SHARD_INFO:-/home/ma-user/work/100B_stem_parquet_filtered/metadata_shard_info.json}"
 DATA_DIR="${DATA_DIR:-/home/ma-user/work/100B_stem_parquet_filtered}"
-# 与 run_climbmix.sh 的 EMBEDDING_CACHE_DIR 同名同默认 — 两边指同一个地方
+# 与 run_experiment.sh 的 EMBEDDING_CACHE_DIR 同名同默认 — 两边指同一个地方
 EMBEDDING_CACHE_DIR="${EMBEDDING_CACHE_DIR:-$CLIMBMIX_DIR/cache/embeddings}"
 
 # ── 嵌入语义 (与 embed_wave.sh 对齐; 进 cache-key) ──

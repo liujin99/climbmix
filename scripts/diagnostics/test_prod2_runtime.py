@@ -1297,14 +1297,14 @@ check("dispatch: main() passes multi-node resolution (no UnboundLocalError)",
       and "mixed data not ready" in _out,
       _out[-300:])
 
-for sh in ("runs/run_climbmix.sh", "runs/lib/target_arm.sh",
+for sh in ("runs/run_experiment.sh", "runs/lib/target_arm.sh",
            "scripts/diagnostics/prod2_watch.sh"):
     r = subprocess.run(["bash", "-n", os.path.join(REPO, sh)],
                        capture_output=True, text=True)
     check(f"shell: bash -n {sh}", r.returncode == 0, r.stderr[:200])
 
-# run_climbmix.sh wiring: fingerprint + defaults + guard
-src = open(os.path.join(REPO, "runs", "run_climbmix.sh")).read()
+# run_experiment.sh wiring: fingerprint + defaults + guard
+src = open(os.path.join(REPO, "runs", "run_experiment.sh")).read()
 check("shell: adaptive_configs in FP_SEARCH_PARAMS",
       'adaptive_configs=$ADAPTIVE_CONFIGS' in src)
 check("shell: adaptive_compact in FP_SEARCH_PARAMS",
