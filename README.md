@@ -15,6 +15,20 @@ for language model pre-training through embedding-driven clustering and
 iterative bootstrapping, using **nanochat-npu** (8×910B Ascend NPU) as the
 training backend via **method A** (subprocess calls).
 
+## Experiment Reports
+
+Each production round gets a single record file (`docs/experiment_prodN.md`)
+whose front half is a reader-friendly closeout report (Chinese; also mirrored
+to the internal wiki) and back half holds developer details (timelines,
+protocol caveats, artifact paths).
+
+- [prod4 (2026-09-20)](docs/experiment_prod4.md) — CLIMB premise validated at
+  d28 scale: search-found mixtures beat uniform/natural/domain-ratio baselines
+  by +0.014–0.031 STEM. The selection mechanism's argmin extrapolation adds
+  nothing over measured configs (soft winner's curse) — selection-policy fixes
+  (best-measured fallback + no-claim guard) are the priority before the next
+  search round. 9 arms, seed-pair replication, full verification stack.
+
 ## Algorithm Pipeline
 
 ```
@@ -75,6 +89,7 @@ d28 参数从 checkpoint `meta_*.json` 自动读取（三层 fallback: GPTConfig
 ```
 climbmix/
 ├── docs/
+│   ├── experiment_prod*.md            # Per-round experiment records (reader-facing report up front, dev details at the back)
 │   ├── paper_deviations.md             # 与论文 (arXiv:2504.13161) 的逐项偏差 + 一致性审计
 │   ├── scoring_metric_design.md        # SNR 评分设计 + proxy/target 训练量对比
 │   ├── proxy_and_model_analysis.md     # 分析文档
