@@ -28,7 +28,7 @@ The CLIMB premise is validated at target-model scale in our production
 rounds: search-found mixtures beat uniform / natural / domain-ratio
 baselines by **+0.014–0.031 STEM** on a d28 (~2.5B) model at a 3B-token
 mid-training budget — see [Results](#results--round-reports) and
-[Key Takeaways](#key-takeaways).
+[Key Findings](#key-findings).
 
 ## Results & Round Reports
 
@@ -78,10 +78,10 @@ prod1 −0.004 → prod2 +0.010 → prod4 +0.016–0.032.
 
 Full report: [docs/experiment_prod4.md](docs/experiment_prod4.md).
 
-## Key Takeaways
+## Key Findings
 
 The condensed, transferable findings from the whole project — full version
-with evidence chains: **[docs/takeaways.md](docs/takeaways.md)**.
+with evidence chains: **[docs/KEY_FINDINGS.md](docs/KEY_FINDINGS.md)**.
 
 1. **The CLIMB premise survives target-scale validation** — learned
    mixtures beat every fixed-ratio baseline (+0.014–0.031 STEM, gains
@@ -193,7 +193,7 @@ fallback: GPTConfig → formula estimate → DEPTH_INFO table).
 climbmix/
 ├── docs/
 │   ├── experiment_prod*.md            # Per-round experiment records (reader-facing report up front, dev details at the back)
-│   ├── takeaways.md                   # Condensed transferable findings (the index-grade summary)
+│   ├── KEY_FINDINGS.md                # Condensed transferable findings (the index-grade summary)
 │   ├── paper_deviations.md             # Itemized deviations from the paper (arXiv:2504.13161) + consistency audit
 │   ├── algorithm_review.md             # Post-prod4 algorithm design review (clustering / predictor / selection)
 │   ├── prod5_runbook.md                # prod5 launch runbook (activation / smoke rehearsal / re-eval / launch)

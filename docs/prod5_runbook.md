@@ -189,10 +189,13 @@ CP0 聚类结构 / CP1 SNR / CP2 online ρ / CP3 Selection mode / CP4 臂+锚点
 `Top-k arm candidates`（预期 3 个 climb-cfgXX）。
 
 **4.6 搜索收官 → 臂族**：`topk_mixture_candidates.json` top-3 晋臂
-（`ARM_NAME=climb-cfgXX`，权重文件直接 `--weights` 可用）；random3b / natural /
+（`ARM_NAME=climb-cfgXX`，权重文件直接 `--weights` 可用）；**uniform**
+（簇等权基线，2026-09-21 更名裁决；prod1-4 臂名 random3b）/ natural /
 domainfix 同批单种子；base 锚点先行；no-claim 若放行外推 → 额外 +1 臂。
 臂发射沿用 prod4 流程（dispatch_target_arm / arm_engine，含单遍守卫与磁盘
-preflight）。
+preflight）。**CP4 渲染注意**：cp4_report.py 的 `--ref` 默认值 random
+不再命中——渲染时显式 `--ref uniform`（否则静默回退 arms[0]，"搜索是否有
+价值"的对照语义丢失）。
 
 ## 5. 发射窗顺手卫生（非阻塞批处理，F2）
 
