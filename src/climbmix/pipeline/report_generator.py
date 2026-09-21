@@ -222,18 +222,95 @@ def generate_markdown_report(
                      f"({os.path.basename(scatter_path)})")
         lines.append("")
 
+    # ── Final Selection (D19 no-claim audit + top-k arm candidates) ──
+    sel = (search_state or {}).get("selection") or {}
+    if sel.get("mode"):
+        lines.append("## Final Selection")
+        lines.append("")
+        lines.append(f"Mode: `{sel.get('mode')}`")
+        for r in (sel.get("guard_reasons") or []):
+            lines.append(f"- guard: {r}")
+        claim = sel.get("claim")
+        if claim:
+            ac = claim.get("argmin_candidate") or {}
+            bm = claim.get("best_measured") or {}
+            lines.append("")
+            lines.append(
+                "The design-space argmin must predict better than the best\n"
+                "MEASURED config by more than the no-claim margin to\n"
+                "displace it (prod4 L1a: the unmeasured argmin lost to both\n"
+                "measured candidates of the same search).")
+            lines.append("")
+            lines.append("| | value |")
+            lines.append("|---|---|")
+            lines.append(f"| Best measured | cfg#{bm.get('config_id')} "
+                         f"(utility {bm.get('actual_utility', float('nan')):+.3f}) |")
+            lines.append(f"| Argmin predicted utility | "
+                         f"{ac.get('predicted_utility', float('nan')):+.3f} |")
+            lines.append(f"| Claimed gain | "
+                         f"{ac.get('claimed_gain', float('nan')):+.3f} |")
+            lines.append(f"| Margin | {claim.get('margin', float('nan')):.3f} "
+                         f"({claim.get('margin_source')}) |")
+            radius = ac.get("l1_radius_to_measured")
+            lines.append(f"| L1 radius to measured fleet | "
+                         f"{radius:.3f} |" if radius is not None else
+                         "| L1 radius to measured fleet | n/a |")
+            lines.append(f"| Refit on full (A2) | "
+                         f"{'yes' if claim.get('refit_on_full') else 'no'} |")
+            near = ac.get("nearest_measured") or []
+            if near:
+                lines.append("")
+                lines.append("Nearest measured neighbors of the argmin "
+                             "candidate (the extrapolation's evidence base):")
+                lines.append("")
+                lines.append("| config | L1 | actual utility |")
+                lines.append("|---|---|---|")
+                for n in near:
+                    lines.append(f"| cfg#{n.get('config_id')} "
+                                 f"| {n.get('l1'):.3f} "
+                                 f"| {n.get('actual_utility', float('nan')):+.3f} |")
+        topk = sel.get("topk") or {}
+        topk_cands = topk.get("candidates") or []
+        if topk_cands:
+            relaxed = (" (relaxed fill — diversity filter starved the list)"
+                       if topk.get("relaxed") else "")
+            lines.append("")
+            lines.append(
+                f"Top-{len(topk_cands)} MEASURED arm candidates for d28 "
+                f"promotion{relaxed} — the search output is consumed as a "
+                f"region (see `topk_mixture_candidates.json`):")
+            lines.append("")
+            lines.append("| rank | config | actual utility | min L1 to others |")
+            lines.append("|---|---|---|---|")
+            for c in topk_cands:
+                ml = c.get("min_l1_to_other_selected")
+                lines.append(f"| {c.get('rank')} | cfg#{c.get('config_id')} "
+                             f"| {c.get('score', float('nan')):+.3f} "
+                             f"| {ml:.3f} |" if ml is not None else
+                             f"| {c.get('rank')} | cfg#{c.get('config_id')} "
+                             f"| {c.get('score', float('nan')):+.3f} | n/a |")
+        lines.append("")
+
     # Feature importance of the FINAL predictor (the one that drove the
     # full-design-space selection): which clusters' weights the LightGBM
     # actually split on. Split counts; Share = percent of all splits.
     # Rendered only when in-memory iteration results carry a fitted model
     # (fresh post-search report, or a resume which refits the predictor);
     # skipped silently otherwise (e.g. report from a state file alone).
+    # A2 refit-on-full: the selection model is a NEW object passed
+    # in-memory via search_extras["_final_predictor"] — prefer it over the
+    # last iteration's split-fit model.
     final_model = None
-    for r in reversed(iter_results):
-        m = getattr(getattr(r, "predictor", None), "_model", None)
-        if m is not None and hasattr(m, "feature_importances_"):
-            final_model = m
-            break
+    fp_model = getattr((search_state or {}).get("_final_predictor"),
+                       "_model", None)
+    if fp_model is not None and hasattr(fp_model, "feature_importances_"):
+        final_model = fp_model
+    if final_model is None:
+        for r in reversed(iter_results):
+            m = getattr(getattr(r, "predictor", None), "_model", None)
+            if m is not None and hasattr(m, "feature_importances_"):
+                final_model = m
+                break
     if final_model is not None:
         imp = np.asarray(final_model.feature_importances_, dtype=np.float64)
         if len(imp) == K and float(imp.sum()) > 0:

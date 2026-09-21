@@ -380,6 +380,20 @@ class SearchConfig:
     # 0.5 = NLL may at most halve a benchmark's vote, never take it over.
     # Semantic knob: enters the search fingerprint.
     w_floor: float = 0.5
+    # A3 top-k arm candidates (paper_deviations.md D19): export the top-k
+    # MEASURED configs (by actual score, greedy diversity filter) to
+    # topk_mixture_candidates.json for d28 arm promotion. The search output
+    # is consumed as a REGION, not a single argmin point — prod4 L1a: the
+    # d20 ranking (cfg25 #1) flipped at d28 (cfg72 #1, 0.2142 vs 0.2066),
+    # intra-hot-zone ordering is proxy-noise-soft. 0 disables.
+    topk_arms: int = 3
+    # Minimum L1 distance between selected top-k candidates (greedy filter,
+    # first pass): candidates closer than this to an already-selected one
+    # are skipped — avoid k arms all packed in one neighborhood. If the
+    # filter starves the list below k, the best remaining fill in anyway
+    # (relaxed_fill=True in the export). L1 on the weight simplex has
+    # range [0, 2]; 0.15 only filters near-duplicates by design.
+    topk_diversity_min_l1: float = 0.15
 
     @property
     def total_configs(self) -> int:
@@ -463,6 +477,17 @@ class PredictorConfig:
     early_stopping_rounds: int = 20
     learning_rate: float = 0.02
     auto_adjust: bool = True
+    # A1 no-claim margin (paper_deviations.md D19): the design-space argmin
+    # must predict at least this much BETTER than the best MEASURED config
+    # (utility units = the _compute_scores z-scale) to displace it in the
+    # final selection. None = auto: max(0.30, held-out residual sigma from
+    # the last predictor_eval with >=5 (pred, actual) pairs). The floor
+    # reflects the winner's-curse selection bias — argmin predictions are
+    # optimistic by construction (08-29 smoke_search: argmin realized
+    # 0.2-0.3 utility WORSE than best-measured; prod4 L1a confirmed at
+    # d28). Recalibrate from search_state.json predictor_eval before
+    # prod5 (algorithm_review.md §2.4, task B4).
+    final_claim_margin: Optional[float] = None
 
     VALID_METHODS = ("lightgbm",)
 

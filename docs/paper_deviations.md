@@ -14,7 +14,7 @@
 |---|------|------|------|------|
 | D1 | 搜索预算 | 112 configs(64/32/16,4:2:1,3 轮) | 35 configs(20/10/5,3 轮) | NPU 算力:~4h/config × 8×910B vs 论文 45 GPU-h × 256 H100 |
 | D2 | 引导采样 | "从预测排序 top-N 中随机采 M 个"(M/N 未给值) | 一致:top-N(N=3×sample_from_top_m=96)中无放回**原样**抽 M 个(N=96 的具体化是我们的选择;2026-08-28 回归论文字面语义,此前为 Dir(5·w) 扰动) | 扰动被数值实验证伪,见细节节 D2 |
-| D3 | 最终选择 | 最终 predictor 在设计空间 A 上取 argmax(A 的枚举方式未说明) | 4 个浓度级(1/5/10/50)× 25K Dirichlet 候选 + argmax 附近 5K 精搜 | 同为 predictor argmax,我们把 A 的枚举具体化 |
+| D3 | 最终选择 | 最终 predictor 在设计空间 A 上取 argmax(A 的枚举方式未说明) | 4 个浓度级(1/5/10/50)× 25K Dirichlet 候选 + argmax 附近 5K 精搜 | 同为 predictor argmax,我们把 A 的枚举具体化;**2026-09-21 起 argmax 仅在过 no-claim margin 时才获终选席位(见 D19)** |
 | D4 | LightGBM 超参 | max_depth=4,min_samples_leaf≥5,L1+L2,early stopping(20 轮无提升)+ 独立验证集 | max_depth=3,min_samples_leaf=3,L1=L2=1.0,early_stopping=20(带验证集切分),n_estimators=500,lr=0.02,auto_adjust 公式 | N=27~35 小样本下更强的容量限制;结构(L1/L2+早停)与论文一致 |
 | D5 | 聚类数 K | 固定 K:主实验 21 个超簇(1000→剪枝 240→合并);消融 15/30 | **elbow 定 K_ENHANCED=14**(2026-09-04;带宽 clamp 机制保留为池自适应默认) | 我们的池(116M docs,方向盆地极偏斜)上 natural_K(τ) 不稳(0.7→49/0.8→4/0.9→≤3)且 floor=3 退化(C0 独占 99.86% docs);14 = merge-distance elbow(最大跳变 0.0816),在论文粒度带 15-30 下沿(我们的搜索预算 35 vs 论文 112) |
 | D6 | 合并阈值 | 欧氏距离阈值 1.5(§3.1,v2 明文) | τ=0.9 欧氏距离,作用在 **L2 归一化后**的 stella 向量(≈cos 0.60) | 论文的 1.5 所在空间(是否归一化)未说明,数值不可直接换算;0.9 是我们按 cos≈0.6 语义校准的守卫 |
@@ -30,6 +30,7 @@
 | D16 | 单遍退火 | consumption ≤ mixture(单遍语义) | prod1/prod2 实测 **~2.5-4 epoch wrap**(loader 日志直证);2026-09-11 修复:steps=TOKENS/tbs + mix 池=预算/0.7 → 构造性单遍 epoch≈0.7 | 三重叠加:tbs 误设(回退值 524,288 当真值,真实 meta 1,048,576)+ mix 定尺寸 bug(池=预算×0.98 非 /0.7)+ ClimbMix 分片常量错 6×(500K vs 实测 85K);详见细节 D16 |
 | D17 | 生成式评测协议 | lm-eval-harness 惯例:`until` 停止串 + 每任务生成预算(GSM8K/MATH 默认 256) | 2026-09-17 起:gsm8k_cot cap 256 + 停止串 `\nAnswer: `;math_cot_500 cap 256→**1024** + 停止串 `\n\nSolution: `;**NLL prompt 预算冻结 1792 与生成预算解耦** | base 模型 few-shot 无 EOS(实测 hit_cap 99.85%@256),答后幻觉轮污染 math rfind-boxed 抽取;gold 实测 30.2% 超 256(p95=643/p99=893)。A/B 实证(d28_random_prod3,8×910B4):旧协议逐位复现、gsm8k 停止串噪声级、math 512→1024 marker 18.8→25.8%;NLL 全程与历史逐位一致。断代边界:仅 math accuracy 列;详见细节 D17 |
 | D18 | 生成式评测解码批(2026-09-20) | lm-eval-harness 批大小为实现参数(与复现无关) | gen batch 默认 **8→16**(CLI 与 evaluate_core 签名同翻,全库单一默认):**分数中性非位等** — 批→GEMM 切分→求和序→近平局 argmax 翻面 ~5/1319 行(实证 gsm8k 158/1319、math 11/500 对题数恒等);NLL 列(teacher-forced)不受批影响、逐位一致 | 生成 eval 吞吐 -18%(叠加同批位等优化 -41%:172→102ms/解码步);**代际边界**:prod1-4 落地 CSV + R1 补测 = b8 era,激活补测起 = b16 era(补测直接吃新默认,与未来轮同配);跨代对账语义 = NLL 逐位 + 生成 acc 噪声级(±1 题 ≈ ±0.0008 ≪ seed-pair 带 ±0.016-0.032)。详见细节 D18 |
+| D19 | 最终选择机制(2026-09-21) | §3.3:最终 predictor 在设计空间 A 上 argmax(无守卫) | **no-claim 守卫**:argmin 仍跑(留作论文候选+审计),但其**预测优势 ≤ margin 时降级最佳实测点**;margin = max(0.30, 留出残差 σ)(可配置覆盖)。配套 A2 = 早停定树数后**全量重拟合**终选模型(20% 验证税回收);A3 = top-k 实测候选导出 `topk_mixture_candidates.json` 供 d28 晋臂 | prod4 L1a:未实测外推赢家(climb-终选 0.1972/0.1990)被同一搜索的两个实测点(cfg72 0.2142 / cfg25 0.2066)全面超过;外推优势低于噪声地板 = 拟合噪声而非信号(08-29 smoke 合成证据:argmin 落后 best-measured 0.2-0.3)。**推翻 D3 旧决策**(2026-09-10 曾裁决保持论文 argmax)。详见细节 D19 |
 
 ## 细节与出处
 
@@ -351,6 +352,60 @@ bf16(每次加载位等自检)/ 无同步 ragged-decode KV 快路径 / 贪心解
   41/41 + test_gen_eval_stops 20/20 + test_eval_barrier_flush 5/5)。
   **激活序列 pull 目标更新为 `6e5baa2`**(原记 0c1229f)。
 
+### D19 最终选择机制:no-claim 守卫 + 全量重拟合 + top-k 晋臂(2026-09-21)
+
+背景:prod4 L1a 判决(2026-09-20)——同一 CLIMB 搜索的三种配方在 d28 上,
+两个**实测过**的点(climb-cfg72 0.2142 / climb-cfg25 0.2066)全面优于
+**从未实测**的插值终选点(climb-终选 0.1972/0.1990);且赢家 L1=0.65 邻域
+实测 1.05-1.13 全部低于最佳实测 0.12-0.40(赢家诅咒签名),特征重要性
+注记(终选把 C5/C12 给到 .354/.064,而 split share 仅 2.4%/1.4%)与之呼应。
+**本条推翻 D3 的 2026-09-10 裁决**("argmin 与最佳实测比较"当时被否决,
+证据到位后翻案)。
+
+- **A1 no-claim 守卫**(`iterative_bootstrapper._select_final_mixture` 正常
+  路径):设计空间 argmin 照常执行(保留论文候选身份 + 审计轨迹),但终选
+  归属由比较决定——argmin 的**预测效用**对最佳**实测**效用之领先
+  (claimed gain)≤ margin 时,选最佳实测点
+  (`selection_mode="best_measured_no_claim"`);> margin 才允许外推
+  (`"predictor_design_space_claimed"`)。守卫路径(no_predictor /
+  no_signal)不变,仍直取最佳实测。claim 报告(claimed gain / margin 与
+  来源 / L1 半径 / 最近 5 个实测邻域)入 `search_extras` → report.md
+  "Final Selection" 节。
+- **margin 定标**:`max(0.30, 留出残差 σ)`(最后一个 n≥5 的
+  predictor_eval (pred, actual) 对;σ 在目标空间与效用空间等幅)。地板
+  0.30 的依据:argmin 预测按构造乐观(选择偏差,随机点的残差 σ 低估被
+  选中的极值点误差)+ 08-29 smoke 实测 argmin 落后 best-measured
+  0.2-0.3 utility。`PredictorConfig.final_claim_margin` 可显式覆盖;
+  **prod5 前用服务器 40 对 predictor_eval 重定标(B4)**。
+- **A2 全量重拟合**(`predictor.refit_on_full`):20% 验证切分的存在意义
+  是早停选树数 + 诚实留出诊断;终选模型在树数定下后用**全部**实测点重拟合
+  (prod4: 89/111 → 111/111)。树数 = 早停 best_iteration_;auto_adjust
+  按全量 N 重算(N=112 → depth 4 / leaf 5,恰回论文语义);留出指标
+  (val_r2_/val_spearman_)从切分模型**承袭**——no-signal 守卫继续看到
+  诚实数字。返回新对象,不改写迭代历史的模型引用;n<10(从未有切分)跳过。
+- **A3 top-k 晋臂导出**(`_select_topk_candidates` → 管线写
+  `topk_mixture_candidates.json`):实测点按分数贪心 + 多样性过滤
+  (与已选点 L1 ≥ `topk_diversity_min_l1`=0.15;饿死则放宽补齐并标记
+  relaxed)取 k 个(`SearchConfig.topk_arms`,默认 3),权重按簇标签键控
+  (与 optimal_mixture_weights.json 同约定,`prepare_random_baseline
+  --weights` 直接可吃)。依据 = prod4 指令②:搜索输出按**区域**消费,
+  热区内 d20→d28 排名翻转(cfg25↔cfg72,互差噪声级)。**k 值随 prod5
+  设计决议(E5)定**。
+- **兼容性**:search_state.json 模式不变(选择是收尾动作,无状态持久化
+  新键);warm-start 注入不受影响(历史点有效性只看 pool/K/协议)。
+  selection_mode 新增值两个(`best_measured_no_claim` /
+  `predictor_design_space_claimed`),`predictor_design_space` 仅作未选择
+  时的初值。搜索 fingerprint 覆盖本改动(源码入哈希),prod4 已收官无
+  在途状态可作废。
+- **测试**:`scripts/diagnostics/test_final_selection_p1.py`(30 项:真
+  LightGBM 重拟合树数/全量/指标承袭/NaN 过滤、真预测器经 bootstrapper
+  的 A1+A2 全路径、top-k 多样性/放宽/NaN、方向映射、报告渲染含 legacy
+  态、管线 JSON 落盘)+ test_prod2_fixes.py 第 5 节重写(StubPredictor
+  加 predict,断言新 mode);全套回归绿(test_reuse_tools /
+  test_iteration_floor / test_prod4_fixes / test_baseline_family /
+  test_prod2_runtime / test_read_path_integrity / test_single_pass_guard
+  相关段)。
+
 ## 已核对一致(正向审计)
 
 - 嵌入模型 stella_en_400M_v5(§3.1)
@@ -367,7 +422,6 @@ bf16(每次加载位等自检)/ 无同步 ragged-decode KV 快路径 / 贪心解
   search_state.json(`predictor_eval`,累计 N≥10 才有切分 — speedrun N=7
   无,生产 35 每轮都有)。预期管理:N=35 vs 112 + SNR z-score 标签更噪,
   留出相关性必然低于 94%,属预算差异而非缺陷
-- 最终选择 = predictor 预测 argmax(§2.2;枚举方式见 D3)
 - Random 基线 = 等簇权 1/K(App. C.1;短缺策略见 D7)
 - WSD 退火语义:stable 阶段可恢复、数据混合研究聚焦 decay 阶段(§C.4;我们
   lr_scale=1.0/warmup=0.0/warmdown=0.9 从 base checkpoint 直接退火)

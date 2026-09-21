@@ -76,10 +76,20 @@ class IterativeBootstrapper:
         # pure noise" evidence (prod1: f < 0 on all six).
         self._task_f: Dict[str, float] = {}
         # Final-selection audit (surfaced in pipeline_summary via search_extras):
-        # "predictor_design_space" | "no_signal_best_measured" |
-        # "no_predictor_best_measured" + the guard reasons that fired.
+        # "predictor_design_space_claimed" | "best_measured_no_claim" |
+        # "no_signal_best_measured" | "no_predictor_best_measured" + the
+        # guard reasons that fired (D19 adds the first two).
         self._selection_mode: str = "predictor_design_space"
         self._selection_guard_reasons: List[str] = []
+        # D19 no-claim audit: the full comparison record of the final
+        # selection — best-measured anchor vs design-space argmin candidate
+        # (claimed gain, margin + source, L1 radius, nearest measured
+        # evidence, refit-on-full flag). Populated by the normal path of
+        # _select_final_mixture, surfaced via search_extras -> report.md.
+        self._selection_claim: Optional[Dict[str, Any]] = None
+        # D19 A3: top-k MEASURED candidates for d28 arm promotion
+        # ({"k_requested", "diversity_min_l1", "relaxed", "candidates"}).
+        self._topk_export: Dict[str, Any] = {}
         self.w_floor = config.search.w_floor
         self.state_path = state_path
         self._last_completed_iter = 0
@@ -1059,6 +1069,18 @@ class IterativeBootstrapper:
         print(f"  Selection mode: {self._selection_mode}")
         for reason in self._selection_guard_reasons:
             print(f"    guard: {reason}")
+        if self._selection_claim:
+            cl = self._selection_claim
+            ac = cl["argmin_candidate"]
+            print(f"  Claim: argmin predicted {ac['predicted_utility']:+.3f} "
+                  f"vs best measured {cl['best_measured']['actual_utility']:+.3f} "
+                  f"(gain {ac['claimed_gain']:+.3f} vs margin "
+                  f"{cl['margin']:.3f} [{cl['margin_source']}], "
+                  f"refit_on_full={cl['refit_on_full']})")
+        if self._topk_export.get("candidates"):
+            print("  Top-k arm candidates: "
+                  + ", ".join(f"cfg{c['config_id']}({c['score']:+.3f})"
+                              for c in self._topk_export["candidates"]))
         print(f"  Optimal mixture weights:")
         for i, w in enumerate(optimal.mixture_weights.weights):
             print(f"    C{i}: {w:.4f}")
@@ -1097,13 +1119,25 @@ class IterativeBootstrapper:
         return reasons
 
     def _select_final_mixture(self) -> MixtureConfig:
-        """Final selection (paper §3.3) with the no-signal guard.
+        """Final selection (paper §3.3) with the no-signal + no-claim guards.
 
         - No predictor trained (too few valid configs): best MEASURED config.
         - Predictor has no signal (guard reasons): best MEASURED config,
           loudly annotated — never an unmeasured design-space corner.
-        - Otherwise: paper-faithful full-design-space search.
+        - Otherwise (D19): the design-space argmin still runs (paper-faithful
+          candidate + audit trail) but must EARN the final slot — its
+          PREDICTED advantage over the best measured config must exceed the
+          no-claim margin, else the best measured config wins. prod4 L1a:
+          the unmeasured argmin (0.1972/0.1990 at d28) lost to BOTH measured
+          candidates of the same search (cfg72 0.2142, cfg25 0.2066) — an
+          extrapolated advantage below the noise floor is fit noise, not
+          signal. The top-k measured candidates for d28 arm promotion are
+          exported on every path (they are the arm material regardless of
+          which policy picks the winner).
         """
+        # A3: top-k arm candidates — computed first, on every path.
+        self._topk_export = self._select_topk_candidates()
+
         if self._predictor is None:
             self._selection_mode = "no_predictor_best_measured"
             print("[Search] No predictor trained — selecting the best "
@@ -1127,8 +1161,196 @@ class IterativeBootstrapper:
                 np.array(self._accumulated_scores, dtype=np.float64))
             return self._accumulated_configs[best_idx]
 
-        self._selection_mode = "predictor_design_space"
-        return self._search_full_design_space()
+        scores = np.array(self._accumulated_scores, dtype=np.float64)
+        best_idx = self._best_index(scores)
+        best_config = self._accumulated_configs[best_idx]
+        best_actual = float(scores[best_idx])
+
+        # A2: the final selection model trains on ALL measured points — the
+        # 20% val split paid for early stopping; the tree count is chosen
+        # now. n<10 never had a split (the last fit already saw every
+        # point); non-LightGBM stubs skip gracefully.
+        n_valid = int(np.isfinite(scores).sum())
+        refit_on_full = False
+        if n_valid >= 10 and hasattr(self._predictor, "refit_on_full"):
+            all_targets = (scores if self.metric_direction == "minimize"
+                           else -scores)
+            try:
+                self._predictor = self._predictor.refit_on_full(
+                    self._accumulated_configs, all_targets)
+                refit_on_full = True
+            except Exception as e:  # noqa: BLE001
+                print(f"[Search] WARNING: refit-on-full failed ({e!r}) — "
+                      f"keeping the split-fit model for final selection "
+                      f"(the no-claim comparison below still guards)")
+                refit_on_full = False
+
+        candidate = self._search_full_design_space()
+        pred_target = float(self._predictor.predict([candidate])[0])
+        pred_utility = self._utility_of_prediction(pred_target)
+        claimed_gain = pred_utility - best_actual
+
+        margin, margin_source = self._final_claim_margin()
+
+        # Claim audit: L1 radius to the measured fleet + nearest evidence
+        # (prod4: the winner's L1=0.65 neighborhood measured 1.05-1.13, all
+        # 0.12-0.40 BELOW the best measured 1.2550 — the winner's-curse
+        # signature this report makes visible at selection time).
+        cand_w = candidate.mixture_weights.weights
+        finite_idx = np.where(np.isfinite(scores))[0]
+        l1s = [(int(i),
+                float(np.abs(cand_w -
+                             self._accumulated_configs[i].mixture_weights.weights).sum()))
+               for i in finite_idx]
+        l1s.sort(key=lambda kv: kv[1])
+        neighborhood = [
+            {"config_id": int(self._accumulated_configs[i].config_id),
+             "l1": round(d, 4),
+             "actual_utility": float(scores[i])}
+            for i, d in l1s[:5]
+        ]
+        radius = l1s[0][1] if l1s else None
+
+        self._selection_claim = {
+            "best_measured": {
+                "config_id": int(best_config.config_id),
+                "state_index": int(best_idx),
+                "actual_utility": best_actual,
+            },
+            "argmin_candidate": {
+                "predicted_utility": pred_utility,
+                "claimed_gain": claimed_gain,
+                "l1_radius_to_measured": radius,
+                "nearest_measured": neighborhood,
+            },
+            "margin": margin,
+            "margin_source": margin_source,
+            "refit_on_full": refit_on_full,
+        }
+
+        if claimed_gain <= margin:
+            self._selection_mode = "best_measured_no_claim"
+            self._selection_guard_reasons = [
+                f"claimed gain {claimed_gain:+.3f} <= margin {margin:.3f} "
+                f"({margin_source}) — the argmin's predicted advantage does "
+                f"not clear the noise floor; selecting the best MEASURED "
+                f"config (prod4 L1a: the unmeasured argmin lost to both "
+                f"measured candidates of the same search)"
+            ]
+            print(f"[Search] NO-CLAIM — design-space argmin predicted "
+                  f"{pred_utility:+.3f} vs best measured {best_actual:+.3f} "
+                  f"(claimed gain {claimed_gain:+.3f} <= margin "
+                  f"{margin:.3f}, {margin_source}); L1 radius {radius} to "
+                  f"the nearest measured config. Selecting the best "
+                  f"MEASURED config (cfg#{best_config.config_id}).")
+            return best_config
+
+        self._selection_mode = "predictor_design_space_claimed"
+        self._selection_guard_reasons = []
+        print(f"[Search] Extrapolation CLAIMED the final slot: predicted "
+              f"advantage {claimed_gain:+.3f} > margin {margin:.3f} "
+              f"({margin_source}); L1 radius {radius} to the nearest "
+              f"measured config, neighborhood actuals "
+              f"{[round(n['actual_utility'], 3) for n in neighborhood]} — "
+              f"the claim report travels with search_extras.")
+        return candidate
+
+    def _utility_of_prediction(self, p: float) -> float:
+        """Target-space prediction (lower = better) -> the _compute_scores
+        utility convention (higher = better) — the exact inverse of the
+        target mapping in _refit_predictor."""
+        return -p if self.metric_direction == "maximize" else p
+
+    def _final_claim_margin(self) -> Tuple[float, str]:
+        """The no-claim margin (utility units) for the final selection.
+
+        Config override wins; otherwise auto = max(0.30, held-out residual
+        sigma of the last predictor_eval with >=5 (pred, actual) pairs).
+        The floor exists because residual sigma is measured at RANDOM val
+        points while the claim is evaluated at the SELECTED argmin extreme
+        (optimistic by construction — winner's curse); 08-29 smoke_search
+        measured the realized argmin-vs-best-measured lag at 0.2-0.3
+        utility. B4 (algorithm_review.md §2.4) recalibrates from the full
+        40-pair set before prod5.
+        """
+        margin_cfg = getattr(self.config.predictor, "final_claim_margin", None)
+        if margin_cfg is not None and margin_cfg >= 0:
+            return float(margin_cfg), "config_override"
+        for ev in reversed(self._predictor_eval):
+            preds = ev.get("val_preds") or []
+            tgts = ev.get("val_targets") or []
+            if len(preds) >= 5 and len(preds) == len(tgts):
+                residuals = (np.asarray(preds, dtype=np.float64)
+                             - np.asarray(tgts, dtype=np.float64))
+                sigma = float(np.std(residuals))
+                if np.isfinite(sigma):
+                    return max(0.30, sigma), f"auto_residual_sigma={sigma:.3f}"
+                break
+        return 0.30, "conservative_default_no_eval_pairs"
+
+    def _select_topk_candidates(self) -> Dict[str, Any]:
+        """A3: top-k MEASURED configs for d28 arm promotion (D19).
+
+        Greedy by actual score with a diversity filter (min L1 to every
+        already-selected candidate), relaxed fill if the filter starves the
+        list below k. prod4 justification: the d20 ranking flipped at d28
+        inside the hot zone (cfg25 #1 -> 0.2066 vs cfg72 #2 -> 0.2142) —
+        the search output is consumed as a REGION.
+        """
+        k = int(getattr(self.config.search, "topk_arms", 3) or 0)
+        export: Dict[str, Any] = {"k_requested": k,
+                                  "diversity_min_l1": None,
+                                  "relaxed": False,
+                                  "candidates": []}
+        if k <= 0:
+            return export
+        div_min = float(getattr(self.config.search, "topk_diversity_min_l1",
+                                0.15))
+        export["diversity_min_l1"] = div_min
+
+        scores = np.array(self._accumulated_scores, dtype=np.float64)
+        if not np.isfinite(scores).any():
+            return export
+        finite = np.isfinite(scores)
+        order = [int(i) for i in
+                 np.argsort(-np.where(finite, scores, -np.inf)) if finite[i]]
+
+        def _l1(i, j):
+            return float(np.abs(
+                self._accumulated_configs[i].mixture_weights.weights
+                - self._accumulated_configs[j].mixture_weights.weights).sum())
+
+        selected: List[int] = []
+        for idx in order:
+            if len(selected) >= k:
+                break
+            if all(_l1(idx, s) >= div_min for s in selected):
+                selected.append(idx)
+        if len(selected) < k:
+            # Diversity starved the list — fill with the best remaining by
+            # score (k arms beat fewer arms; min_l1 per candidate makes the
+            # crowding visible in the export).
+            export["relaxed"] = True
+            for idx in order:
+                if len(selected) >= k:
+                    break
+                if idx not in selected:
+                    selected.append(idx)
+
+        for rank, idx in enumerate(selected, 1):
+            min_l1 = min((_l1(idx, s) for s in selected if s != idx),
+                         default=None)
+            export["candidates"].append({
+                "rank": rank,
+                "config_id": int(self._accumulated_configs[idx].config_id),
+                "state_index": idx,
+                "score": float(scores[idx]),
+                "weights": [float(x) for x in
+                            self._accumulated_configs[idx].mixture_weights.weights],
+                "min_l1_to_other_selected": (round(min_l1, 4)
+                                             if min_l1 is not None else None),
+            })
+        return export
 
     def _search_full_design_space(self) -> MixtureConfig:
         """
@@ -1199,6 +1421,16 @@ class IterativeBootstrapper:
     @property
     def selection_guard_reasons(self) -> List[str]:
         return list(self._selection_guard_reasons)
+
+    @property
+    def selection_claim(self) -> Optional[Dict[str, Any]]:
+        """D19 no-claim audit of the final selection (normal path only)."""
+        return self._selection_claim
+
+    @property
+    def topk_export(self) -> Dict[str, Any]:
+        """D19 A3: top-k MEASURED candidates for d28 arm promotion."""
+        return self._topk_export
 
     @property
     def predictor_eval(self) -> List[Dict[str, Any]]:

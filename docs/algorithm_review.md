@@ -98,9 +98,14 @@ balanced **不是当前瓶颈**——prod4 证明瓶颈在选择机制（热区�
 
 **③ D3 旧决策已被 prod4 推翻**：D3 记录 2026-09-10 曾否决"argmin 与最佳实测比较"、仍按论文 argmax。之后证据到位：L1a（两个实测点胜过外推赢家）+ 赢家邻域实测 1.05–1.13 全低于最佳实测 0.12–0.40（赢家诅咒签名）+ 08-29 smoke_search 合成证据（argmin 落后 best-measured 0.2–0.3 utility）。**P1 正当性链完整**。
 
-### 2.3 P1 设计：best-measured 终选 + no-claim 守卫
+### 2.3 P1 设计:best-measured 终选 + no-claim 守卫
 
-- **改动点**：`_select_final_mixture` 正常路径（:1130-1131）——计算 best-measured；跑设计空间 argmin（现状保留为对照）；**argmin 对 best-measured 的预测优势 < margin → 选 best-measured，selection_mode="best_measured_no_claim"**；否则允许外推但记录半径+邻域证据进 claim 报告。
+**实现状态(2026-09-21,已落地)**:`_select_final_mixture` 正常路径重写 +
+`refit_on_full`(A2)+ `_select_topk_candidates`(A3)→ 测试
+`test_final_selection_p1.py` 30 项全绿;细节与兼容性记录 = paper_deviations.md
+D19。margin 默认 = max(0.30, 留出残差 σ),**B4 定标前为保守档**。
+
+- **改动点**:`_select_final_mixture` 正常路径——计算 best-measured;跑设计空间 argmin(现状保留为对照);**argmin 对 best-measured 的预测优势 < margin → 选 best-measured,selection_mode="best_measured_no_claim"**;否则允许外推但记录半径+邻域证据进 claim 报告。
 - **margin 定标**：held-out 残差 σ（predictor_eval 的 40 对 (pred,actual)）× 系数——待服务器数据拉取后定。
 - **复测已被否决（用户裁决 2026-09-20）**：轮次 1–3 本身就在实测配置，单点复测 = 整轮排队成本换 1 个测量，投入产出不成正比；且 best-measured 构造性地消除了复测要验证的对象（终选永远是已实测点）。
 - 衔接 prod4 指令② 前半：top-k 实测点直接进臂验证（搜索输出按**区域**消费）。
@@ -118,8 +123,12 @@ balanced **不是当前瓶颈**——prod4 证明瓶颈在选择机制（热区�
 
 ### 2.5 改进提案分级
 
-- **P1（已裁决，本轮实现）**：best-measured 终选 + no-claim 守卫。
-- **P2 候选**：① 早停后全量重拟合（发现②，低风险白捡 20% 训练点）；② LightGBM 种子集成（5 seeds → 均值+方差 → LCB 获取与 no-claim margin 直接受益）= prod4 指令②"不确定度感知获取"的落地形态。
+- **P1(2026-09-21 已实现)**:best-measured 终选 + no-claim 守卫(A1)+
+  全量重拟合(A2)+ top-k 晋臂导出(A3,k 默认 3 待 E5 定)——D19。
+- **P2 候选**:① 早停后全量重拟合 = **A2,已随 P1 实现**(2026-09-21);
+  ② LightGBM 种子集成(5 seeds → 均值+方差 → LCB 获取与 no-claim margin
+  直接受益)= prod4 指令②"不确定度感知获取"的落地形态(用户裁决 2026-09-21
+  搁置,A4:prod5 复盘"后轮无超越"再启或换池/上规模后)。
 - **不动项**：verbatim 采样（D2 有数值证据：扰动被证伪）、剪枝语义（论文 §2.2 对齐；修的对象是终选不是剪枝）。
 - **论文参考边界**：超参/采样/剪枝语义论文有明文且已对齐；全量重拟合论文语焉不详（可改）；集成/LCB 与 best-measured 守卫论文完全没讨论——后者是我们在推翻论文做法（带着 L1a 证据）。论文 D.10 的 94% Spearman 不可作目标（他们 3 个 MC 验证损失 vs 我们 6 任务含生成 CoT，标签噪声不同源）。
 
@@ -139,4 +148,4 @@ balanced **不是当前瓶颈**——prod4 证明瓶颈在选择机制（热区�
 ## 记录沿革
 
 - 2026-09-20 v1：创建。聚类审查（§1）+ 预测器静态审查（§2）+ 术语（§3）。触发 = prod4 收官后的算法层设计审查（用户裁决：STEM 内算法迭代 → 完整重跑 → 上规模 → 才换池；P1 砍复测；可见度暂缓）。代码事实来源 = 当日逐行审查（predictor.py / iterative_bootstrapper.py / cluster_merge.py）+ 两轮探索 agent 报告；实验证据 = experiment_prod4.md。
-- 待续：P1 实现（iterative_bootstrapper.py + 测试）→ 服务器数据拉取（§2.4）→ 动态审计（剪枝回测/SHAP/margin 定标）→ 改进提案终版分级。
+- 2026-09-21：§2.3/§2.5 标记 P1 实现（A1+A2+A3 全落地，paper_deviations.md D19；测试 test_final_selection_p1.py 30 项）。待续：服务器数据拉取（§2.4）→ 动态审计（剪枝回测/SHAP/margin 定标）→ 改进提案终版分级。

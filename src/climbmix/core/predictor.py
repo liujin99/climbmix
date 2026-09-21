@@ -20,6 +20,9 @@ class LightGBMPredictor:
         self.config = config or PredictorConfig()
         self._model = None
         self._is_fitted = False
+        # Training-set size of the last fit (after non-finite filtering) —
+        # audit trail for the A2 refit-on-full ("split fit saw 89 of 111").
+        self.fit_n_: Optional[int] = None
         # Held-out metrics from the early-stopping split (paper D.10 reports
         # held-out Spearman; set by fit() when a validation set is given).
         self.val_r2_: Optional[float] = None
@@ -102,6 +105,7 @@ class LightGBMPredictor:
             y = y[valid_mask]
 
         n_samples, n_features = X.shape
+        self.fit_n_ = int(n_samples)
         adj = self.config.get_adjusted_params(n_samples, n_features)
         max_depth = adj["max_depth"]
         min_samples_leaf = adj["min_samples_leaf"]
@@ -166,6 +170,73 @@ class LightGBMPredictor:
             print(f"[Predictor] val R\u00b2={self.val_r2_:.4f}, "
                   f"val Spearman={self.val_spearman_:.4f} (n={len(y_val)})")
         return self
+
+    def refit_on_full(self, configs: List[MixtureConfig],
+                      losses: npt.NDArray[np.float64]) -> "LightGBMPredictor":
+        """(A2, D19) Refit on ALL measured points with the early-stopping tree count.
+
+        The 20% validation split exists to pick the tree count (early
+        stopping) and to produce honest held-out diagnostics — a training
+        tax of ~20% of the measured fleet on every fit. Once the final
+        round's tree count is chosen, the model that drives the FINAL
+        selection refits on every measured point (prod4: 89/111 -> 111/111).
+        Returns a NEW fitted predictor:
+
+        - tree count = this fit's best_iteration_ (n_estimators when early
+          stopping never fired), so the capacity choice stays the one the
+          validation data made;
+        - auto_adjust recomputed at the full N (the formula is N-based;
+          paper semantics at N=112 -> depth 4 / leaf 5);
+        - val_r2_ / val_spearman_ CARRIED OVER from this early-stopped fit —
+          the refit has no held-out set by construction, and the no-signal
+          guard must keep seeing honest numbers, not train R².
+        """
+        import lightgbm as lgb
+
+        if not self._is_fitted:
+            raise RuntimeError("Predictor not fitted")
+
+        X = np.array([c.flatten() for c in configs])
+        y = np.array(losses)
+        valid_mask = np.isfinite(y)
+        if not np.all(valid_mask):
+            X = X[valid_mask]
+            y = y[valid_mask]
+
+        best_iter = getattr(self._model, "best_iteration_", None)
+        n_trees = max(1, int(best_iter)) if best_iter is not None \
+            else self.config.n_estimators
+
+        new = LightGBMPredictor(self.num_clusters, self.config)
+        n_samples, n_features = X.shape
+        adj = self.config.get_adjusted_params(n_samples, n_features)
+        lgb_params = {
+            "n_estimators": n_trees,
+            "learning_rate": self.config.learning_rate,
+            "max_depth": adj["max_depth"],
+            "num_leaves": min(15, 2 ** adj["max_depth"] - 1),
+            "min_child_samples": adj["min_samples_leaf"],
+            "reg_alpha": self.config.l1_reg,
+            "reg_lambda": self.config.l2_reg,
+            "subsample": 1.0,
+            "colsample_bytree": self._compute_colsample(),
+            "random_state": 42,
+            "verbose": -1,
+        }
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            new._model = lgb.LGBMRegressor(**lgb_params)
+            new._model.fit(X, y)
+        new._is_fitted = True
+        new.fit_n_ = int(n_samples)
+        new.train_r2_ = float(new._model.score(X, y))
+        new.val_r2_ = self.val_r2_
+        new.val_spearman_ = self.val_spearman_
+        print(f"[Predictor] Refit on full: N={n_samples} (split fit saw "
+              f"{self.fit_n_}), trees={n_trees} (early stopping chose "
+              f"{best_iter if best_iter is not None else 'none'}), "
+              f"train R\u00b2={new.train_r2_:.4f}")
+        return new
 
     def predict(self, configs: List[MixtureConfig]) -> npt.NDArray[np.float64]:
         if not self._is_fitted:

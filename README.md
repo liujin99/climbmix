@@ -97,9 +97,14 @@ Iterative Bootstrapping Search — warm-started (docs/reuse_design.md):
 Each proxy experiment: 70% STEM (by cluster weights) + 30% ClimbMix general
    (adaptive 3-50 shards, reverse download from shard 6542 → avoids pretrain overlap)
   ↓
-Final selection: LightGBM predictor argmin over the design space
-   (4 concentration levels × 25K Dirichlet candidates + 5K refine near
-   the argmin) → optimal mixture α*
+Final selection: the LightGBM argmin over the design space (4 concentration
+   levels × 25K Dirichlet candidates + 5K refine near the argmin) must
+   predict better than the best MEASURED config by more than a noise-floor
+   margin to win the slot (no-claim guard) — else the best measured config
+   is selected; the selection model refits on ALL measured points
+   (early stopping only chooses the tree count). Top-k measured candidates
+   are exported to topk_mixture_candidates.json for d28 arm promotion
+   (paper_deviations.md D19)
   ↓
 Target arms: d28 mid-train with α* + 30% ClimbMix (same mixing) vs
    uniform-cluster baseline (equal weights 1/K, paper App. C.1; same
@@ -111,8 +116,10 @@ STEM benchmark eval (arc_easy, arc_challenge, mmlu_stem, gpqa_diamond,
 
 prod4's key negative result sits exactly at the final-selection step:
 both *measured* top configs beat the never-measured extrapolated winner
-(a soft winner's curse). Next-round priority is a best-measured fallback
-with a no-claim guard — see [Results](#results--round-reports).
+(a soft winner's curse). The next round therefore ships a best-measured
+fallback with a no-claim margin guard plus top-k measured-candidate arms
+([paper_deviations.md D19](docs/paper_deviations.md)) — see
+[Results](#results--round-reports).
 
 ## Key Design Choices
 

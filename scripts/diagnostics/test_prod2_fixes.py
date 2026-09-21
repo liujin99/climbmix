@@ -149,11 +149,19 @@ s2 = bs2._compute_scores()
 check("scores: per-config nan NLL handled (all finite)",
       np.isfinite(s2).all(), f"scores={np.round(s2, 3)}")
 
-# ── 5. no-signal guard on final selection ─────────────────────────────────
+# ── 5. no-signal guard + no-claim margin on final selection (D19) ──────────
 class StubPredictor:
-    def __init__(self, r2, train_r2=None):
+    """predict() returns TARGET-space values (lower = better, the
+    _refit_predictor convention). Default pred = -10 -> utility +10: the
+    argmin claims a huge unmeasured advantage."""
+
+    def __init__(self, r2, train_r2=None, pred_target=-10.0):
         self.val_r2_ = r2
         self.train_r2_ = train_r2 if train_r2 is not None else r2
+        self.pred_target = pred_target
+
+    def predict(self, configs):
+        return np.full(len(configs), self.pred_target, dtype=np.float64)
 
 
 bs3 = IterativeBootstrapper(cfg, cluster_tokens, cluster_labels)
@@ -180,10 +188,67 @@ check("selection: R2<=0 -> guard fires, best measured, design-space NOT called",
       and np.allclose(sel.mixture_weights.weights, [0.9, 0.1])
       and len(bs3._selection_guard_reasons) >= 1)
 
-bs3._predictor = StubPredictor(0.5)
+# R2>0, huge claimed gain (+8 over best measured) -> extrapolation CLAIMS
+bs3._predictor = StubPredictor(0.5)  # pred -10 -> utility +10 vs best 2.0
 sel = bs3._select_final_mixture()
-check("selection: R2>0 -> paper-faithful design-space path",
-      bs3._selection_mode == "predictor_design_space" and called["design"])
+check("selection: R2>0 + claimed gain > margin -> design-space candidate",
+      bs3._selection_mode == "predictor_design_space_claimed" and called["design"]
+      and np.allclose(sel.mixture_weights.weights, [0.1, 0.9]))
+check("selection: claim report populated",
+      (bs3._selection_claim or {}).get("argmin_candidate", {}).get("claimed_gain", 0) >= 7.9
+      and bs3._selection_claim["best_measured"]["actual_utility"] == 2.0
+      and len(bs3._selection_claim["argmin_candidate"]["nearest_measured"]) == 2)
+
+# R2>0 but small claimed gain (+0.5) vs margin 1.0 -> NO-CLAIM, best measured
+cfg_nc = CLIMBConfig(val_tasks=["mmlu_stem", "other_task"])
+cfg_nc.predictor.final_claim_margin = 1.0
+bs_nc = IterativeBootstrapper(cfg_nc, cluster_tokens, cluster_labels)
+bs_nc._accumulated_configs = [
+    MixtureConfig(mixture_weights=MixtureWeights(weights=np.array([w, 1 - w])))
+    for w in (0.1, 0.9)
+]
+bs_nc._accumulated_scores = [1.0, 2.0]
+bs_nc._predictor = StubPredictor(0.5, pred_target=-2.5)  # utility 2.5
+called_nc = {"design": False}
+bs_nc._search_full_design_space = lambda: (called_nc.__setitem__("design", True)
+                                           or bs_nc._accumulated_configs[0])
+sel = bs_nc._select_final_mixture()
+check("selection: claimed gain 0.5 <= margin 1.0 -> NO-CLAIM, best measured",
+      bs_nc._selection_mode == "best_measured_no_claim" and called_nc["design"]
+      and np.allclose(sel.mixture_weights.weights, [0.9, 0.1])
+      and any("margin" in r for r in bs_nc._selection_guard_reasons))
+check("selection: top-k exported on the no-claim path",
+      [c["config_id"] for c in bs_nc.topk_export["candidates"]]
+      == [bs_nc._accumulated_configs[1].config_id,
+          bs_nc._accumulated_configs[0].config_id]
+      and bs_nc.topk_export["relaxed"] is True)
+
+# margin auto: residual sigma from predictor_eval pairs (floor 0.30)
+bs_m = IterativeBootstrapper(cfg, cluster_tokens, cluster_labels)
+bs_m._predictor_eval = [{
+    "iteration": 2, "n_val": 6,
+    "val_preds": [0.0] * 6,
+    "val_targets": [1.0, -1.0, 2.0, -2.0, 3.0, -3.0],
+}]
+m_sig, src_sig = bs_m._final_claim_margin()
+sigma_expect = float(np.std(
+    np.array([0.0] * 6) - np.array([1.0, -1.0, 2.0, -2.0, 3.0, -3.0])))
+check("margin: auto = max(0.30, residual sigma)",
+      abs(m_sig - sigma_expect) < 1e-9 and m_sig > 2.0
+      and "auto_residual_sigma" in src_sig)
+bs_m._predictor_eval = [{
+    "iteration": 2, "n_val": 6,
+    "val_preds": [0.001] * 6, "val_targets": [0.0] * 6,
+}]
+m_floor, src_floor = bs_m._final_claim_margin()
+check("margin: residual sigma below floor -> 0.30",
+      m_floor == 0.30 and "auto_residual_sigma" in src_floor)
+m_cfg, src_cfg = bs_nc._final_claim_margin()
+check("margin: config override wins", m_cfg == 1.0 and src_cfg == "config_override")
+bs_nc2 = IterativeBootstrapper(cfg, cluster_tokens, cluster_labels)
+m_def, src_def = bs_nc2._final_claim_margin()
+check("margin: no eval pairs -> conservative default",
+      m_def == 0.30 and src_def == "conservative_default_no_eval_pairs")
 
 # no val split (<10 configs): train_r2 fallback drives the guard
 bs5 = IterativeBootstrapper(cfg, cluster_tokens, cluster_labels)
@@ -202,8 +267,8 @@ check("selection: no val split, train R2<=0 -> guard fires",
       bs5._selection_mode == "no_signal_best_measured" and not called5["design"])
 bs5._predictor = StubPredictor(None, train_r2=0.9)
 sel = bs5._select_final_mixture()
-check("selection: no val split, train R2>0 -> design-space path",
-      bs5._selection_mode == "predictor_design_space" and called5["design"])
+check("selection: no val split, train R2>0 + big claim -> design-space path",
+      bs5._selection_mode == "predictor_design_space_claimed" and called5["design"])
 
 # all-task f<0 guard fires even with healthy R2
 bs4 = IterativeBootstrapper(cfg, cluster_tokens, cluster_labels)

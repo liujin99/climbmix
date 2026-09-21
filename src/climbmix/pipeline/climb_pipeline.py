@@ -222,7 +222,17 @@ class CLIMBPipeline:
             "selection": {
                 "mode": bootstrapper.selection_mode,
                 "guard_reasons": bootstrapper.selection_guard_reasons,
+                # D19 no-claim audit: best-measured anchor vs design-space
+                # argmin (claimed gain / margin / L1 radius / neighborhood).
+                "claim": bootstrapper.selection_claim,
+                # D19 A3: top-k MEASURED candidates for d28 arm promotion.
+                "topk": bootstrapper.topk_export,
             },
+            # In-memory ONLY (never serialized): the final selection model
+            # after the A2 refit-on-full — a NEW object no IterationResult
+            # references; the report's feature-importance section needs it
+            # to show the model that actually drove the selection.
+            "_final_predictor": bootstrapper.predictor,
         }
         self._save_outputs(
             output_dir, optimal_weights, iter_results,
@@ -417,6 +427,40 @@ class CLIMBPipeline:
         weights_path = os.path.join(output_dir, "optimal_mixture_weights.json")
         atomic_write_json(weights_path, weights_dict)
         print(f"[Save] Optimal weights -> {weights_path}")
+
+        # D19 A3: top-k MEASURED candidates for d28 arm promotion — the
+        # search output is consumed as a REGION (prod4 L1a: d20 #1 cfg25
+        # 0.2066 lost at d28 to #2 cfg72 0.2142). Same weight-keying
+        # convention as optimal_mixture_weights.json, so
+        # prepare_random_baseline --weights consumes either file.
+        sel_extras = ((search_extras or {}).get("selection") or {})
+        topk = sel_extras.get("topk") or {}
+        topk_cands = topk.get("candidates") or []
+        if topk_cands:
+            labels = [c.label for c in cluster_info]
+            payload = {
+                "selection_mode": sel_extras.get("mode"),
+                "k_requested": topk.get("k_requested"),
+                "diversity_min_l1": topk.get("diversity_min_l1"),
+                "relaxed_fill": topk.get("relaxed"),
+                "note": (
+                    "Top-k MEASURED configs for d28 arm promotion "
+                    "(paper_deviations.md D19). Weights keyed like "
+                    "optimal_mixture_weights.json; promote as "
+                    "climb-cfg<config_id> arms (ARM_NAME)."
+                ),
+                "candidates": [
+                    {**c,
+                     "weights": ({labels[i]: w for i, w in
+                                  enumerate(c["weights"])}
+                                 if len(labels) == len(c["weights"])
+                                 else c["weights"])}
+                    for c in topk_cands
+                ],
+            }
+            topk_path = os.path.join(output_dir, "topk_mixture_candidates.json")
+            atomic_write_json(topk_path, payload, indent=2)
+            print(f"[Save] Top-k arm candidates ({len(topk_cands)}) -> {topk_path}")
 
         elapsed = time.time() - t_start
         summary = {
