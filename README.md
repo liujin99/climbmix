@@ -16,13 +16,19 @@
 Automated framework that discovers, evaluates, and refines data mixtures
 for language model pre-training through embedding-driven clustering and
 iterative bootstrapping, using **nanochat-npu** as the training backend via
-**method A** (subprocess calls) — a full 9-arm validation round consumes
-**≈1,800 NPU-hours**.
+**method A** (subprocess calls).
+
+**Project scale**: four production rounds on a 116M-doc / ~92B-token STEM
+pool; a full 9-arm validation round consumes **≈1,800 NPU-hours** (d20
+search fleet + 8 target arms at ~1.5B scaling / 3B tokens + anchors);
+111 measured search points; every deliberate deviation from the paper
+itemized in [docs/paper_deviations.md](docs/paper_deviations.md) (D1–D19).
 
 The CLIMB premise is validated at target-model scale in our production
 rounds: search-found mixtures beat uniform / natural / domain-ratio
 baselines by **+0.014–0.031 STEM** on a d28 (~2.5B) model at a 3B-token
-mid-training budget — see [Results](#results--round-reports).
+mid-training budget — see [Results](#results--round-reports) and
+[Key Takeaways](#key-takeaways).
 
 ## Results & Round Reports
 
@@ -71,6 +77,36 @@ Cross-round trajectory (CLIMB vs uniform, same-day budget-matched):
 prod1 −0.004 → prod2 +0.010 → prod4 +0.016–0.032.
 
 Full report: [docs/experiment_prod4.md](docs/experiment_prod4.md).
+
+## Key Takeaways
+
+The condensed, transferable findings from the whole project — full version
+with evidence chains: **[docs/takeaways.md](docs/takeaways.md)**.
+
+1. **The CLIMB premise survives target-scale validation** — learned
+   mixtures beat every fixed-ratio baseline (+0.014–0.031 STEM, gains
+   concentrated in generative math), and the win comes from cluster-level
+   structure, not domain ratios (a hand-tuned math-heavy domain mix lands
+   inside the uniform band).
+2. **The novel finding: final selection is the weak link** — the
+   predictor's single-point extrapolation added nothing over measured
+   configs (a soft winner's curse the paper does not discuss). The fix
+   shipped here: best-measured fallback + a noise-calibrated no-claim
+   guard + top-k region consumption
+   ([paper_deviations.md D19](docs/paper_deviations.md)).
+3. **Trust the predictor for regions, not points** — top-10 overlap 8/10
+   between predicted and measured rankings, but the design-space argmin
+   sits in thin-response directions and does not replicate across
+   LightGBM builds.
+4. **Report gaps as noise-floor bands** — the training-seed band
+   (±0.016–0.032 STEM) dominates; crown within-band ties explicitly; read
+   large-N / reproducible columns (gsm8k, NLL) before small-N ones.
+5. **Cache identity guards are load-bearing** — every reuse path keys on
+   (seed, budget, weights-hash, label-source); silent stale-mixture reuse
+   is the default failure mode of any cached pipeline.
+6. **Rigor is a machine, not a virtue** — seed pairs, remote-anchor
+   reconciliation (4-decimal), protocol freeze windows, and data
+   cross-accounting ran every round, zero incidents.
 
 ## Algorithm Pipeline
 
@@ -157,6 +193,7 @@ fallback: GPTConfig → formula estimate → DEPTH_INFO table).
 climbmix/
 ├── docs/
 │   ├── experiment_prod*.md            # Per-round experiment records (reader-facing report up front, dev details at the back)
+│   ├── takeaways.md                   # Condensed transferable findings (the index-grade summary)
 │   ├── paper_deviations.md             # Itemized deviations from the paper (arXiv:2504.13161) + consistency audit
 │   ├── algorithm_review.md             # Post-prod4 algorithm design review (clustering / predictor / selection)
 │   ├── prod5_runbook.md                # prod5 launch runbook (activation / smoke rehearsal / re-eval / launch)

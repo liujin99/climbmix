@@ -1,11 +1,13 @@
 # prod5 发射 runbook（2026-09-21 打磨窗定稿）
 
-> **顺序**：D1 激活 → smoke 彩排 → D2 prod4 八臂补测 → prod5 发射 → 发射窗卫生。
+> **顺序**：D1 激活 → smoke 彩排 → prod5 发射 → 发射窗卫生。
+> （D2 prod4 八臂补测**缓做**——2026-09-21 裁决：先做 prod5 单轮内基线横评；
+> §3 命令备好，需要严格同代跨轮比较时触发。）
 > 每步带验证点，命令按序贴服务器；执行窗口 = 用户发令后（排期裁决 2026-09-21：
 > 打磨收官、版本定案后再发射）。
 > 判读规则与发射配置 = `docs/experiment_prod5.md`（预注册，发射前已定稿）。
-> 注意顺序依赖：smoke 与 D2 都占本地 8 NPU，且 prod5 搜索的本地槽
-> （REMOTE_LOCAL_PARALLEL）也要它们——三步必须串行，全部完成才发射。
+> 注意顺序依赖：smoke 与 prod5 搜索的本地槽（REMOTE_LOCAL_PARALLEL）抢同一批
+> 本地 8 NPU——串行执行。（D2 若触发，同样抢本地 NPU，排在非关键路径。）
 
 ## 0. 前置状态
 
@@ -84,10 +86,14 @@ d20 ckpt/mixture/parquet；`SMOKE_KEEP=1` 可保留；验证报告留存
 - 预期注记：tiny 预算下可能走 no-signal 守卫路径而非 claim 路径——两条都是真
   路径，验证目标是管线跑通；claim/A2 正常路径另有单测 + 审计重放覆盖。
 
-## 3. D2 prod4 八臂补测（~4h，本地 8 NPU，eval-only；b16 era 基线端）
+## 3. D2 prod4 八臂补测（**缓做·触发式**；~4h，本地 8 NPU，eval-only；b16 era 基线端）
 
-目的：跨轮趋势链的基准端（prod5 全程新协议，prod4 八臂需同代分数才可比；
-experiment_prod5.md V3）。**新 CSV 落独立目录，不覆盖旧件**。
+**2026-09-21 裁决缓做**：先做 prod5 单轮内基线横评（本轮判决主战场）；本节
+命令保留备用，触发条件 = 需要严格同代跨轮比较（experiment_prod5.md V2/V3
+定版）时执行。
+
+目的：跨轮趋势链的同代基准端（prod5 全程新协议，prod4 八臂需同代分数才可比）。
+**新 CSV 落独立目录，不覆盖旧件**。
 
 ```
 cd /home/ma-user/work/nanochat-npu
