@@ -76,7 +76,7 @@ Full report: [docs/experiment_prod4.md](docs/experiment_prod4.md).
 
 What the production rounds actually run. Every deliberate deviation from
 the paper's defaults is itemized in
-[docs/paper_deviations.md](docs/paper_deviations.md) (D1–D17).
+[docs/paper_deviations.md](docs/paper_deviations.md) (D1–D19).
 
 ```
 STEM Data Pool (100B parquet, 116M docs, 1000 shards)
@@ -159,6 +159,7 @@ climbmix/
 │   ├── experiment_prod*.md            # Per-round experiment records (reader-facing report up front, dev details at the back)
 │   ├── paper_deviations.md             # Itemized deviations from the paper (arXiv:2504.13161) + consistency audit
 │   ├── algorithm_review.md             # Post-prod4 algorithm design review (clustering / predictor / selection)
+│   ├── prod5_runbook.md                # prod5 launch runbook (activation / smoke rehearsal / re-eval / launch)
 │   ├── remote_setup.md                 # Remote-fleet setup + embedding wave/merge operations
 │   ├── reuse_design.md                 # Cross-run reuse design (warm start, extension scripts)
 │   ├── scoring_metric_design.md        # SNR-weighted scoring design + proxy/target training-budget comparison
@@ -189,7 +190,7 @@ climbmix/
 │   ├── check_disk_budget.py             # Arm-launch disk preflight
 │   ├── clean_derived_data.py            # Post-upload local cleanup (guarded, dry-run default)
 │   ├── get_model_info.py               # Auto-detect scaling params from meta_*.json
-│   └── diagnostics/                     # Test suites + ops probes
+│   └── diagnostics/                     # Test suites + ops probes (watch / preflight / smoke round / post-hoc audit)
 └── src/climbmix/
     ├── core/
     │   ├── types.py                     # Config + auto_detect_depth_info + DEPTH_INFO
