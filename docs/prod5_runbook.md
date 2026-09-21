@@ -184,7 +184,9 @@ bash scripts/diagnostics/prod2_watch.sh result/prod5_current
 ```
 
 CP0 聚类结构 / CP1 SNR / CP2 online ρ / CP3 Selection mode / CP4 臂+锚点。
-搜索关键行：每轮 Best Score、Pruning 排除数、终选
+搜索关键行：每轮 Best Score（**口径 = 本轮新测批次的最佳，非舰队最佳**——
+逐轮数字下降属预期形态不代表搜索退步，prod4 形态 1.33/1.18/1.05 三批不可比；
+舰队最佳以收官 state 为准）、Pruning 排除数、终选
 `Selection mode`（D19：`best_measured_no_claim` / `…claimed`）、
 `Top-k arm candidates`（预期 3 个 climb-cfgXX）。
 
