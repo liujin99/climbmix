@@ -151,6 +151,7 @@ climbmix/
 ├── docs/
 │   ├── experiment_prod*.md            # Per-round experiment records (reader-facing report up front, dev details at the back)
 │   ├── paper_deviations.md             # Itemized deviations from the paper (arXiv:2504.13161) + consistency audit
+│   ├── algorithm_review.md             # Post-prod4 algorithm design review (clustering / predictor / selection)
 │   ├── remote_setup.md                 # Remote-fleet setup + embedding wave/merge operations
 │   ├── reuse_design.md                 # Cross-run reuse design (warm start, extension scripts)
 │   ├── scoring_metric_design.md        # SNR-weighted scoring design + proxy/target training-budget comparison
