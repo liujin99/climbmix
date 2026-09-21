@@ -45,13 +45,14 @@ grep -n "gen-batch-size" scripts/base_eval.py | head -2
 **1.3 退役 prod4 冻结窗 worktree**（使命完成）：
 
 ```
-git -C /home/ma-user/work/climbmix worktree list
-git -C /home/ma-user/work/climbmix worktree remove --force "/home/ma-user/work/climbmix_lb@b93bb97"
-git -C /home/ma-user/work/nanochat-npu worktree list
-git -C /home/ma-user/work/nanochat-npu worktree remove --force "/home/ma-user/work/nanochat_lb@0c1229f"
+git -C /home/ma-user/work/climbmix_lb status --short
+git -C /home/ma-user/work/climbmix worktree remove --force /home/ma-user/work/climbmix_lb
+git -C /home/ma-user/work/nanochat_lb status --short
+git -C /home/ma-user/work/nanochat-npu worktree remove --force /home/ma-user/work/nanochat_lb
 ```
 
-（路径以 `worktree list` 实际输出为准。）
+（实际路径 = `/home/ma-user/work/{climbmix_lb,nanochat_lb}`，**无 `@SHA` 后缀**——
+2026-09-22 激活实测；status 应为空输出，有输出先停下来人工核。）
 
 **1.4 重建 nanochat 代码 tarball → assets_big**（远端 worker 跑的 eval 代码 =
 新栈；climbmix 侧的两文件 worker bundle 由 executor 每次发射自动上传，无需手动）：
@@ -60,8 +61,14 @@ git -C /home/ma-user/work/nanochat-npu worktree remove --force "/home/ma-user/wo
 
 ```
 cd /home/ma-user/work/climbmix
-python3 scripts/dispatch_remote.py --remote-config result/prod4_current/remote_config.json --check-assets
+PYTHONPATH=/home/ma-user/work/climbmix/src:/home/ma-user/work/climbmix/climbmix-ma python3 scripts/dispatch_remote.py --remote-config result/prod4_current/remote_config.json --check-assets
 ```
+
+（**PYTHONPATH 前缀必须带**：vendored 后端 `climbmix-ma/` 在仓库目录内但不在
+git 跟踪内；dispatch_remote.py 的 bare-shell 自举只在首个 climbmix import 失败
+时才补路径——shell 环境已可导入 src 时自举被跳过，后端解析处
+`import climbmix_ma` 裸死 ModuleNotFoundError，2026-09-22 激活实测。显式前缀 =
+run_experiment.sh:175 同款语义，确定性生效。）
 
 全绿为准（`remote_config.json` 若不在 prod4_current，用任一历史 run 的；它只是
 obs 前缀 + 后端身份的载体）。
@@ -214,3 +221,6 @@ preflight）。**CP4 渲染注意**：cp4_report.py 的 `--ref` 默认值 random
   用户裁决（诊断目录、重件不保存）；eval-only 命令形态 = `nanochat_cmds.
   build_target_eval_cmd`（prod4 臂 eval 同款 argv）；激活 pull 目标 =
   nanochat `6e5baa2` + climbmix main（发射时 HEAD）。
+- 2026-09-22 v1.1：激活实测两处修正——worktree 实际路径无 `@SHA` 后缀 +
+  remove 前加 status 检查；check-assets 命令必须带 PYTHONPATH 前缀
+  （src + vendored climbmix-ma，自举跳过陷阱）。
