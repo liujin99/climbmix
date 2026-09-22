@@ -54,24 +54,41 @@ git -C /home/ma-user/work/nanochat-npu worktree remove --force /home/ma-user/wor
 （实际路径 = `/home/ma-user/work/{climbmix_lb,nanochat_lb}`，**无 `@SHA` 后缀**——
 2026-09-22 激活实测；status 应为空输出，有输出先停下来人工核。）
 
-**1.4 重建 nanochat 代码 tarball → assets_big**（远端 worker 跑的 eval 代码 =
-新栈；climbmix 侧的两文件 worker bundle 由 executor 每次发射自动上传，无需手动）：
-按 climbmix-ma README 既有惯例重建上传（布局同历史发射，prod4 记录的 worker tar
-基线为 `a7c56792` 时代），然后验证：
+**1.4 同步 nanochat 代码 → prod5 前缀**（远端 worker 的 eval 代码 = 新栈）：
+prod5 用**新 OBS 前缀**（prod4 remote_config 的 `obs_prefix` 末段 `prod4` → `prod5`），
+新前缀下无任何资产——必须先同步新代码 tarball，否则首个远端作业裸死或回退旧协议
+（毒化 b16 era 前提）。上传走 **assets/ 新鲜通道**（boot shell 优先于 assets_big
+一次性包）。三步（2026-09-22 激活实测补全；所有命令带 PYTHONPATH 前缀——vendored
+后端 `climbmix-ma/` 在仓库目录内但不在 git 跟踪内，dispatch/sync 脚本的 bare-shell
+自举只在首个 climbmix import 失败时才补路径，shell 已可导入 src 时会被跳过）：
+
+```
+# (a) 诊断：prod4 前缀 assets/ 里有什么（重点看有没有 .whl 平台轮子）
+cd /home/ma-user/work/climbmix
+PYTHONPATH=/home/ma-user/work/climbmix/src:/home/ma-user/work/climbmix/climbmix-ma python3 -c "from climbmix.remote.remote_executor import RemoteConfig; from climbmix.remote.backends import resolve_backend; rc=RemoteConfig.from_json_file('result/prod4_current/remote_config.json'); obs=resolve_backend(rc).make_obs_storage(rc); print('\n'.join(sorted(obs.list_objects(rc.obs_prefix.rstrip('/')+'/assets/'))))"
+
+# (b) 派生 prod5 的 remote-config（后端身份照抄 prod4，仅换前缀；输出 = prod5 前缀，记下来）
+mkdir -p /home/ma-user/work/tmp
+python3 -c "import json; rc=json.load(open('result/prod4_current/remote_config.json')); rc['obs_prefix']=rc['obs_prefix'].replace('/prod4','/prod5'); json.dump(rc, open('/home/ma-user/work/tmp/remote_config.prod5.json','w'), indent=2); print(rc['obs_prefix'])"
+
+# (c) 同步：pull + tar + 上传到 prod5 前缀
+PYTHONPATH=/home/ma-user/work/climbmix/src:/home/ma-user/work/climbmix/climbmix-ma python3 climbmix-ma/scripts/ma_sync_code.py --remote-config /home/ma-user/work/tmp/remote_config.prod5.json --repo /home/ma-user/work/nanochat-npu
+```
+
+（(a) 若见 `.whl` → (c) 加 `--wheel <本地轮子路径>`（aarch64 cp311 容器离线装依赖用）；
+(c) 输出须为 `nanochat-npu @ 6e5baa2 (clean)` + **tar sha256 记档**（= prod5 worker
+tar 基线，接替 prod4 的 a7c56792 时代注记）。）
+
+**1.5 验证（prod5 前缀）**：
 
 ```
 cd /home/ma-user/work/climbmix
-PYTHONPATH=/home/ma-user/work/climbmix/src:/home/ma-user/work/climbmix/climbmix-ma python3 scripts/dispatch_remote.py --remote-config result/prod4_current/remote_config.json --check-assets
+PYTHONPATH=/home/ma-user/work/climbmix/src:/home/ma-user/work/climbmix/climbmix-ma python3 scripts/dispatch_remote.py --remote-config result/prod4_current/remote_config.json --check-assets --obs-prefix <1.4(b) 打印的 prod5 前缀>
 ```
 
-（**PYTHONPATH 前缀必须带**：vendored 后端 `climbmix-ma/` 在仓库目录内但不在
-git 跟踪内；dispatch_remote.py 的 bare-shell 自举只在首个 climbmix import 失败
-时才补路径——shell 环境已可导入 src 时自举被跳过，后端解析处
-`import climbmix_ma` 裸死 ModuleNotFoundError，2026-09-22 激活实测。显式前缀 =
-run_experiment.sh:175 同款语义，确定性生效。）
-
-全绿为准（`remote_config.json` 若不在 prod4_current，用任一历史 run 的；它只是
-obs 前缀 + 后端身份的载体）。
+发射前的**预期形态**：direct mounts 全 OK + **`nanochat-npu code (assets/ (fresh))` OK**
++ 两个 worker 文件 MISSING（**预期**——RemoteExecutor 首次发射自动上传）→ 末行报
+"2 missing" 属正常；唯一硬要求 = nanochat code 行为 OK。
 
 ## 2. smoke 彩排（~30-45 min，8 NPU，全本地零排队）
 
@@ -224,3 +241,8 @@ preflight）。**CP4 渲染注意**：cp4_report.py 的 `--ref` 默认值 random
 - 2026-09-22 v1.1：激活实测两处修正——worktree 实际路径无 `@SHA` 后缀 +
   remove 前加 status 检查；check-assets 命令必须带 PYTHONPATH 前缀
   （src + vendored climbmix-ma，自举跳过陷阱）。
+- 2026-09-22 v1.2：1.4 重写为具体三步（诊断 prod4 assets 轮子 → 派生 prod5
+  remote-config → ma_sync_code 同步到 **prod5 新前缀**）+ 1.5 验证与发射前预期
+  形态。修正 v1 的两处错误认知：tarball 走 assets/ 新鲜通道而非 assets_big；
+  check-assets 绿 ≠ 代码是新的（它只查在场，且 prod4 前缀的存量资产与 prod5
+  无关）。
