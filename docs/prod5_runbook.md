@@ -163,43 +163,33 @@ EOF
 
 ## 4. prod5 发射（搜索 ~16h + 臂族）
 
-**4.1 聚类缓存继承**（全新跑 ≠ 重新聚类；簇与 prod4 逐位一致）：
+**版本化发射器 `runs/launch_prod5.sh`（2026-09-22 新增）**——原 4.1-4.4 的
+手动序列（缓存继承 / 参数对照 / preflight / 发射）全部内置：
 
 ```
 cd /home/ma-user/work/climbmix
-mkdir -p result/prod5_current
-cp result/prod4_current/cluster_cache.npz result/prod5_current/
-cp result/prod4_current/cluster_info_cache.json result/prod5_current/
-cp result/prod4_current/balanced_profile.json result/prod5_current/
+bash runs/launch_prod5.sh            # 干跑（默认）：环境重建 + 逐键对照表 + 引擎干跑门
+LAUNCH=1 bash runs/launch_prod5.sh   # 真发射：preflight 过后后台起引擎，打印监控命令
 ```
 
-**4.2 发射参数核对**：除 `EXP_NAME=prod5`、`CONFIGS_PER_ITER=64,32,16` 外，
-全部与 prod4 发射参数相同（同规模裁决 E1）。先 dump 对照：
+要点（全部内置于脚本，此处仅备忘）：
+- **缓存种子**：3 个聚类缓存文件 cp 进 result/prod5_current——stage-gate 的
+  cache-seed 豁免（`3f99ef2`）保它存活。修复前该流程会把缓存 orphan 归档、
+  空目录重来 → 重嵌入 116M 文档池（prod3 救援记录里的"预写指纹"手工步骤
+  即为绕此坑，本修复使其消失）。
+- **机器对照**：30 个 target/共享旋钮从 prod4 的 launch_env.json 重建、
+  fleet 旋钮（REMOTE_*）从其 remote_config.json 重建（秒→小时回换算）、
+  OBS 前缀末段换名（与 D1 的代码同步目标一致）；`TARGET_TOKENS` 与 SRC
+  记录不一致直接熔断（E1 同规模裁决的机器化）。
+- **EDIT 块 = 本轮有意变更**：`CONFIGS_PER_ITER=64,32,16`（E2）/
+  `PROXY_TARGET_TOKENS=400M`、`TARGET_TOKENS=3B`（E1；launcher 默认 640M/
+  2B，必须显式）/**`DISPATCH_RANDOM_ARM=0`**（launcher 默认 1 会预发已更名
+  的 random 臂——手动流程必踩坑）。
+- **重发射注意**：`_current` 已有指纹且其间代码/参数变过 → 引擎归档整个
+  目录（含种子）后空目录重来 → 先 `rm -rf result/prod5_current` 再跑脚本。
 
-```
-python3 -c "import json; print(json.dumps(json.load(open('result/prod4_current/launch_env.json')), indent=1, ensure_ascii=False))"
-```
-
-逐键过一遍 run_experiment.sh 的 EDIT 块（REMOTE_* / NPU_PER_EXP /
-ADAPTIVE_* / 预算旋钮 …）。
-
-**4.3 发射前自检**（固化 prod2 五坑：flavor 卡数 / priority / 资产挂载 / 残留
-进程 / 历史作业）：
-
-```
-python3 scripts/diagnostics/preflight_launch.py --run-dir result/prod5_current --main-log prod5.log
-```
-
-须全绿。
-
-**4.4 发射**（生产形态：远端舰队 + 本地混合；REMOTE_* 按 4.2 核对的原值）：
-
-```
-setsid nohup env EXP_NAME=prod5 CONFIGS_PER_ITER=64,32,16 REMOTE_ENABLED=1 \
-  [其余按 prod4 原值] \
-  bash runs/run_experiment.sh > prod5.log 2>&1 &
-tail -f prod5.log
-```
+**4.4 发射**：`LAUNCH=1 bash runs/launch_prod5.sh`（上面的版本化发射器；后台
+起引擎 + 打印监控命令）。
 
 **4.5 监控**：
 
@@ -246,3 +236,6 @@ preflight）。**CP4 渲染注意**：cp4_report.py 的 `--ref` 默认值 random
   形态。修正 v1 的两处错误认知：tarball 走 assets/ 新鲜通道而非 assets_big；
   check-assets 绿 ≠ 代码是新的（它只查在场，且 prod4 前缀的存量资产与 prod5
   无关）。
+- 2026-09-22 v1.3：§4 手动序列（4.1-4.4）整体替换为**版本化发射器**
+  `runs/launch_prod5.sh`（用户裁决：正确指令固化成脚本，不贴 LLM 现拼命令）。
+  缓存种子存活依赖 stage-gate cache-seed 豁免（`3f99ef2`，同日）。
