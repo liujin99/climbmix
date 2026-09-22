@@ -55,7 +55,24 @@ try:
 except ImportError:
     HAS_MPL = False
 
-CLIMB_ARM_RE = re.compile(r"^(?:climb-)?cfg(\d+)$")
+def parse_arm_name(a):
+    """臂名 → {"kind", "config_id", "rep"}.
+    kind ∈ cfg / climb_optimal / uniform / natural / other。
+    兼容历史命名: climb-cfg72 与 cfg72 等价; *_rep = 同配方重复种子臂
+    (prod4: climb_rep / random3b_rep / cfg72_rep); climb = 设计空间 argmin
+    臂 (optimal_mixture_weights.json, D19 之前的终选输出)。"""
+    rep = a.endswith("_rep")
+    base = a[:-len("_rep")] if rep else a
+    m = re.match(r"^(?:climb-)?cfg(\d+)$", base)
+    if m:
+        return {"kind": "cfg", "config_id": int(m.group(1)), "rep": rep}
+    if base == "climb":
+        return {"kind": "climb_optimal", "rep": rep}
+    if base in ("random", "random3b", "uniform"):
+        return {"kind": "uniform", "rep": rep}
+    if base == "natural":
+        return {"kind": "natural", "rep": rep}
+    return {"kind": "other", "rep": rep}
 
 
 # ── 工件读取 ───────────────────────────────────────────────────────────
@@ -193,6 +210,53 @@ def main():
         notes.append(f"赢家由 --arm 指定为 {winner} (按分数本是 {ranked[0]})")
     noise_band = math.sqrt(2.0) * args.se
 
+    # ── 搜索状态 (舰队语境 + cfg 臂配方兜底来源) ──
+    # 注意: topk_mixture_candidates.json 的写出代码 2026-09-21 才落地
+    # (8ff8d84), prod4 的搜索早于它 — prod4 的 cfg 臂权重只能从
+    # search_state.json 的 accumulated_configs 按 config_id 兜底解析。
+    state = load_json(os.path.join(run_dir, "search_state.json")) or {}
+    fleet = None
+    fleet_iter_of = {}
+    state_by_id = {}    # config_id -> (weights list, score | None)
+    if state.get("accumulated_configs"):
+        cfgs = state["accumulated_configs"]
+        sc = state.get("accumulated_scores") or []
+        Ws = []
+        ok_ids = []
+        ok_sc = []
+        for i, c in enumerate(cfgs):
+            v = c.get("weights")
+            if isinstance(v, list) and len(v) == K:
+                Ws.append(v)
+                ok_ids.append(c.get("config_id"))
+                ok_sc.append(sc[i] if i < len(sc) else None)
+                cid = c.get("config_id")
+                if cid is not None:
+                    state_by_id[int(cid)] = (v, ok_sc[-1])
+        if Ws:
+            fleet = {
+                "W": np.array(Ws, dtype=np.float64),
+                "ids": ok_ids,
+                "scores": np.array(
+                    [np.nan if s is None else float(s) for s in ok_sc],
+                    dtype=np.float64),
+            }
+            # 轮次溯源: accumulated 按批次追加, realized_configs_per_iter
+            # 给出每轮追加数 → 位置 → 轮次 (派生口径)
+            rc = state.get("realized_configs_per_iter") or []
+            if rc and sum(rc) == len(Ws):
+                pos = 0
+                for it, n in enumerate(rc, start=1):
+                    for _ in range(n):
+                        fleet_iter_of[pos] = it
+                        pos += 1
+            else:
+                notes.append("realized_configs_per_iter 与累计配置数不符 — 轮次溯源不可用")
+        else:
+            notes.append("search_state 中没有 K 维配置 — 舰队语境跳过")
+    else:
+        notes.append("search_state.json 缺失 — 舰队语境跳过 (cfg 臂将无法兜底解析)")
+
     # ── 配方解析: 每个臂 → 权重向量 (能解则解, 解不了注明) ──
     topk = load_json(os.path.join(run_dir, "topk_mixture_candidates.json")) or {}
     topk_by_id = {}
@@ -200,33 +264,53 @@ def main():
         cid = c.get("config_id")
         if cid is not None:
             topk_by_id[int(cid)] = c
+    optimal_payload = load_json(
+        os.path.join(run_dir, "optimal_mixture_weights.json"))
 
     arm_weights = {}    # arm -> np.ndarray
     arm_src = {}        # arm -> 人类可读的配方来源
     for a in ranked:
-        m = CLIMB_ARM_RE.match(a)
-        if m:
-            cid = int(m.group(1))
+        info = parse_arm_name(a)
+        rep = " (rep 重复种子臂)" if info["rep"] else ""
+        kind = info["kind"]
+        if kind == "cfg":
+            cid = info["config_id"]
             c = topk_by_id.get(cid)
-            v = weights_vec_from_payload((c or {}).get("weights"), labels)
-            if v is None:
-                arm_src[a] = f"cfg{cid}: topk 文件缺失或权重无法对齐标签"
-            else:
+            v = (weights_vec_from_payload((c or {}).get("weights"), labels)
+                 if c else None)
+            if v is not None:
                 arm_weights[a] = v
-                arm_src[a] = (f"topk 候选 cfg{cid} "
-                              f"(rank {c.get('rank')}, d20 分 {c.get('score'):+.4f})")
-        elif a in ("random", "random3b", "uniform"):
+                arm_src[a] = (f"topk 候选 cfg{cid} (rank {c.get('rank')}, "
+                              f"d20 分 {c.get('score'):+.4f}){rep}")
+            elif cid in state_by_id:
+                arm_weights[a] = np.array(state_by_id[cid][0], dtype=np.float64)
+                s = state_by_id[cid][1]
+                s_str = (f", d20 分 {float(s):+.4f}"
+                         if isinstance(s, (int, float)) else "")
+                arm_src[a] = f"search_state cfg{cid}{s_str}{rep}"
+            else:
+                arm_src[a] = (f"cfg{cid}: topk 与 search_state 均无该 "
+                              f"config_id 的权重")
+        elif kind == "climb_optimal":
+            v = weights_vec_from_payload(optimal_payload, labels)
+            if v is not None:
+                arm_weights[a] = v
+                arm_src[a] = f"optimal_mixture_weights.json (设计空间 argmin){rep}"
+            else:
+                arm_src[a] = ("climb 臂: optimal_mixture_weights.json 缺失"
+                              "或权重无法对齐标签")
+        elif kind == "uniform":
             arm_weights[a] = np.full(K, 1.0 / K)
-            arm_src[a] = "uniform α=1/K (论文 App. C.1 Random)"
-        elif a == "natural":
+            arm_src[a] = f"uniform α=1/K (论文 App. C.1 Random){rep}"
+        elif kind == "natural":
             v = weights_vec_from_payload(
                 load_json(args.natural_weights), labels) \
                 if args.natural_weights else None
             if v is None:
                 v = tok_share.copy()
-                arm_src[a] = "池 token 占比 (由 cluster_info_cache 重算)"
+                arm_src[a] = f"池 token 占比 (由 cluster_info_cache 重算){rep}"
             else:
-                arm_src[a] = f"natural 权重文件 ({args.natural_weights})"
+                arm_src[a] = f"natural 权重文件 ({args.natural_weights}){rep}"
             arm_weights[a] = v
         else:
             found = None
@@ -252,54 +336,13 @@ def main():
     W = arm_weights[winner]
 
     # 参照: 设计空间 argmin (D19: 搜索输出是一个区域)
-    argmin_v = weights_vec_from_payload(
-        load_json(os.path.join(run_dir, "optimal_mixture_weights.json")), labels)
-
-    # ── 舰队语境 (d20 search_state) ──
-    state = load_json(os.path.join(run_dir, "search_state.json")) or {}
-    fleet = None
-    fleet_iter_of = {}
-    if state.get("accumulated_configs"):
-        cfgs = state["accumulated_configs"]
-        sc = state.get("accumulated_scores") or []
-        Ws = []
-        ok_ids = []
-        ok_sc = []
-        for i, c in enumerate(cfgs):
-            v = c.get("weights")
-            if isinstance(v, list) and len(v) == K:
-                Ws.append(v)
-                ok_ids.append(c.get("config_id"))
-                ok_sc.append(sc[i] if i < len(sc) else None)
-        if Ws:
-            fleet = {
-                "W": np.array(Ws, dtype=np.float64),
-                "ids": ok_ids,
-                "scores": np.array(
-                    [np.nan if s is None else float(s) for s in ok_sc],
-                    dtype=np.float64),
-            }
-            # 轮次溯源: accumulated 按批次追加, realized_configs_per_iter
-            # 给出每轮追加数 → 位置 → 轮次 (派生口径)
-            rc = state.get("realized_configs_per_iter") or []
-            if rc and sum(rc) == len(Ws):
-                pos = 0
-                for it, n in enumerate(rc, start=1):
-                    for _ in range(n):
-                        fleet_iter_of[pos] = it
-                        pos += 1
-            else:
-                notes.append("realized_configs_per_iter 与累计配置数不符 — 轮次溯源不可用")
-        else:
-            notes.append("search_state 中没有 K 维配置 — 舰队语境跳过")
-    else:
-        notes.append("search_state.json 缺失 — 舰队语境跳过")
+    argmin_v = weights_vec_from_payload(optimal_payload, labels)
 
     # 赢家 config_id 的舰队排名 + 轮次
-    wm = CLIMB_ARM_RE.match(winner)
+    winfo = parse_arm_name(winner)
     fleet_ctx = None
-    if fleet is not None and wm:
-        cid = int(wm.group(1))
+    if fleet is not None and winfo["kind"] == "cfg":
+        cid = winfo["config_id"]
         idx = None
         for i, cidx in enumerate(fleet["ids"]):
             if cidx == cid:
@@ -357,13 +400,19 @@ def make_figs(fig_dir, labels, W, winner, arm_weights, ranked, fleet,
     figs = {}
     order = np.argsort(-W)                      # 按赢家 α 降序
 
-    # 1) 赢家 vs 其他 climb 臂 vs uniform/natural
-    others = [a for a in ranked
-              if a != winner and a in arm_weights
-              and CLIMB_ARM_RE.match(a)][:2]
-    baselines = [a for a in ranked
-                 if a != winner and a in arm_weights
-                 and not CLIMB_ARM_RE.match(a)][:2]
+    # 1) 赢家 vs 其他 climb 臂 vs uniform/natural (配方去重: rep 臂跳过)
+    shown_sig = {tuple(np.round(W, 6))}
+    picked = []
+    for a in ranked:
+        if a == winner or a not in arm_weights:
+            continue
+        sig = tuple(np.round(arm_weights[a], 6))
+        if sig in shown_sig:
+            continue
+        shown_sig.add(sig)
+        picked.append(a)
+    others = [a for a in picked if parse_arm_name(a)["kind"] == "cfg"][:2]
+    baselines = [a for a in picked if parse_arm_name(a)["kind"] != "cfg"][:2]
     show = [winner] + others + baselines
     if len(show) >= 2:
         n = len(show)
@@ -477,7 +526,19 @@ def build_report(run_dir, labels, K, num_tokens, tok_share, quality,
 
     # 2. 逐簇配方表
     R += ["## 2. 赢家配方逐簇明细", ""]
-    cmp_arms = [a for a in ranked if a != winner and a in arm_weights][:4]
+    # 按配方签名去重: _rep 臂与本体权重相同, 对比列/柱留新配方
+    seen_sig = {tuple(np.round(W, 6))}
+    cmp_arms = []
+    for a in ranked:
+        if a == winner or a not in arm_weights:
+            continue
+        sig = tuple(np.round(arm_weights[a], 6))
+        if sig in seen_sig:
+            continue
+        seen_sig.add(sig)
+        cmp_arms.append(a)
+        if len(cmp_arms) >= 4:
+            break
     R += ["| 簇 | 池 token% | 簇质量分 | " +
           " | ".join(f"{a} α" for a in cmp_arms + [winner]) +
           " | 赢家/池 倍率 |", "|---|---|---|" + "---|" * (len(cmp_arms) + 2)]
