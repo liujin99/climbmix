@@ -535,7 +535,7 @@ def build_section(run_dir, labels, K, tok_share, quality,
         else:
             R.append(f"| {a} | {scores[a]['stem']:.4f} | {d:+.4f} | {band} | "
                      f"{arm_src.get(a, '—')} |")
-    R += [f"(噪声带 |Δ| ≤ √2×SE = {noise_band:.4f}, SE={args.se}; "
+    R += [f"(噪声带 \\|Δ\\| ≤ √2×SE = {noise_band:.4f}, SE={args.se}; "
           "显著性判定请以 cp4_report.py 为准)", ""]
 
     # 2. 逐簇配方表
@@ -597,17 +597,22 @@ def build_section(run_dir, labels, K, tok_share, quality,
                      f"{fleet['W'].mean(axis=0)[i]:.4f} | {dev[i]:+.4f} |")
         R.append("")
 
-    # 4. 机制视图
+    # 4. 机制视图 (质量分退化时显式说明, 不出伪结论)
     R += ["### 4. 配方机制视图", ""]
-    if figs.get("vs_quality"):
-        R += [f"![α vs 簇质量]({figs['vs_quality']})", ""]
-    hi_q = np.argsort(-quality)[: K // 3]
-    w_hi = W[hi_q].sum()
-    s_hi = tok_share[hi_q].sum()
-    R += [f"- 赢家把 **{100*w_hi:.0f}%** 的 token 预算给了质量分最高的 "
-          f"{len(hi_q)} 个簇 (它们占池 {100*s_hi:.0f}%) — "
-          f"{'超配' if w_hi > s_hi else '低配'} "
-          f"({w_hi - s_hi:+.2f})", ""]
+    if float(quality.max() - quality.min()) <= 0:
+        R += ["簇质量分全部相同 (本 run 质量过滤 = none, 质量分从未计算) — "
+              "α-vs-质量机制视图不可用。质量维度在整个配方空间里缺席, "
+              "这本身就是 prod6 \"簇内质量分\" 候选项的立项证据。", ""]
+    else:
+        if figs.get("vs_quality"):
+            R += [f"![α vs 簇质量]({figs['vs_quality']})", ""]
+        hi_q = np.argsort(-quality)[: K // 3]
+        w_hi = W[hi_q].sum()
+        s_hi = tok_share[hi_q].sum()
+        R += [f"- 赢家把 **{100*w_hi:.0f}%** 的 token 预算给了质量分最高的 "
+              f"{len(hi_q)} 个簇 (它们占池 {100*s_hi:.0f}%) — "
+              f"{'超配' if w_hi > s_hi else '低配'} "
+              f"({w_hi - s_hi:+.2f})", ""]
 
     # 5. 差异分解
     R += ["### 5. 差异分解: 赢家 vs 最近对手", ""]
