@@ -465,6 +465,31 @@ def land_logs(obs, result_uri: str, output_dir: str, arm: str,
             print(f"  [{arm}] landed {os.path.basename(dst)}")
 
 
+def auto_refresh_recipe(output_dir: str, arm: str) -> None:
+    """臂 eval CSV 落地即自动刷新 report.md 的"赢家配方解剖"节
+    (2026-09-22 用户裁决: 报告自更新, 不留手动步骤)。
+
+    配方节是 d28 臂评测的函数, 搜索收官生成 report.md 时赢家尚不存在,
+    唯一正确的自动化点就是每个臂落地这一刻。best-effort — recipe_report
+    失败只注记一行, 不影响臂落地本身。"""
+    try:
+        import subprocess
+        rr = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "diagnostics", "recipe_report.py")
+        if not os.path.isfile(rr):
+            return
+        r = subprocess.run([sys.executable, rr, output_dir],
+                           capture_output=True, text=True, timeout=600)
+        if r.returncode == 0:
+            print(f"  [{arm}] report.md 赢家配方节已自动刷新")
+        else:
+            tail = (r.stdout or r.stderr or "").strip().splitlines()
+            print(f"  [{arm}] (recipe 刷新跳过: "
+                  f"{tail[-1] if tail else 'rc!=0'})")
+    except Exception as e:
+        print(f"  [{arm}] (recipe 刷新失败: {e})")
+
+
 def land_checkpoint(obs, result_uri: str, nanochat_base_dir: str, tag: str) -> bool:
     ckpt_uri = f"{result_uri.rstrip('/')}/mid_checkpoint"
     objs = obs.list_objects(ckpt_uri)
@@ -1021,6 +1046,8 @@ def main() -> int:
             for marker in (f".done_mid_train_{arm}", f".done_eval_{arm}"):
                 open(os.path.join(output_dir, marker), "w").close()
             print(f"  [{arm}] landed .done_mid_train_{arm} + .done_eval_{arm}")
+        if csv_landed:
+            auto_refresh_recipe(output_dir, arm)
     elif (not base_check) and mid_rc == 0:
         # Salvage: training succeeded remotely (eval failed / job failed
         # later) — land the checkpoint + train marker; the main script

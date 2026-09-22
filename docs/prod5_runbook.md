@@ -209,12 +209,14 @@ CP0 聚类结构 / CP1 SNR / CP2 online ρ / CP3 Selection mode / CP4 臂+锚点
 （簇等权基线，2026-09-21 更名裁决；prod1-4 臂名 random3b）/ natural /
 domainfix 同批单种子；base 锚点先行；no-claim 若放行外推 → 额外 +1 臂。
 臂发射沿用 prod4 流程（dispatch_target_arm / arm_engine，含单遍守卫与磁盘
-preflight）。**CP4 渲染注意**：cp4_report.py 的 `--ref` 默认值 random
+preflight）。**报告自更新**：每个臂（含 base 锚点）的 eval CSV 落地时，
+dispatch_target_arm 自动刷新 report.md 的"赢家配方解剖"节（2026-09-22
+钩子，best-effort：记分板/每基准明细/逐簇 α/舰队语境/差异分解，幂等
+marker 替换）——报告永远最新，无手动步骤；cp4_report 收尾再链一次作冗余。
+**CP4 渲染注意**：cp4_report.py 的 `--ref` 默认值 random
 不再命中——渲染时显式 `--ref uniform`（否则静默回退 arms[0]，"搜索是否有
-价值"的对照语义丢失）。cp4_report 收尾会**自动刷新 report.md 的"赢家
-配方解剖"节**（2026-09-22 链接，best-effort：记分板/每基准明细/逐簇 α/
-舰队语境/差异分解，幂等 marker 替换，新臂落地后重跑 cp4 即更新）；
-`cluster_peek.py` 为按需调研工具（簇语义抽样，单独手动跑）。
+价值"的对照语义丢失）。`cluster_peek.py` 为按需调研工具（簇语义抽样，
+单独手动跑）。
 
 ## 5. 发射窗顺手卫生（非阻塞批处理，F2）
 
