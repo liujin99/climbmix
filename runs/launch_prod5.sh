@@ -34,7 +34,10 @@ LAUNCH="${LAUNCH:-0}"                     # 默认干跑；真发射显式 LAUNC
 # 本轮有意变更（E1/E2 裁决；其余一切 = prod4 同值，由工件重建）
 CONFIGS_PER_ITER="${CONFIGS_PER_ITER:-64,32,16}"    # E2：112 新点（prod4: 54,36,18 含注入）
 PROXY_TARGET_TOKENS="${PROXY_TARGET_TOKENS:-400M}"  # E1：同 prod4（launcher 默认 640M，必须显式）
-TARGET_TOKENS="${TARGET_TOKENS:-3B}"                # E1：同 prod4（launcher 默认 2B，必须显式）
+TARGET_TOKENS="${TARGET_TOKENS:-6B}"                # E1：同 prod4 引擎值（实录 launch_env=6B）——
+                                                     # Stage 5 终选 6B 口径 + 20B 可行性耦合同基；
+                                                     # d28 臂预算 3B 是臂派发时的 env 覆盖（runbook
+                                                     # 4.6），不在引擎层设（launcher 默认 2B，必须显式）
 DISPATCH_RANDOM_ARM="${DISPATCH_RANDOM_ARM:-0}"     # 臂族 = 搜索收官后手动发射（基线臂已更名
                                                     # uniform；预发逻辑 special-case 'random' 名，
                                                     # launcher 默认 1，必须显式归零）

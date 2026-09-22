@@ -182,9 +182,13 @@ LAUNCH=1 bash runs/launch_prod5.sh   # 真发射：preflight 过后后台起引�
   OBS 前缀末段换名（与 D1 的代码同步目标一致）；`TARGET_TOKENS` 与 SRC
   记录不一致直接熔断（E1 同规模裁决的机器化）。
 - **EDIT 块 = 本轮有意变更**：`CONFIGS_PER_ITER=64,32,16`（E2）/
-  `PROXY_TARGET_TOKENS=400M`、`TARGET_TOKENS=3B`（E1；launcher 默认 640M/
-  2B，必须显式）/**`DISPATCH_RANDOM_ARM=0`**（launcher 默认 1 会预发已更名
+  `PROXY_TARGET_TOKENS=400M`、`TARGET_TOKENS=6B`（E1 = 同 prod4 **引擎值**：
+  Stage 5 终选 6B 口径、20B 可行性耦合同基，prod4 实录 launch_env=6B——
+  2026-09-22 干跑实测 3B 被机器对照熔断后修正；launcher 默认 640M/2B，
+  必须显式）/**`DISPATCH_RANDOM_ARM=0`**（launcher 默认 1 会预发已更名
   的 random 臂——手动流程必踩坑）。
+  **d28 臂预算 3B ≠ 引擎值**：臂派发时 env 覆盖（dispatch_target_arm.py
+  CLI-time env wins），见 4.6。
 - **重发射注意**：`_current` 已有指纹且其间代码/参数变过 → 引擎归档整个
   目录（含种子）后空目录重来 → 先 `rm -rf result/prod5_current` 再跑脚本。
 
@@ -208,7 +212,13 @@ CP0 聚类结构 / CP1 SNR / CP2 online ρ / CP3 Selection mode / CP4 臂+锚点
 （`ARM_NAME=climb-cfgXX`，权重文件直接 `--weights` 可用）；**uniform**
 （簇等权基线，2026-09-21 更名裁决；prod1-4 臂名 random3b）/ natural /
 domainfix 同批单种子；base 锚点先行；no-claim 若放行外推 → 额外 +1 臂。
-臂发射沿用 prod4 流程（dispatch_target_arm / arm_engine，含单遍守卫与磁盘
+**臂预算 3B = env 覆盖，不是引擎值**（引擎 TARGET_TOKENS=6B 只管 Stage 5
+终选口径，同 prod4）：dispatch 时 CLI-time env 盖过 launch_env
+（dispatch_target_arm.py load_launch_env），**必须成对覆盖**——
+`TARGET_TOKENS=3B TARGET_STEPS=2861`（2861 = 3B ÷ 2²⁰ total_batch，
+同 prod4 终态；漏 TARGET_STEPS 会用引擎 6B 步数 → 单遍守卫拒发，漏
+TARGET_TOKENS 则 random 基线 shards 按 6B 备料）。臂发射沿用 prod4 流程
+（dispatch_target_arm / arm_engine，含单遍守卫与磁盘
 preflight）。**大报告自更新（2026-09-22 用户裁决：最终要看整个实验跑完的
 大报告）**：report.md = 搜索子报告 + **CP4 判定节** + **赢家配方节**，每个臂
 （含 base 锚点）的 eval CSV 落地时 dispatch_target_arm 自动幂等刷新两节

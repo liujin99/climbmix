@@ -21,7 +21,7 @@
 | 项 | 值 |
 |---|---|
 | 定位 | **全新完整轮，无历史注入**（E3 的协议代沟问题因此不存在——所有标签同一代产生） |
-| 规模 | 同 prod4（E1 裁决）：d20 代理 @400M 单遍 / d28 臂 @3B tokens / 同池 `100B_stem_parquet_filtered`（116.1M docs / 91.84B est tokens） |
+| 规模 | 同 prod4（E1 裁决）：d20 代理 @400M 单遍 / d28 臂 @3B tokens（= 臂派发时的 env 覆盖，同 prod4 终态 2861 步；**引擎 `TARGET_TOKENS=6B`** —— Stage 5 终选 6B 口径 + 20B 可行性耦合同基，prod4 实录 launch_env=6B，2026-09-22 干跑机器对照熔断后修正）/ 同池 `100B_stem_parquet_filtered`（116.1M docs / 91.84B est tokens） |
 | 聚类 | K=15 balanced（D14），**聚类缓存继承自 prod4**（cluster_cache 双文件照抄，簇与 prod4 逐位一致；全新跑 ≠ 重新聚类） |
 | 搜索预算 | CONFIGS_PER_ITER=**64,32,16** = 112 新点（E2 裁决，对齐论文 §3.1 的 112；预计 ~16h 舰队时间） |
 | 代码基线 | climbmix main（发射时 HEAD，runbook 记录实际 SHA；含 D19 终选机制）+ nanochat dev-data-mix @ `6e5baa2`（D17 协议 + D18 b16）——**本轮起全程 b16 era** |
