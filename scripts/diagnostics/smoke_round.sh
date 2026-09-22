@@ -36,6 +36,9 @@
 #    SMOKE_LAUNCH=0                   干跑（env + 缓存检查, 不发射; 本地可测）
 #    SMOKE_TIMEOUT_H=4                看门狗时限（默认 4h ≥ 两轮实测 ~2.5h；
 #                                    2026-09-22 首跑 2h 被杀于第 2 轮 60% 处）
+#    SMOKE_VERIFY_ONLY=1              免引擎重验 —— 跳过发射/看门狗, 对现有
+#                                    产物直接跑验证清单（验证修复后重判绿用;
+#                                    绿后同样走默认清理）
 # ═══════════════════════════════════════════════════════════════════
 set -euo pipefail
 
@@ -55,14 +58,26 @@ echo "═══ smoke 彩排: D19 + 新协议端到端（最小真数据轮）�
 echo "  run:      ${SMOKE_NAME}  →  ${OUTPUT_DIR}"
 echo "  计划:     12 实验 (8+4) × 50M tokens × 100 题/任务, 全本地 8 路"
 
+# ── 免引擎重验（对现有产物直接跑验证清单; 不发射不占 NPU） ──────────
+if [ "${SMOKE_VERIFY_ONLY:-0}" = "1" ]; then
+    echo "  SMOKE_VERIFY_ONLY=1 —— 跳过发射/看门狗, 只跑验证清单"
+    if [ ! -f "$OUTPUT_DIR/search_state.json" ]; then
+        echo "✗ ${OUTPUT_DIR} 无 search_state.json —— 无可验产物"
+        exit 1
+    fi
+    _skip_launch=1
+else
+    _skip_launch=0
+fi
+
 # ── 前置检查 ────────────────────────────────────────────────────────
-if pgrep -f "run_experiment.sh" >/dev/null 2>&1; then
+if [ "$_skip_launch" = "0" ] && pgrep -f "run_experiment.sh" >/dev/null 2>&1; then
     echo "✗ 已有 run_experiment.sh 在跑 —— 彩排会互相干扰, 先处理它"
     exit 1
 fi
 _avail=$(df -BG --output=avail "$CLIMBMIX_DIR/result" 2>/dev/null | tail -1 | tr -dc '0-9' || echo 0)
 echo "  磁盘:    ${_avail}G 可用（需 ≥50G）"
-if [ "${_avail:-0}" -lt 50 ]; then
+if [ "$_skip_launch" = "0" ] && [ "${_avail:-0}" -lt 50 ]; then
     echo "✗ 磁盘余量不足 50G —— 12 个 d20 实验的 ckpt+mixture 约 30G"
     exit 1
 fi
@@ -125,48 +140,50 @@ if [ "$SMOKE_LAUNCH" != "1" ]; then
 fi
 
 # ── 发射 + 看门狗（搜索完成即停; smoke 范围 = Step 1-3）──────────────
-echo
-echo "  发射引擎（后台, 日志 ${ENGINE_LOG}）..."
-mkdir -p "$CLIMBMIX_DIR/result"
-setsid bash runs/run_experiment.sh >"$ENGINE_LOG" 2>&1 &
-ENGINE_PID=$!
-ENGINE_PGID="$(ps -o pgid= -p "$ENGINE_PID" 2>/dev/null | tr -d '[:space:]' || true)"
-
-_search_done=0
 _timed_out=0
-_deadline=$(( $(date +%s) + SMOKE_TIMEOUT_H * 3600 ))
-echo "  看门狗: 每 5s 轮询, 超时 ${SMOKE_TIMEOUT_H}h; 完成标志 = 'Done! Results in' 或 Step 4 横幅"
-while :; do
-    if grep -q "Done! Results in\|===== Step 4" "$ENGINE_LOG" 2>/dev/null; then
-        _search_done=1
-        break
-    fi
-    if ! kill -0 "$ENGINE_PID" 2>/dev/null; then
-        break
-    fi
-    if [ "$(date +%s)" -gt "$_deadline" ]; then
-        _timed_out=1
-        break
-    fi
-    sleep 5
-done
+if [ "$_skip_launch" = "0" ]; then
+    echo
+    echo "  发射引擎（后台, 日志 ${ENGINE_LOG}）..."
+    mkdir -p "$CLIMBMIX_DIR/result"
+    setsid bash runs/run_experiment.sh >"$ENGINE_LOG" 2>&1 &
+    ENGINE_PID=$!
+    ENGINE_PGID="$(ps -o pgid= -p "$ENGINE_PID" 2>/dev/null | tr -d '[:space:]' || true)"
 
-if [ "$_timed_out" = "1" ]; then
-    echo "  ⚠ 看门狗超时（${SMOKE_TIMEOUT_H}h）—— 终止引擎, 按现状验证"
-fi
-if kill -0 "$ENGINE_PID" 2>/dev/null; then
-    echo "  搜索阶段结束 —— 终止引擎树（smoke 不进臂准备/派发）..."
-    if [ -n "$ENGINE_PGID" ]; then
-        kill -TERM -- "-$ENGINE_PGID" 2>/dev/null || kill -TERM "$ENGINE_PID" 2>/dev/null || true
-    else
-        kill -TERM "$ENGINE_PID" 2>/dev/null || true
-    fi
-    for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
-        kill -0 "$ENGINE_PID" 2>/dev/null || break
+    _search_done=0
+    _deadline=$(( $(date +%s) + SMOKE_TIMEOUT_H * 3600 ))
+    echo "  看门狗: 每 5s 轮询, 超时 ${SMOKE_TIMEOUT_H}h; 完成标志 = 'Done! Results in' 或 Step 4 横幅"
+    while :; do
+        if grep -q "Done! Results in\|===== Step 4" "$ENGINE_LOG" 2>/dev/null; then
+            _search_done=1
+            break
+        fi
+        if ! kill -0 "$ENGINE_PID" 2>/dev/null; then
+            break
+        fi
+        if [ "$(date +%s)" -gt "$_deadline" ]; then
+            _timed_out=1
+            break
+        fi
         sleep 5
     done
-    kill -KILL -- "-$ENGINE_PGID" 2>/dev/null || kill -KILL "$ENGINE_PID" 2>/dev/null || true
-    pkill -KILL -f "run_experiment.sh" 2>/dev/null || true
+
+    if [ "$_timed_out" = "1" ]; then
+        echo "  ⚠ 看门狗超时（${SMOKE_TIMEOUT_H}h）—— 终止引擎, 按现状验证"
+    fi
+    if kill -0 "$ENGINE_PID" 2>/dev/null; then
+        echo "  搜索阶段结束 —— 终止引擎树（smoke 不进臂准备/派发）..."
+        if [ -n "$ENGINE_PGID" ]; then
+            kill -TERM -- "-$ENGINE_PGID" 2>/dev/null || kill -TERM "$ENGINE_PID" 2>/dev/null || true
+        else
+            kill -TERM "$ENGINE_PID" 2>/dev/null || true
+        fi
+        for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            kill -0 "$ENGINE_PID" 2>/dev/null || break
+            sleep 5
+        done
+        kill -KILL -- "-$ENGINE_PGID" 2>/dev/null || kill -KILL "$ENGINE_PID" 2>/dev/null || true
+        pkill -KILL -f "run_experiment.sh" 2>/dev/null || true
+    fi
 fi
 
 # ── 验证清单 ────────────────────────────────────────────────────────
@@ -222,12 +239,19 @@ if st:
     n_fin = sum(1 for s in scores if isfinite(s))
     check("fleet: 12 个有限分数", n_fin == 12, f"{n_fin}")
     ok_pb = 0
+    # 逐任务 acc 存的是 CSV 的 Centered 列（chance-corrected, 评分管线
+    # 的设计单位: nanochat_cmds.py:603 / scoring_metric_design.md）——
+    # 低于 chance 的任务（如 50M smoke 小模型在 gpqa_diamond 4 选一上
+    # raw acc ≈ 0.23-0.28 ≈ chance 0.25）合法地为负。边界用 [-1, 1]:
+    # 仍拦 NaN/垃圾值, 不再误杀 below-chance 噪声（2026-09-22 首验
+    # 实测: 4/12 点 gpqa centered -0.01~-0.03 被旧 [0,1] 边界误判）。
     for d in pb:
         acc = (d or {}).get("acc") or {}
         vals = [v for v in acc.values() if v is not None and np.isfinite(v)]
-        if len(vals) >= 5 and all(0.0 <= v <= 1.0 for v in vals):
+        if len(vals) >= 5 and all(-1.0 <= v <= 1.0 for v in vals):
             ok_pb += 1
-    check("fleet: 12 点逐任务 acc 有限且在 [0,1]", ok_pb == 12, f"{ok_pb}")
+    check("fleet: 12 点逐任务 acc 有限且在 [-1,1]（centered）",
+          ok_pb == 12, f"{ok_pb}")
 
 # 2. 终选模式（search.log + report.md 双源一致）
 mode = None
