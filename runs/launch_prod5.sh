@@ -131,7 +131,18 @@ rc_map = [
     ("REMOTE_PENDING_GRACE_MIN",   str(rc.get("pending_grace_min", 0))),
 ]
 for k, v in rc_map:
-    if v != "":
+    if v == "":
+        continue
+    # 显式覆盖口（执行形态旋钮, 非语义——RemoteConfig 明示这类不进指纹）:
+    # 只开 REMOTE_MAX_JOBS 一个（并发礼貌: 给同池租户留卡）。壳层 env 里
+    # 显式设了才生效, 并大字留痕; 其余 fleet 键仍 SRC 同值重建。
+    if k == "REMOTE_MAX_JOBS" and os.environ.get(k, "").strip():
+        ov = os.environ[k].strip()
+        if ov != v:
+            print(f"    ⚠ REMOTE_MAX_JOBS 覆盖: SRC={v} → {ov}（给同池租户留卡; "
+                  f"执行形态, 不影响实验语义/指纹）")
+        env[k] = ov
+    else:
         env[k] = v
 if rc.get("code_wheels"):
     env["REMOTE_CODE_WHEELS"] = ",".join(rc["code_wheels"])
