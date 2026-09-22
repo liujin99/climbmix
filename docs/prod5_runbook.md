@@ -218,15 +218,14 @@ PASS/FAIL 只报数）——最后一臂落地时 report.md 自动成为完整�
 <本轮校准值>`（锚点判定 + 显著性正式读数）。`cluster_peek.py` 为按需调研
 工具（簇语义抽样，单独手动跑）。
 
-**终报（实验最后一步，QuaDMix 式）**：全部臂落地后
-```
-python3 scripts/diagnostics/final_report.py result/prod5_current \
-    --base-expected <本轮校准值> \
-    --arms climb-cfg72,climb-cfg25,climb-cfg88,uniform,natural,domainfix
-```
-盘点臂 → 判定节刷新（锚点正式判定）→ 配方节刷新 → 终报印章（FINAL/DRAFT
-+ 排名 + 头条 Δ）；预期臂未齐 = DRAFT + exit 1（防误终报）。report.md 最终
-结构：搜索子报告 → CP4 判定 → 赢家配方 → 终报印章。
+**终报（全自动，最后一臂落地时自动盖章）**：落臂钩子每次自动推进
+report.md（判定节 + 配方节），并自查预期臂清单（topk 的 3 个 climb-cfgN
++ 基线 uniform/natural/domainfix；`RUN_DIR/expected_arms.txt` 可覆盖——
+历史命名或 no-claim 条件臂精确控制时每行写一个臂名）——**全齐的那一刻
+自动盖 FINAL 终报章**，大报告零人工步骤完成。手动 `final_report.py
+RUN_DIR [--arms …] [--base-expected …]` 仅用于：强制盖章 / DRAFT 预览 /
+锚点正式判定（`--base-expected` 校准值，自动模式锚点只报数不判定）。
+report.md 最终结构：搜索子报告 → CP4 判定 → 赢家配方 → 终报印章。
 
 ## 5. 发射窗顺手卫生（非阻塞批处理，F2）
 

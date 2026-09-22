@@ -20,6 +20,7 @@
 #  幂等: 三节均 marker 替换, 重跑无害。
 # ═══════════════════════════════════════════════════════════════════════
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -31,6 +32,37 @@ from cp4_report import discover_arms, parse_eval_csv
 SEAL_BEGIN = "<!-- final_report:begin -->"
 SEAL_END = "<!-- final_report:end -->"
 
+# P-0 预注册的固定基线臂 (prod5 命名); 历史命名用 expected_arms.txt 覆盖
+FIXED_BASELINES = ["uniform", "natural", "domainfix"]
+
+
+def derive_expected_arms(run_dir):
+    """从工件推导预期臂清单 (自动终报的核心 — "最后一臂落地"机器自判):
+    topk_mixture_candidates.json 的 config_id → climb-cfg{id} ×k
+    + 固定基线 uniform/natural/domainfix (P-0)
+    + RUN_DIR/expected_arms.txt 覆盖/追加 (每行一个臂名, 历史命名或
+    条件臂如 no-claim 精确控制用)。
+    topk 缺失 → (None, 原因) — 不猜, 拒绝自动终报。"""
+    topk_path = os.path.join(run_dir, "topk_mixture_candidates.json")
+    if not os.path.isfile(topk_path):
+        return None, "topk_mixture_candidates.json 缺失 — 无法推导预期臂"
+    try:
+        with open(topk_path) as f:
+            topk = json.load(f)
+        ids = [int(c["config_id"]) for c in topk.get("candidates") or []]
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+        return None, f"topk 文件不可读 ({e})"
+    if not ids:
+        return None, "topk 候选为空 — 无法推导预期臂"
+    expected = [f"climb-cfg{i}" for i in ids] + list(FIXED_BASELINES)
+    override = os.path.join(run_dir, "expected_arms.txt")
+    if os.path.isfile(override):
+        with open(override) as f:
+            names = [ln.strip() for ln in f if ln.strip()]
+        if names:
+            return names, f"覆盖自 expected_arms.txt ({len(names)} 臂)"
+    return expected, f"推导自 topk({len(ids)}) + 基线{FIXED_BASELINES}"
+
 
 def main():
     ap = argparse.ArgumentParser(
@@ -41,6 +73,9 @@ def main():
     ap.add_argument("--arms", default="",
                     help="预期臂清单 (逗号分隔; 缺失 → DRAFT + exit 1)")
     ap.add_argument("--ref", default="uniform", help="CP4 判定对照臂")
+    ap.add_argument("--auto", action="store_true",
+                    help="自动模式 (落臂钩子用): 预期臂清单从 topk+基线推导, "
+                         "臂未齐只刷新判定/配方节不盖章; 齐了自动盖 FINAL 章")
     args = ap.parse_args()
 
     # ── 1) 刷新判定节 + 配方节 (cp4 内置配方链) ──
@@ -60,7 +95,14 @@ def main():
             print(line)
 
     # ── 2) 臂盘点 + 完整性 ──
-    expected = [a.strip() for a in args.arms.split(",") if a.strip()]
+    if args.auto:
+        expected, src = derive_expected_arms(args.run_dir)
+        if expected is None:
+            print(f"[·] {src} — 判定/配方节已刷新, 不自动终报")
+            return 0
+        print(f"(预期臂清单 {src})")
+    else:
+        expected = [a.strip() for a in args.arms.split(",") if a.strip()]
     arms = discover_arms(args.run_dir)
     stems = {}
     for a in arms:
@@ -71,6 +113,13 @@ def main():
     base = parse_eval_csv(os.path.join(args.run_dir, "eval_base_remote.csv"))
     missing = [a for a in expected if a not in stems]
     complete = not missing
+
+    if args.auto and missing:
+        # 自动模式: 臂未齐 = 实验未完成, 判定/配方节已刷新即够,
+        # 不盖 DRAFT 章 (过程态不落终报印章, 印章只属于完成时刻)
+        print(f"[·] 臂未齐 ({len(expected) - len(missing)}/{len(expected)}), "
+              f"缺: {', '.join(missing)} — 终报待最后一臂落地自动盖章")
+        return 0
 
     # ── 3) 终报印章节 (report.md 末尾, marker 幂等) ──
     ts = time.strftime("%Y-%m-%d %H:%M:%S")

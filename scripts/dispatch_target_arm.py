@@ -466,19 +466,22 @@ def land_logs(obs, result_uri: str, output_dir: str, arm: str,
 
 
 def auto_refresh_report(output_dir: str, arm: str) -> None:
-    """臂 eval CSV 落地即自动刷新 report.md 的"CP4 判定"+"赢家配方"两节
-    (2026-09-22 用户裁决: 最终要看整个实验跑完的大报告, 不留手动步骤)。
+    """臂 eval CSV 落地即自动推进 report.md (2026-09-22 用户裁决: 大报告
+    全自动, 零手动步骤 — 含终报印章)。
 
-    report.md = 搜索报告(子报告) + CP4 判定节 + 赢家配方节, 臂每落地一个
-    自动幂等刷新 — 最后一臂落地时 report.md 自动成为完整大报告。
-    走 cp4_report (自带配方节链接); cp4 缺失时退回直接跑 recipe_report。
-    best-effort — 失败只注记一行, 不影响臂落地本身。"""
+    每次落地: 刷新 CP4 判定节 + 赢家配方节 (final_report 内走 cp4, cp4
+    内链配方); 若本次落地恰为最后一个预期臂 (topk+基线推导), 自动盖
+    FINAL 终报章 — "整个大实验的最后一步"由机器自判, 无需人工执行任何
+    命令。best-effort — 失败只注记一行, 不影响臂落地本身。"""
     try:
         import subprocess
         diag = os.path.dirname(os.path.abspath(__file__))
+        fin = os.path.join(diag, "diagnostics", "final_report.py")
         cp4 = os.path.join(diag, "diagnostics", "cp4_report.py")
         rr = os.path.join(diag, "diagnostics", "recipe_report.py")
-        if os.path.isfile(cp4):
+        if os.path.isfile(fin):
+            cmd = [sys.executable, fin, output_dir, "--auto"]
+        elif os.path.isfile(cp4):
             cmd = [sys.executable, cp4, output_dir, "--ref", "uniform"]
         elif os.path.isfile(rr):
             cmd = [sys.executable, rr, output_dir]
@@ -486,7 +489,10 @@ def auto_refresh_report(output_dir: str, arm: str) -> None:
             return
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
         if r.returncode == 0:
-            print(f"  [{arm}] report.md 判定+配方节已自动刷新")
+            tail = [ln for ln in (r.stdout or "").strip().splitlines()
+                    if ln.strip()]
+            msg = tail[-1] if tail else "已刷新"
+            print(f"  [{arm}] report.md: {msg}")
         else:
             tail = (r.stdout or r.stderr or "").strip().splitlines()
             print(f"  [{arm}] (report 刷新跳过: "
