@@ -90,12 +90,12 @@
 
 ### 搜索阶段执行记录（待）
 ### d28 验证全景（待）
-CP4 判定后跑赢家配方解剖——**原位更新 report.md**（单一报告，PNG 平铺 run 根目录，QuaDMix 式）：
-```
-python3 scripts/diagnostics/recipe_report.py result/prod5_current \
-    --natural-weights <natural权重json路径>   # 缺省自动按簇 token 占比重算
-```
-report.md 追加/刷新"赢家配方解剖"节（marker 幂等替换，新臂落地后重跑即更新）；图片 = recipe_winner_vs_baselines / recipe_winner_vs_fleet / recipe_alpha_vs_quality 三张 PNG。prod4 同工具可回填。
+CP4 判定命令 = `python3 scripts/diagnostics/cp4_report.py result/prod5_current --ref uniform`
+——收尾**自动刷新** report.md 的"赢家配方解剖"节（2026-09-22 起链接进
+cp4_report，best-effort）：记分板 + §1b 每基准明细 + §1c 哪些基准在起作用 +
+逐簇 α + 舰队语境 + 差异分解；PNG 平铺 run 根（recipe_*.png，QuaDMix 式，
+单一 report）。新臂落地后重跑 cp4 即幂等刷新。簇语义调研 = `cluster_peek.py`
+（按需手动）。prod4 同工具已回填（experiment_prod4.md §4f）。
 ### 判决（待）
 ### 附录：时间线 / 工程细节 / 产物索引（待）
 

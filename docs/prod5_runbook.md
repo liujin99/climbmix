@@ -211,7 +211,10 @@ domainfix 同批单种子；base 锚点先行；no-claim 若放行外推 → 额
 臂发射沿用 prod4 流程（dispatch_target_arm / arm_engine，含单遍守卫与磁盘
 preflight）。**CP4 渲染注意**：cp4_report.py 的 `--ref` 默认值 random
 不再命中——渲染时显式 `--ref uniform`（否则静默回退 arms[0]，"搜索是否有
-价值"的对照语义丢失）。
+价值"的对照语义丢失）。cp4_report 收尾会**自动刷新 report.md 的"赢家
+配方解剖"节**（2026-09-22 链接，best-effort：记分板/每基准明细/逐簇 α/
+舰队语境/差异分解，幂等 marker 替换，新臂落地后重跑 cp4 即更新）；
+`cluster_peek.py` 为按需调研工具（簇语义抽样，单独手动跑）。
 
 ## 5. 发射窗顺手卫生（非阻塞批处理，F2）
 

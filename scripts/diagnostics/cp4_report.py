@@ -370,6 +370,26 @@ def main():
     if args.json:
         verdict["per_benchmark"] = per_bench
         _dump_json(args.json, verdict)
+
+    # ── 配方节自动刷新 (best-effort; 2026-09-22 用户裁决: 手动负担砍掉) ──
+    # CP4 判定与赢家配方解剖是同一时刻的动作 — 每次跑 cp4 自动把
+    # report.md 的 "赢家配方解剖" 节刷新到当前臂状态 (幂等 marker 替换;
+    # 需要 numpy, 失败只降级注记不影响 CP4 判定本身)。
+    try:
+        import subprocess
+        rr = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "recipe_report.py")
+        if os.path.isfile(rr):
+            r = subprocess.run([sys.executable, rr, args.run_dir],
+                               capture_output=True, text=True, timeout=600)
+            if r.returncode == 0:
+                print(f"  (赢家配方节已自动刷新 → {args.run_dir}/report.md)")
+            else:
+                tail = (r.stdout or r.stderr or "").strip().splitlines()
+                print(f"  (recipe_report 未刷新: "
+                      f"{tail[-1] if tail else 'rc!=0'})")
+    except Exception as e:
+        print(f"  (recipe_report 链接失败: {e})")
     return 0
 
 
