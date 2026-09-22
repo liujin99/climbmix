@@ -57,6 +57,30 @@ try:
 except ImportError:
     HAS_MPL = False
 
+# 基准题量 (与 cp4_report.py / core/types.py BENCHMARK_SIZES 一致;
+# 独立硬编码副本 — 诊断脚本不依赖包导入)
+BENCHMARK_SIZES = {
+    "arc_easy": 2376,
+    "arc_challenge": 1172,
+    "mmlu_stem": 3545,
+    "gpqa_diamond": 198,
+    "gsm8k_cot": 1319,
+    "math_cot_500": 500,
+}
+
+
+def _tag(z):
+    """Δ 的显著性分级 (单侧; 与 cp4_report._tag 同语义)."""
+    if z >= 2.0:
+        return "WINS**"
+    if z >= 1.65:
+        return "WINS*"
+    if z <= -2.0:
+        return "LOSES**"
+    if z <= -1.65:
+        return "LOSES*"
+    return "·"
+
 def parse_arm_name(a):
     """臂名 → {"kind", "config_id", "rep"}.
     kind ∈ cfg / climb_optimal / uniform / natural / other。
@@ -74,6 +98,8 @@ def parse_arm_name(a):
         return {"kind": "uniform", "rep": rep}
     if base == "natural":
         return {"kind": "natural", "rep": rep}
+    if base == "domainfix":
+        return {"kind": "domainfix", "rep": rep}
     return {"kind": "other", "rep": rep}
 
 
@@ -98,21 +124,30 @@ def load_json(path):
 
 
 def parse_eval_csv(path):
-    """eval CSV → {"stem": float|None, "stem_nll": float|None}.
-    与 cp4_report.parse_eval_csv 同语义 (STEM 聚合行; centered 列)."""
+    """eval CSV → {"stem", "stem_nll", "tasks": {name: {raw, centered, nll}}}.
+    与 cp4_report.parse_eval_csv 同语义: 列 0=任务名, 1=raw acc (STEM 行为空),
+    2=centered, 3=nll; STEM 聚合行单独取, per-task 行进 tasks。"""
     if not path or not os.path.isfile(path):
         return None
     stem = stem_nll = None
+    tasks = {}
     with open(path) as f:
         for line in f:
             parts = [p.strip() for p in line.strip().split(",")]
             if len(parts) < 3:
                 continue
-            if parts[0] == "STEM":
-                stem = _f(parts[2])
-                stem_nll = _f(parts[3]) if len(parts) >= 4 else None
-                break
-    return {"stem": stem, "stem_nll": stem_nll}
+            name = parts[0]
+            if name in ("STEM", "CORE"):
+                if name == "STEM":
+                    stem = _f(parts[2])
+                    stem_nll = _f(parts[3]) if len(parts) >= 4 else None
+                continue
+            centered = _f(parts[2])
+            if centered is None:
+                continue
+            tasks[name] = {"raw": _f(parts[1]), "centered": centered,
+                           "nll": _f(parts[3]) if len(parts) >= 4 else None}
+    return {"stem": stem, "stem_nll": stem_nll, "tasks": tasks}
 
 
 def discover_arms(run_dir):
@@ -302,6 +337,13 @@ def main():
         elif kind == "uniform":
             arm_weights[a] = np.full(K, 1.0 / K)
             arm_src[a] = f"uniform α=1/K (论文 App. C.1 Random){rep}"
+        elif kind == "domainfix":
+            # 四域固定配比基线: 定义在域标签空间 (数学 .60/物理 .15/化学
+            # .125/生物 .125, token 级配额制, quadmix manual_ratio 原值 —
+            # 见 experiment_prod4.md §4e), 不存在 C0..C{K-1} 簇空间向量。
+            arm_src[a] = (f"四域固定配比 token 配额制 (数学 .60/物理 .15/"
+                          f"化学 .125/生物 .125){rep} — 定义在域标签空间, "
+                          f"无簇空间 α 向量 (簇↔域构成见 cluster_peek)")
         elif kind == "natural":
             v = weights_vec_from_payload(
                 load_json(args.natural_weights), labels) \
@@ -537,6 +579,64 @@ def build_section(run_dir, labels, K, tok_share, quality,
                      f"{arm_src.get(a, '—')} |")
     R += [f"(噪声带 \\|Δ\\| ≤ √2×SE = {noise_band:.4f}, SE={args.se}; "
           "显著性判定请以 cp4_report.py 为准)", ""]
+
+    # 1b. 每基准得分明细 (raw acc; 只有 stem 看不出哪些基准在起作用)
+    bench_seen = [t for t in BENCHMARK_SIZES
+                  if any(t in scores[a]["tasks"] for a in ranked)]
+    extra = sorted({t for a in ranked for t in scores[a]["tasks"]}
+                   - set(BENCHMARK_SIZES))
+    cols = list(ranked)
+    if base and base.get("tasks"):
+        cols.append("base")
+    if bench_seen or extra:
+        R += ["### 1b. 每基准得分明细 (d28, raw acc; 赢家列加粗)", "",
+              "| bench | N | " + " | ".join(cols) + " |",
+              "|---|---|" + "---|" * len(cols)]
+        for t in bench_seen + extra:
+            cells = []
+            for a in ranked:
+                r = scores[a]["tasks"].get(t, {}).get("raw")
+                if r is None:
+                    cells.append("—")
+                else:
+                    cells.append(f"**{r:.4f}**" if a == winner else f"{r:.4f}")
+            if "base" in cols:
+                r = base["tasks"].get(t, {}).get("raw")
+                cells.append(f"{r:.4f}" if r is not None else "—")
+            n = BENCHMARK_SIZES.get(t, "")
+            R.append(f"| {t} | {n} | " + " | ".join(cells) + " |")
+        R.append("")
+
+    # 1c. 哪些基准在起作用 (赢家 vs uniform 族最强种子, 逐基准 Δ + 二项 z)
+    uni_arms = [a for a in ranked if parse_arm_name(a)["kind"] == "uniform"]
+    if uni_arms:
+        uni = max(uni_arms, key=lambda a: scores[a]["stem"])
+        R += [f"### 1c. 哪些基准在起作用 (赢家 vs uniform 族最强 `{uni}`, "
+              f"stem {scores[uni]['stem']:.4f})", "",
+              "| bench | 赢家 raw | uniform raw | Δ | z | tag |",
+              "|---|---|---|---|---|---|"]
+        for t in bench_seen + extra:
+            rw = scores[winner]["tasks"].get(t, {}).get("raw")
+            ru = scores[uni]["tasks"].get(t, {}).get("raw")
+            n = BENCHMARK_SIZES.get(t)
+            if None not in (rw, ru) and n:
+                se = math.sqrt(max(rw * (1 - rw), 0.0) / n
+                               + max(ru * (1 - ru), 0.0) / n)
+                d = rw - ru
+                z = d / se if se > 0 else 0.0
+                R.append(f"| {t} | {rw:.4f} | {ru:.4f} | {d:+.4f} | "
+                         f"{z:+.2f} | {_tag(z)} |")
+            else:
+                R.append(f"| {t} | {rw if rw is not None else '—'} | "
+                         f"{ru if ru is not None else '—'} | — | — | — |")
+        d = scores[winner]["stem"] - scores[uni]["stem"]
+        z = d / noise_band if noise_band > 0 else 0.0
+        R.append(f"| **STEM** | **{scores[winner]['stem']:.4f}** | "
+                 f"{scores[uni]['stem']:.4f} | {d:+.4f} | {z:+.2f} | "
+                 f"{_tag(z)} |")
+        R += ["(z = Δ / 二项 SE, raw 空间 — 4 选一基准的 centered 放大 "
+              "≤1.33×, raw z 是保守下界; 完整显著性/符号检验以 cp4_report.py "
+              "为准)", ""]
 
     # 2. 逐簇配方表
     R += ["### 2. 赢家配方逐簇明细", ""]

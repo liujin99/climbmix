@@ -20,7 +20,9 @@
 #       + parquet; 用户裁决 2026-09-21 不长期保存测试重件）; 验证报告落
 #       result/${名}_verification.txt（轻量, 保留）
 #
-#  预计 ~30-45 min。前置: D1 激活完成（主树 = 新代码）、8 NPU 空闲、
+#  预计 ~2.5h（12 实验 × 47 步 × ~66s ≈ 52 min 训练/实验 + eval，
+#  两轮串行; 首跑实测 2026-09-22: NPU_PER_EXP=1 时 tok/sec ≈ 15.9k）。
+#  前置: D1 激活完成（主树 = 新代码）、8 NPU 空闲、
 #  磁盘余量 ≥50G。预计终选路径声明: tiny 预算下分数噪声主导, 可能走
 #  no-signal 守卫路径而非 claim 比较路径 —— 两条都是真路径, 验证目标是
 #  "管线跑通 + 落盘齐全", 不预设哪个路径命中（claim/A2 正常路径另有
@@ -32,7 +34,8 @@
 #    SMOKE_CACHE_SRC=result/prod4_current   聚类缓存继承源
 #    SMOKE_KEEP=1                     保留产物排障（默认验证通过后删除）
 #    SMOKE_LAUNCH=0                   干跑（env + 缓存检查, 不发射; 本地可测）
-#    SMOKE_TIMEOUT_H=2                看门狗时限
+#    SMOKE_TIMEOUT_H=4                看门狗时限（默认 4h ≥ 两轮实测 ~2.5h；
+#                                    2026-09-22 首跑 2h 被杀于第 2 轮 60% 处）
 # ═══════════════════════════════════════════════════════════════════
 set -euo pipefail
 
@@ -40,7 +43,7 @@ SMOKE_NAME="${SMOKE_NAME:-smoke5}"
 SMOKE_CACHE_SRC="${SMOKE_CACHE_SRC:-result/prod4_current}"
 SMOKE_KEEP="${SMOKE_KEEP:-0}"
 SMOKE_LAUNCH="${SMOKE_LAUNCH:-1}"
-SMOKE_TIMEOUT_H="${SMOKE_TIMEOUT_H:-2}"
+SMOKE_TIMEOUT_H="${SMOKE_TIMEOUT_H:-4}"
 
 CLIMBMIX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$CLIMBMIX_DIR"

@@ -90,7 +90,7 @@ PYTHONPATH=/home/ma-user/work/climbmix/src:/home/ma-user/work/climbmix/climbmix-
 + 两个 worker 文件 MISSING（**预期**——RemoteExecutor 首次发射自动上传）→ 末行报
 "2 missing" 属正常；唯一硬要求 = nanochat code 行为 OK。
 
-## 2. smoke 彩排（~30-45 min，8 NPU，全本地零排队）
+## 2. smoke 彩排（~2.5h——12 实验 × ~52 min 训练 + eval 两轮串行，8 NPU 全本地零排队；2026-09-22 实测校准，看门狗默认 4h）
 
 ```
 cd /home/ma-user/work/climbmix
