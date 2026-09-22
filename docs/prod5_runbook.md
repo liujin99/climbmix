@@ -161,39 +161,57 @@ EOF
 近平局翻面）；math_cot 在 climb 型臂 +30%±、random 型 ≈0（能力地板）。结果贴回
 后入 experiment_prod5.md V3 基准端。
 
-## 4. prod5 发射（搜索 ~16h + 臂族）
+## 4. prod5 发射（搜索 ~10h @ 10 并发 + 臂族）
 
-**版本化发射器 `runs/launch_prod5.sh`（2026-09-22 新增）**——原 4.1-4.4 的
-手动序列（缓存继承 / 参数对照 / preflight / 发射）全部内置：
+**入口 = `runs/run_experiment.sh` 本身**（2026-09-22 用户裁决：大实验以
+EXP_NAME 区分、直接跑引擎，不设每轮 launcher 包装——曾建的
+launch_prod5.sh 已删；其机器对照价值降级为只读工具
+`scripts/check_launch_parity.py`，见 4.4）。
+
+引擎默认值 = prod4 值（引擎就是 prod4 的发射器），**本轮只需显式 12 个
+delta**（其余键吃默认；REMOTE_OBS_PREFIX 留空自动拼
+`{obs_prod_base}/prod5`；REMOTE_MAX_JOBS 默认 10 = 留卡给同池租户）：
 
 ```
 cd /home/ma-user/work/climbmix
-bash runs/launch_prod5.sh            # 干跑（默认）：环境重建 + 逐键对照表 + 引擎干跑门
-LAUNCH=1 bash runs/launch_prod5.sh   # 真发射：preflight 过后后台起引擎，打印监控命令
+EXP_NAME=prod5 CONFIGS_PER_ITER=64,32,16 \
+TARGET_TOKENS=6B PROXY_TARGET_TOKENS=400M \
+DISPATCH_RANDOM_ARM=0 TARGET_ARM_NODES=8 \
+REMOTE_ENABLED=1 REMOTE_BACKEND=modelarts \
+REMOTE_BACKEND_MODULE=climbmix_ma:create_backend \
+REMOTE_FLAVOR=modelarts.pool.visual.8xlarge \
+REMOTE_MAX_PREP=6 REMOTE_JOB_TIMEOUT_H=8 \
+bash runs/run_experiment.sh             # 干跑门（LAUNCH 默认 1, 加 LAUNCH=0 只看计划）
 ```
 
-要点（全部内置于脚本，此处仅备忘）：
-- **缓存种子**：3 个聚类缓存文件 cp 进 result/prod5_current——stage-gate 的
-  cache-seed 豁免（`3f99ef2`）保它存活。修复前该流程会把缓存 orphan 归档、
-  空目录重来 → 重嵌入 116M 文档池（prod3 救援记录里的"预写指纹"手工步骤
-  即为绕此坑，本修复使其消失）。
-- **机器对照**：30 个 target/共享旋钮从 prod4 的 launch_env.json 重建、
-  fleet 旋钮（REMOTE_*）从其 remote_config.json 重建（秒→小时回换算）、
-  OBS 前缀末段换名（与 D1 的代码同步目标一致）；`TARGET_TOKENS` 与 SRC
-  记录不一致直接熔断（E1 同规模裁决的机器化）。
-- **EDIT 块 = 本轮有意变更**：`CONFIGS_PER_ITER=64,32,16`（E2）/
-  `PROXY_TARGET_TOKENS=400M`、`TARGET_TOKENS=6B`（E1 = 同 prod4 **引擎值**：
-  Stage 5 终选 6B 口径、20B 可行性耦合同基，prod4 实录 launch_env=6B——
-  2026-09-22 干跑实测 3B 被机器对照熔断后修正；launcher 默认 640M/2B，
-  必须显式）/**`DISPATCH_RANDOM_ARM=0`**（launcher 默认 1 会预发已更名
-  的 random 臂——手动流程必踩坑）。
-  **d28 臂预算 3B ≠ 引擎值**：臂派发时 env 覆盖（dispatch_target_arm.py
-  CLI-time env wins），见 4.6。
-- **重发射注意**：`_current` 已有指纹且其间代码/参数变过 → 引擎归档整个
-  目录（含种子）后空目录重来 → 先 `rm -rf result/prod5_current` 再跑脚本。
+真发射 = 同一命令行（引擎默认 LAUNCH=1 即真发；后台化按需 nohup/setsid）。
 
-**4.4 发射**：`LAUNCH=1 bash runs/launch_prod5.sh`（上面的版本化发射器；后台
-起引擎 + 打印监控命令）。
+12 个 delta 的依据：
+- `CONFIGS_PER_ITER=64,32,16`（E2）；`SEARCH_NUM_ITERATIONS=3` 默认即对
+- `TARGET_TOKENS=6B` = 同 prod4 **引擎值**（Stage 5 终选 6B 口径 + 20B
+  可行性耦合同基，prod4 实录 launch_env=6B；引擎默认 2B 必须显式）。
+  **d28 臂预算 3B ≠ 引擎值**：臂派发时 env 覆盖，见 4.6
+- `PROXY_TARGET_TOKENS=400M`（E1；引擎默认 640M）
+- `DISPATCH_RANDOM_ARM=0`（引擎默认 1 会预发已更名的 random 臂）
+- `TARGET_ARM_NODES=8`（prod4 臂形态 = 8 节点 ws=64；引擎默认 1）
+- REMOTE_* 六键：后端身份 + 8 卡规格 + 混料并发 6 + 作业超时 8h
+  （引擎默认 mock/空/4/6h——不设 = 本地仿真或错规格）
+
+要点：
+- **缓存种子**：3 个聚类缓存文件已在 result/prod5_current（此前干跑拷入）；
+  未来轮次 = `cp result/<源轮>_current/{cluster_cache.npz,cluster_info_cache.json,balanced_profile.json} result/<新轮>_current/`——stage-gate 的 cache-seed 豁免保它存活
+- **重发射注意**：`_current` 已有指纹且其间代码/参数变过 → 引擎归档整个
+  目录（含种子）后空目录重来 → 先 `rm -rf result/prod5_current` 再发
+
+**4.4 发射后 1 分钟对账（机器对照，只读）**：引擎落 launch_env.json +
+remote_config.json 后立刻 diff 源轮，预期外的偏离趁早发现：
+
+```
+python3 scripts/check_launch_parity.py result/prod4_current result/prod5_current
+```
+
+预期 delta = 上面 12 键 + EXP_NAME + OBS 前缀末段；清单之外出现偏离 →
+停引擎 → `rm -rf result/prod5_current`（种子重拷）→ 修正 → 重发。
 
 **4.5 监控**：
 
