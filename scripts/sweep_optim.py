@@ -104,14 +104,17 @@ def sweep_local(roots, min_age_ts, apply):
 
 
 def sweep_obs(remote_config_path, obs_prefix, apply):
-    """OBS 侧: 找出并删除 {exps}/exp_XXXX/mid_checkpoint/optim_* 对象。
+    """OBS 侧: 找出并删除 exp 的 mid_checkpoint/optim_* 对象。
 
     obs_prefix 缺省 = {remote_config.obs_prefix}/exps —— 传 run 目录里
     的 remote_config.json（其 obs_prefix 就是该轮前缀）即可, 内部值零
     手抄。候选 exp id 优先取自 run 目录的 exp_XXXX 清单（注入历史轮次
-    的 id 从偏移起步, 本地清单才是全量）; 无本地清单时探测兜底。SDK
-    后端一次递归列举直出; mount/mock 单层列举走逐 exp 遍历。dry-run
-    先看清单再 --apply。OBS 无 mtime — 只对已收官轮次使用。"""
+    的 id 从偏移起步, 本地清单才是全量）; 无本地清单时探测兜底。落点
+    兼容两种布局: {exp}/result/mid_checkpoint（ModelArts 数据面真实
+    布局, worker 上传全走输出挂载）与 {exp}/mid_checkpoint（无间接层
+    形状）。SDK 后端一次递归列举直出; mount/mock 单层列举走逐 exp
+    遍历。dry-run 先看清单再 --apply。OBS 无 mtime — 只对已收官轮次
+    使用。"""
     for _p in ("src", "climbmix-ma"):
         _d = os.path.normpath(os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "..", _p))
@@ -167,10 +170,16 @@ def sweep_obs(remote_config_path, obs_prefix, apply):
                 i += 1
             print(f"[OBS] 候选 exp {len(ids)} 个 (探测 0..{i - 1:04d})")
         for eid in ids:
-            mid_uri = f"{prefix}/exp_{eid:04d}/mid_checkpoint"
-            targets.extend(
-                k for k in obs.list_objects(mid_uri)
-                if k.rsplit("/", 1)[-1].startswith("optim_"))
+            # 两种 mid_checkpoint 落点都探: {exp}/result/mid_checkpoint 是
+            # ModelArts 数据面的真实布局 (executor 的 result_uri 已含
+            # /result, worker 上传全走输出挂载 → exp_XXXX/result/...;
+            # exp_spec.py:55); {exp}/mid_checkpoint 覆盖无 /result 间接层
+            # 的布局 (mock/本地模拟, 以及历史形状)。
+            for mid_uri in (f"{prefix}/exp_{eid:04d}/result/mid_checkpoint",
+                            f"{prefix}/exp_{eid:04d}/mid_checkpoint"):
+                targets.extend(
+                    k for k in obs.list_objects(mid_uri)
+                    if k.rsplit("/", 1)[-1].startswith("optim_"))
         targets = sorted(set(targets))
     print(f"[OBS] mid optim {len(targets)} 个 ({mode}; 其余对象不动)")
     for k in targets:
