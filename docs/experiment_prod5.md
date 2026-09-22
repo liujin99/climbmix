@@ -98,7 +98,11 @@ dispatch_target_arm 自动刷新两节（幂等 marker；判定节在前配方�
 （recipe_*.png）。人工正式判读 = `cp4_report.py result/prod5_current
 --ref uniform --base-expected <本轮校准值>`（锚点判定 + 显著性读数；
 --ref 默认已改 uniform）。簇语义调研 = `cluster_peek.py`（按需手动）。
-prod4 同工具已回填（experiment_prod4.md §4f）。
+prod4 同工具已回填（experiment_prod4.md §4f）。**最后一步 = 终报**
+（QuaDMix 式结构：每配方结果目录 = 搜索层 exp_NNNN/（meta.json 权重+分数+
+逐任务）；过程子报告 = report.md 三节自动刷新；终报 = 全部臂落地后跑
+`final_report.py RUN_DIR --base-expected <校准值> --arms <预期臂清单>`
+→ 盘点 + 锚点正式判定 + 终报印章 FINAL/DRAFT，未齐 exit 1 防误终报）。
 ### 判决（待）
 ### 附录：时间线 / 工程细节 / 产物索引（待）
 

@@ -218,6 +218,16 @@ PASS/FAIL 只报数）——最后一臂落地时 report.md 自动成为完整�
 <本轮校准值>`（锚点判定 + 显著性正式读数）。`cluster_peek.py` 为按需调研
 工具（簇语义抽样，单独手动跑）。
 
+**终报（实验最后一步，QuaDMix 式）**：全部臂落地后
+```
+python3 scripts/diagnostics/final_report.py result/prod5_current \
+    --base-expected <本轮校准值> \
+    --arms climb-cfg72,climb-cfg25,climb-cfg88,uniform,natural,domainfix
+```
+盘点臂 → 判定节刷新（锚点正式判定）→ 配方节刷新 → 终报印章（FINAL/DRAFT
++ 排名 + 头条 Δ）；预期臂未齐 = DRAFT + exit 1（防误终报）。report.md 最终
+结构：搜索子报告 → CP4 判定 → 赢家配方 → 终报印章。
+
 ## 5. 发射窗顺手卫生（非阻塞批处理，F2）
 
 - OBS 孤儿清理（prod4/target_arms 旧无键路径 1136 片 ≈6B 等，一次性 obsutil）；
