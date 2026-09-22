@@ -21,13 +21,15 @@
 #    --natural-weights           natural 臂权重文件; 缺省按簇 token 占比重算
 #    --arm-weights NAME=PATH     其他自定义臂 (如 domainfix) 的权重, 可多次
 #
-#  输出 (RUN_DIR/recipe_analysis/):
-#    recipe_report.md       主报告 (图+表嵌入, 可整段抄进实验文档)
-#    recipe_tables.md       纯表格
-#    recipe_analysis.json   机读
-#    figs/winner_vs_baselines.png  逐簇 α: 赢家 vs 其他 climb 臂 vs 基线
-#    figs/winner_vs_fleet.png      赢家 α vs 全搜索舰队均值±散布
-#    figs/alpha_vs_quality.png     赢家 α vs 簇质量分 (气泡 = 池 token 占比)
+#  输出 (RUN_DIR 根, 与 report.md / domain_distribution.png 同层 —
+#  QuaDMix 式: 图片单独成文件, 内容进唯一报告):
+#    report.md              **原位更新** — "赢家配方解剖" 节用 HTML 注释
+#                          marker 幂等替换 (重复跑 = 随新臂落地刷新)
+#    recipe_winner_vs_baselines.png  逐簇 α: 赢家 vs 其他 climb 臂 vs 基线
+#    recipe_winner_vs_fleet.png      赢家 α vs 全搜索舰队均值±散布
+#    recipe_alpha_vs_quality.png     赢家 α vs 簇质量分 (气泡 = 池 token 占比)
+#  不产出独立报告/纯表副本/机读 JSON (用户裁决 2026-09-22: 单一 report,
+#  多余产物只增加用户寻找成本)。
 #
 #  背景缺口 (experiment_prod4 §6 / experiment_prod5 预注册): 报告了 d28
 #  臂间得分对比, 但没拆赢家配方 — 各簇配比是什么、簇是什么、与输家差在
@@ -66,7 +68,7 @@ def parse_arm_name(a):
     m = re.match(r"^(?:climb-)?cfg(\d+)$", base)
     if m:
         return {"kind": "cfg", "config_id": int(m.group(1)), "rep": rep}
-    if base == "climb":
+    if base == "climb" or base in ("noclaim", "no_claim", "argmin"):
         return {"kind": "climb_optimal", "rep": rep}
     if base in ("random", "random3b", "uniform"):
         return {"kind": "uniform", "rep": rep}
@@ -168,8 +170,6 @@ def main():
     args = ap.parse_args()
 
     run_dir = args.run_dir
-    out_dir = os.path.join(run_dir, "recipe_analysis")
-    fig_dir = os.path.join(out_dir, "figs")
     notes = []          # 降级/口径注记
 
     # ── 簇信息 (地基; 缺它什么都做不了) ──
@@ -361,41 +361,57 @@ def main():
                 "iteration": fleet_iter_of.get(idx),
             }
 
-    # ── 输出 ──
-    os.makedirs(out_dir, exist_ok=True)
-    os.makedirs(fig_dir, exist_ok=True)
+    # ── 输出: PNG 平铺 RUN_DIR 根 + "赢家配方" 节原位更新 report.md ──
     figs = {}
     if HAS_MPL:
-        figs = make_figs(fig_dir, labels, W, winner, arm_weights,
+        figs = make_figs(run_dir, labels, W, winner, arm_weights,
                          ranked, fleet, quality, tok_share)
     else:
         notes.append("matplotlib 不可用 — 只出表不出图")
 
-    report_lines, table_lines, machine = build_report(
-        run_dir, labels, K, num_tokens, tok_share, quality,
+    section = build_section(
+        run_dir, labels, K, tok_share, quality,
         ranked, scores, winner, noise_band, arm_weights, arm_src,
-        W, argmin_v, fleet, fleet_ctx, fleet_iter_of, figs,
-        notes, args)
+        W, argmin_v, fleet, fleet_ctx, figs, notes, args)
 
-    for name, text in (("recipe_report.md", report_lines),
-                       ("recipe_tables.md", table_lines)):
-        path = os.path.join(out_dir, name)
-        with open(path, "w") as f:
-            f.write("\n".join(text) + "\n")
-        print(f"[Save] {path}")
-    jpath = os.path.join(out_dir, "recipe_analysis.json")
-    with open(jpath, "w") as f:
-        json.dump(machine, f, indent=2, ensure_ascii=False, default=_json_default)
-        f.write("\n")
-    print(f"[Save] {jpath}")
-    print(f"\n赢家: {winner} "
-          f"(stem {scores[winner]['stem']:.4f}) — 报告: {out_dir}/recipe_report.md")
+    update_report_section(run_dir, section)
+    print("\n".join(section))
+    print(f"\n[OK] 赢家 {winner} (stem {scores[winner]['stem']:.4f}) — "
+          f"配方节已更新进 {os.path.join(run_dir, 'report.md')}")
     return 0
+
+
+MARK_BEGIN = "<!-- recipe_report:begin -->"
+MARK_END = "<!-- recipe_report:end -->"
+
+
+def update_report_section(run_dir, section_lines):
+    """把配方节幂等写进 report.md: marker 之间存在则替换 (重复跑 = 随
+    新臂落地刷新), 不存在则追加到末尾。report.md 缺失则创建 (仅含本节)。
+    HTML 注释 marker 在渲染后的 markdown 里不可见。"""
+    report_path = os.path.join(run_dir, "report.md")
+    existing = ""
+    if os.path.isfile(report_path):
+        with open(report_path) as f:
+            existing = f.read()
+    body = "\n".join(section_lines).strip("\n")
+    if MARK_BEGIN in existing and MARK_END in existing:
+        pre = existing.split(MARK_BEGIN)[0].rstrip("\n")
+        post = existing.split(MARK_END, 1)[1].lstrip("\n")
+        new = (pre + "\n\n" + MARK_BEGIN + "\n" + body + "\n" + MARK_END
+               + (("\n\n" + post) if post.strip() else "\n"))
+    else:
+        new = (existing.rstrip("\n") + "\n\n" if existing.strip() else "")
+        new += MARK_BEGIN + "\n" + body + "\n" + MARK_END + "\n"
+    tmp = report_path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(new)
+    os.replace(tmp, report_path)
 
 
 # ── 图 ─────────────────────────────────────────────────────────────────
 
-def make_figs(fig_dir, labels, W, winner, arm_weights, ranked, fleet,
+def make_figs(run_dir, labels, W, winner, arm_weights, ranked, fleet,
               quality, tok_share):
     figs = {}
     order = np.argsort(-W)                      # 按赢家 α 降序
@@ -431,7 +447,7 @@ def make_figs(fig_dir, labels, W, winner, arm_weights, ranked, fleet,
         ax.legend(fontsize=8)
         ax.grid(axis="y", alpha=0.3)
         fig.tight_layout()
-        p = os.path.join(fig_dir, "winner_vs_baselines.png")
+        p = os.path.join(run_dir, "recipe_winner_vs_baselines.png")
         fig.savefig(p, dpi=150)
         plt.close(fig)
         figs["vs_baselines"] = os.path.basename(p)
@@ -455,7 +471,7 @@ def make_figs(fig_dir, labels, W, winner, arm_weights, ranked, fleet,
         ax.legend(fontsize=8)
         ax.grid(axis="y", alpha=0.3)
         fig.tight_layout()
-        p = os.path.join(fig_dir, "winner_vs_fleet.png")
+        p = os.path.join(run_dir, "recipe_winner_vs_fleet.png")
         fig.savefig(p, dpi=150)
         plt.close(fig)
         figs["vs_fleet"] = os.path.basename(p)
@@ -475,36 +491,34 @@ def make_figs(fig_dir, labels, W, winner, arm_weights, ranked, fleet,
         ax.set_title("Winner weights vs cluster quality (bubble = pool token share)")
         ax.grid(alpha=0.3)
         fig.tight_layout()
-        p = os.path.join(fig_dir, "alpha_vs_quality.png")
+        p = os.path.join(run_dir, "recipe_alpha_vs_quality.png")
         fig.savefig(p, dpi=150)
         plt.close(fig)
         figs["vs_quality"] = os.path.basename(p)
     return figs
 
 
-# ── 报告组装 ───────────────────────────────────────────────────────────
+# ── 报告节组装 (嵌入 report.md 的一节, 非独立报告) ────────────────────
 
-def build_report(run_dir, labels, K, num_tokens, tok_share, quality,
-                 ranked, scores, winner, noise_band, arm_weights, arm_src,
-                 W, argmin_v, fleet, fleet_ctx, fleet_iter_of, figs,
-                 notes, args):
+def build_section(run_dir, labels, K, tok_share, quality,
+                  ranked, scores, winner, noise_band, arm_weights, arm_src,
+                  W, argmin_v, fleet, fleet_ctx, figs,
+                  notes, args):
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
-    R = []            # recipe_report.md
-    T = []            # recipe_tables.md
-    M = {"run_dir": run_dir, "generated": ts, "winner": winner,
-         "winner_stem": scores[winner]["stem"], "clusters": [], "notes": notes}
+    R = []
 
-    R += [f"# 赢家配方解剖 — {os.path.basename(run_dir.rstrip('/'))}",
+    R += [f"## 赢家配方解剖 (Winner Recipe)",
           "",
-          f"**生成:** {ts}   **赢家臂:** `{winner}` "
-          f"(d28 stem {scores[winner]['stem']:.4f})",
+          f"**更新:** {ts}   **赢家臂:** `{winner}` "
+          f"(d28 stem {scores[winner]['stem']:.4f}) — 由 recipe_report.py "
+          f"生成, 重跑随新臂落地刷新",
           "",
           "口径: 臂分数 = d28 STEM (centered acc, eval CSV); "
           "舰队分数 = d20 proxy SNR 分。两个尺度只做各自语境, 不互比。",
           ""]
 
     # 1. 臂间记分板
-    R += ["## 1. 臂间记分板 (d28)", "",
+    R += ["### 1. 臂间记分板 (d28)", "",
           "| 臂 | stem | Δ vs 赢家 | 噪声带 | 配方来源 |",
           "|---|---|---|---|---|"]
     base = parse_eval_csv(os.path.join(run_dir, "eval_base_remote.csv"))
@@ -525,7 +539,7 @@ def build_report(run_dir, labels, K, num_tokens, tok_share, quality,
           "显著性判定请以 cp4_report.py 为准)", ""]
 
     # 2. 逐簇配方表
-    R += ["## 2. 赢家配方逐簇明细", ""]
+    R += ["### 2. 赢家配方逐簇明细", ""]
     # 按配方签名去重: _rep 臂与本体权重相同, 对比列/柱留新配方
     seen_sig = {tuple(np.round(W, 6))}
     cmp_arms = []
@@ -549,22 +563,14 @@ def build_report(run_dir, labels, K, num_tokens, tok_share, quality,
         ratio = (W[i] / tok_share[i]) if tok_share[i] > 0 else float("inf")
         row += [f"**{W[i]:.4f}** | {ratio:.1f}× |"]
         R.append("| " + "".join(row).rstrip("| ") + " |")
-        M["clusters"].append({
-            "label": labels[i], "pool_token_share": float(tok_share[i]),
-            "quality": float(quality[i]),
-            "winner_alpha": float(W[i]),
-            "pool_ratio": float(ratio) if math.isfinite(ratio) else None,
-            "others": {a: float(arm_weights[a][i]) for a in cmp_arms},
-        })
     if argmin_v is not None:
         R += ["", f"设计空间 argmin (optimal_mixture_weights.json, D19 参照): "
               f"与赢家 L1 = {l1(W, argmin_v):.3f}", ""]
     if figs.get("vs_baselines"):
-        R += [f"![逐簇配方对比](figs/{figs['vs_baselines']})", ""]
-    R += ["", "### 逐簇表 (纯表版见 recipe_tables.md)", ""]
+        R += [f"![逐簇配方对比]({figs['vs_baselines']})", ""]
 
     # 3. 舰队语境
-    R += ["## 3. 赢家在搜索舰队中的位置 (d20)", ""]
+    R += ["### 3. 赢家在搜索舰队中的位置 (d20)", ""]
     if fleet_ctx:
         it = fleet_ctx.get("iteration")
         it_s = f"第 {it} 轮" if it else "轮次不可考"
@@ -580,7 +586,7 @@ def build_report(run_dir, labels, K, num_tokens, tok_share, quality,
     else:
         R += ["- search_state.json 不可用 — 舰队语境跳过", ""]
     if figs.get("vs_fleet"):
-        R += [f"![赢家vs舰队](figs/{figs['vs_fleet']})", ""]
+        R += [f"![赢家vs舰队]({figs['vs_fleet']})", ""]
     if fleet is not None and fleet_ctx:
         dev = W - fleet["W"].mean(axis=0)
         top_dev = np.argsort(-np.abs(dev))[:5]
@@ -592,9 +598,9 @@ def build_report(run_dir, labels, K, num_tokens, tok_share, quality,
         R.append("")
 
     # 4. 机制视图
-    R += ["## 4. 配方机制视图", ""]
+    R += ["### 4. 配方机制视图", ""]
     if figs.get("vs_quality"):
-        R += [f"![α vs 簇质量](figs/{figs['vs_quality']})", ""]
+        R += [f"![α vs 簇质量]({figs['vs_quality']})", ""]
     hi_q = np.argsort(-quality)[: K // 3]
     w_hi = W[hi_q].sum()
     s_hi = tok_share[hi_q].sum()
@@ -604,7 +610,7 @@ def build_report(run_dir, labels, K, num_tokens, tok_share, quality,
           f"({w_hi - s_hi:+.2f})", ""]
 
     # 5. 差异分解
-    R += ["## 5. 差异分解: 赢家 vs 最近对手", ""]
+    R += ["### 5. 差异分解: 赢家 vs 最近对手", ""]
     rivals = [a for a in ranked if a != winner and a in arm_weights]
     if rivals:
         rival = rivals[0]
@@ -620,50 +626,18 @@ def build_report(run_dir, labels, K, num_tokens, tok_share, quality,
                      f"{arm_weights[rival][i]:.4f} | {dvec[i]:+.4f} | "
                      f"{100*contrib[i]/tot:.0f}% |")
         R.append("")
-        M["top_rival"] = {"arm": rival, "l1": l1(W, arm_weights[rival]),
-                          "top_contributors": [
-                              {"label": labels[i], "delta": float(dvec[i])}
-                              for i in top]}
     else:
         R += ["(没有可解析配方的对手臂)", ""]
 
     # 注记 + 附录
     if notes:
-        R += ["## 注记", ""] + [f"- {n}" for n in notes] + [""]
-    R += ["## 附: 输入", "",
+        R += ["### 注记", ""] + [f"- {n}" for n in notes] + [""]
+    R += ["### 附: 输入", "",
           f"- 臂分数: `{run_dir}/eval_<arm>.csv` (cp4_report 同解析)",
           f"- top-k 候选: `{run_dir}/topk_mixture_candidates.json`",
           f"- 搜索历史: `{run_dir}/search_state.json`",
           f"- 簇信息: `{run_dir}/cluster_info_cache.json`", ""]
-
-    # 纯表版
-    T += [f"# 赢家配方表 — {winner}", "",
-          "| 簇 | 池token% | 质量 | 赢家α | " +
-          " | ".join(f"{a}" for a in cmp_arms) + " | 赢家/池 |",
-          "|---|---|---|---|" + "---|" * (len(cmp_arms) + 1)]
-    for i in order:
-        ratio = (W[i] / tok_share[i]) if tok_share[i] > 0 else float("inf")
-        T.append("| " + " | ".join(
-            [labels[i], f"{100*tok_share[i]:.1f}%", f"{quality[i]:.2f}",
-             f"**{W[i]:.4f}**"] +
-            [f"{arm_weights[a][i]:.4f}" for a in cmp_arms] +
-            [f"{ratio:.1f}×"]) + " |")
-    T += ["", "## 臂间记分板", "", "| 臂 | stem | Δ vs 赢家 |", "|---|---|---|"]
-    for a in ranked:
-        d = scores[a]["stem"] - scores[winner]["stem"]
-        T.append(f"| {a} | {scores[a]['stem']:.4f} | {d:+.4f} |")
-
-    M["figs"] = figs
-    M["arm_scores"] = {a: scores[a]["stem"] for a in ranked}
-    return R, T, M
-
-
-def _json_default(o):
-    if isinstance(o, (np.floating, np.integer)):
-        return float(o)
-    if isinstance(o, np.ndarray):
-        return o.tolist()
-    return str(o)
+    return R
 
 
 if __name__ == "__main__":

@@ -90,12 +90,12 @@
 
 ### 搜索阶段执行记录（待）
 ### d28 验证全景（待）
-CP4 判定后跑赢家配方解剖并整段入本节（图 + 表）：
+CP4 判定后跑赢家配方解剖——**原位更新 report.md**（单一报告，PNG 平铺 run 根目录，QuaDMix 式）：
 ```
 python3 scripts/diagnostics/recipe_report.py result/prod5_current \
     --natural-weights <natural权重json路径>   # 缺省自动按簇 token 占比重算
 ```
-输出 `result/prod5_current/recipe_analysis/`（recipe_report.md + figs/*.png + 纯表 + JSON）；prod4 同工具可回填。
+report.md 追加/刷新"赢家配方解剖"节（marker 幂等替换，新臂落地后重跑即更新）；图片 = recipe_winner_vs_baselines / recipe_winner_vs_fleet / recipe_alpha_vs_quality 三张 PNG。prod4 同工具可回填。
 ### 判决（待）
 ### 附录：时间线 / 工程细节 / 产物索引（待）
 
@@ -105,4 +105,4 @@ python3 scripts/diagnostics/recipe_report.py result/prod5_current \
 - 2026-09-21 v0.1：按用户口径补目的声明（优化后算法验证 + 进一步提升期望）；V2 增跨轮提升问题 + 提升通道账。P-2 规则不变。
 - 2026-09-21 v0.2：**D2 补测缓做**（用户裁决：先做单轮内基线横评——跨轮比较退 prod4 旧协议分数 + D17 脚注，触发式）；P-3 补"簇内质量分"与"训练数据顺序课程化"两行（prod6 候选）。触发 = 用户 11 问澄清轮。
 - 2026-09-21 v0.3：基线臂更名 **random3b → uniform**（用户裁决；去 3b 后缀与 natural/domainfix 对齐；CP4 渲染须显式 `--ref uniform`）。
-- 2026-09-22 v0.4：P-3 课程化行更正改动面（引擎零改动，数据准备侧实施——代码核读实证）；结果区新增赢家配方解剖动作（CP4 后跑 `scripts/diagnostics/recipe_report.py`，图+表入 d28 验证全景节）。触发 = 发射窗等待期研究讨论。
+- 2026-09-22 v0.4：P-3 课程化行更正改动面（引擎零改动，数据准备侧实施——代码核读实证）；结果区新增赢家配方解剖动作（CP4 后跑 `scripts/diagnostics/recipe_report.py` **原位更新 report.md**——单一报告、PNG 平铺 run 根、无独立产物，用户裁决 2026-09-22）。触发 = 发射窗等待期研究讨论。
