@@ -37,8 +37,11 @@
 # ═════════════════════════════════════════════════════════════════════
 import argparse
 import os
+import re
 import sys
 import time
+
+_EXP_RE = re.compile(r"exp_(\d{4})")
 
 
 def _is_mid_path(path: str) -> bool:
@@ -101,12 +104,14 @@ def sweep_local(roots, min_age_ts, apply):
 
 
 def sweep_obs(remote_config_path, obs_prefix, apply):
-    """OBS 侧: 递归列出 prefix 下对象, 删 /mid_checkpoint/optim_ 键。
+    """OBS 侧: 找出并删除 {exps}/exp_XXXX/mid_checkpoint/optim_* 对象。
 
     obs_prefix 缺省 = {remote_config.obs_prefix}/exps —— 传 run 目录里
     的 remote_config.json（其 obs_prefix 就是该轮前缀）即可, 内部值零
-    手抄。真实后端的 list_objects 是键前缀列举 (递归); dry-run 先看
-    清单再 --apply。OBS 无 mtime — 只对已收官轮次的 exps 前缀使用。"""
+    手抄。候选 exp id 优先取自 run 目录的 exp_XXXX 清单（注入历史轮次
+    的 id 从偏移起步, 本地清单才是全量）; 无本地清单时探测兜底。SDK
+    后端一次递归列举直出; mount/mock 单层列举走逐 exp 遍历。dry-run
+    先看清单再 --apply。OBS 无 mtime — 只对已收官轮次使用。"""
     for _p in ("src", "climbmix-ma"):
         _d = os.path.normpath(os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "..", _p))
@@ -129,26 +134,43 @@ def sweep_obs(remote_config_path, obs_prefix, apply):
 
     # ── 列举: 兼容两种后端形状 ──
     # SDK 后端 list_objects = 键前缀列举 (递归, 一次拿全对象键); mount/mock
-    # 后端 = 单层列举 (只回该层条目)。先按递归形状匹配; 空/无匹配则结构化
-    # 探测 exp_NNNN 目录 (stat 对目录有效; 编号连续, 连续 8 个缺失即止)。
+    # 后端 = 单层列举 (只回该层文件, 目录不可见)。递归形状直接匹配; 否则
+    # 逐 exp 目录列举 mid_checkpoint。候选 exp id 优先取自本地 run 目录
+    # (remote_config.json 所在目录) 的 exp_XXXX 清单 —— 注入历史的轮次 exp
+    # id 从 len(history) 起步 (inject_history 语义), 前段 id 只在本地物化、
+    # 无 OBS 目录, 从 0000 探起会错过真起点; 而远程 exp 的 CSV/meta 落地
+    # 本地同名目录, 本地清单 = 全量。无本地清单时兜底探测 (连续 64 缺或
+    # 512 封顶)。
     keys = obs.list_objects(prefix)
     targets = [k for k in sorted(set(keys))
                if "/mid_checkpoint/optim_" in k]
     mode = "递归列举"
     if not targets:
-        mode = "结构化探测 exp_NNNN"
-        i, misses = 0, 0
-        while misses < 8:
-            exp_uri = f"{prefix}/exp_{i:04d}"
-            if not obs.stat(exp_uri):
-                misses += 1
-            else:
-                misses = 0
-                mid_uri = f"{exp_uri}/mid_checkpoint"
-                targets.extend(
-                    k for k in obs.list_objects(mid_uri)
-                    if k.rsplit("/", 1)[-1].startswith("optim_"))
-            i += 1
+        mode = "exp 目录遍历"
+        run_dir = os.path.dirname(os.path.abspath(remote_config_path))
+        ids = sorted(
+            int(m.group(1))
+            for m in (_EXP_RE.fullmatch(n) for n in
+                      (os.listdir(run_dir) if os.path.isdir(run_dir) else []))
+            if m)
+        if ids:
+            print(f"[OBS] 候选 exp {len(ids)} 个 (本地 run 目录, "
+                  f"id {ids[0]:04d}..{ids[-1]:04d})")
+        else:
+            i, misses = 0, 0
+            while i < 512 and misses < 64:
+                if obs.stat(f"{prefix}/exp_{i:04d}"):
+                    ids.append(i)
+                    misses = 0
+                else:
+                    misses += 1
+                i += 1
+            print(f"[OBS] 候选 exp {len(ids)} 个 (探测 0..{i - 1:04d})")
+        for eid in ids:
+            mid_uri = f"{prefix}/exp_{eid:04d}/mid_checkpoint"
+            targets.extend(
+                k for k in obs.list_objects(mid_uri)
+                if k.rsplit("/", 1)[-1].startswith("optim_"))
         targets = sorted(set(targets))
     print(f"[OBS] mid optim {len(targets)} 个 ({mode}; 其余对象不动)")
     for k in targets:
