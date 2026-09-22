@@ -229,9 +229,20 @@ report.md 最终结构：搜索子报告 → CP4 判定 → 赢家配方 → 终
 
 ## 5. 发射窗顺手卫生（非阻塞批处理，F2）
 
+- **mid optim 存量回收（2026-09-22 裁决：全砍）**——写入端已过滤（worker
+  上传/下载/归档/训练侧只保 weights+meta，~1.5× 权重/实验的死重不再产生），
+  历史存量用 `scripts/sweep_optim.py`（默认 dry-run，`--apply` 真删；本地
+  roots + OBS `--remote-config/--obs-prefix` 两模式；结构性守卫永不碰
+  base_checkpoints，`--min-age-hours 12` 保护在跑实验）：
+  ```
+  python3 scripts/sweep_optim.py /home/ma-user/work/nanochat_model_dir/mid_checkpoints result/prod4_current
+  python3 scripts/sweep_optim.py --remote-config <remote_config.json> --obs-prefix obs://<bucket>/<前缀>/prod4/exps
+  # 清单确认后加 --apply
+  ```
 - OBS 孤儿清理（prod4/target_arms 旧无键路径 1136 片 ≈6B 等，一次性 obsutil）；
 - 中央 `mid_checkpoints` 清点：10 个残留 proxy ckpt（climbmix_prod1_×5 /
-  prod2_k15bal_×3 / prod4_0054/0092，~25G）+ 旧轮 d28_smoke4n_* / d28_speedrun；
+  prod2_k15bal_×3 / prod4_0054/0092，~25G）+ 旧轮 d28_smoke4n_* / d28_speedrun
+  （optim 部分并入上面的 sweep，整目录清点仍走原条目）；
 - `dataset.py.bak.20260914_104216` 删除确认；
 - guard scratch clone `~/work/tmp/nanochat-perf` 清理；
 - **PAT 撤销（用户动作，独立于本窗口）**。

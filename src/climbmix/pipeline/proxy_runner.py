@@ -432,8 +432,21 @@ class ProxyRunner:
             import shutil
             if os.path.exists(mid_dst_dir):
                 shutil.rmtree(mid_dst_dir)
-            shutil.copytree(mid_src_dir, mid_dst_dir)
-            print(f"  [Copy] mid checkpoint -> {mid_dst_dir}")
+            # 2026-09-22: the per-rank optim_* shards have zero consumers
+            # (eval loads the model alone — load_optimizer=False; warm-start
+            # reads base_checkpoints; no mid-run resume exists) — archive
+            # weights+meta only (~1.5x model size saved per experiment).
+            shutil.copytree(mid_src_dir, mid_dst_dir,
+                            ignore=shutil.ignore_patterns("optim_*"))
+            # Train-side cleanup for the same reason: the tags accumulate
+            # under {base_dir}/mid_checkpoints/ with no sweeper. model_*.pt
+            # stays — it is the experiment-level retry marker (see
+            # _already_trained).
+            for stale in os.listdir(mid_src_dir):
+                if stale.startswith("optim_"):
+                    os.unlink(os.path.join(mid_src_dir, stale))
+            print(f"  [Copy] mid checkpoint -> {mid_dst_dir} "
+                  f"(weights+meta; optim dropped)")
 
     def _load_mix_module(self):
         """Load scripts/mix_general_data.py as a module (reuses download + mix logic)."""

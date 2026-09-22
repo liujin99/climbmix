@@ -918,9 +918,18 @@ def main() -> int:
                 and not res.get("checkpoint_uploaded"):
             try:
                 _ckpt_dir = os.path.join(base, "mid_checkpoints", tag)
-                print(f"[worker] uploading mid checkpoint (pre-eval) -> "
-                      f"{result_uri}/mid_checkpoint", flush=True)
-                storage.upload_dir(_ckpt_dir, f"{result_uri}/mid_checkpoint")
+                # 2026-09-22: weights+meta only (the _relay_files filter).
+                # The per-rank optim_* shards have zero consumers — eval
+                # loads the model alone, warm-start reads base_checkpoints,
+                # and no mid-run resume exists — so uploading them costs
+                # ~1.5x the model size per experiment in OBS storage plus
+                # transfer time for zero value.
+                for _fn in _relay_files(_ckpt_dir):
+                    storage.upload_file(os.path.join(_ckpt_dir, _fn),
+                                        f"{result_uri}/mid_checkpoint/{_fn}")
+                print(f"[worker] uploaded mid checkpoint (pre-eval, "
+                      f"weights+meta only) -> {result_uri}/mid_checkpoint",
+                      flush=True)
                 res["checkpoint_uploaded"] = True
             except Exception:
                 traceback.print_exc()

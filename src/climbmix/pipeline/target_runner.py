@@ -176,8 +176,17 @@ class TargetRunner:
         if os.path.isdir(mid_src_dir):
             if os.path.exists(mid_dst_dir):
                 shutil.rmtree(mid_dst_dir)
-            shutil.copytree(mid_src_dir, mid_dst_dir)
-            print(f"  [Copy] mid checkpoint -> {mid_dst_dir}")
+            # 2026-09-22: same ruling as proxy_runner — the per-rank optim_*
+            # shards have zero consumers (eval loads the model alone;
+            # warm-start reads base_checkpoints; arm retry = retrain from
+            # base after the partial-wipe). Archive weights+meta only.
+            shutil.copytree(mid_src_dir, mid_dst_dir,
+                            ignore=shutil.ignore_patterns("optim_*"))
+            for stale in os.listdir(mid_src_dir):
+                if stale.startswith("optim_"):
+                    os.unlink(os.path.join(mid_src_dir, stale))
+            print(f"  [Copy] mid checkpoint -> {mid_dst_dir} "
+                  f"(weights+meta; optim dropped)")
 
     def _load_mix_module(self):
         """Load scripts/mix_general_data.py as a module (reuses download + mix logic)."""

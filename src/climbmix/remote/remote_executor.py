@@ -780,7 +780,14 @@ class RemoteExecutor(ProxyRunner):
             raise FileNotFoundError(
                 f"local mid checkpoint vanished between marker check and "
                 f"upload: {ckpt_dir}")
-        self._upload_dir(ckpt_dir, f"{result_uri.rstrip('/')}/mid_checkpoint")
+        # Weights+meta only (2026-09-22 ruling): the optim_* shards have no
+        # consumer downstream, and a legacy local dir may still carry them.
+        for fn in sorted(os.listdir(ckpt_dir)):
+            if (fn.startswith("model_") and fn.endswith(".pt")) or \
+                    (fn.startswith("meta_") and fn.endswith(".json")):
+                self.obs.upload_file(
+                    os.path.join(ckpt_dir, fn),
+                    f"{result_uri.rstrip('/')}/mid_checkpoint/{fn}")
 
     # ── dynamic capacity management ──
 
@@ -1215,6 +1222,12 @@ class RemoteExecutor(ProxyRunner):
                 os.makedirs(dst, exist_ok=True)
                 for obj in self.obs.list_objects(ckpt_uri):
                     name = obj.rsplit("/", 1)[-1]
+                    if name.startswith("optim_"):
+                        # Legacy uploads (pre 2026-09-22) carried the
+                        # per-rank optimizer shards; nothing reads them —
+                        # skip instead of hauling ~1.5x the model size
+                        # back into the local archive.
+                        continue
                     self.obs.download_file(obj, os.path.join(dst, name))
 
         # Shared tail with the local executor: parse CSV, write meta.json.
