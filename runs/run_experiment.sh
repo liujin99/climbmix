@@ -55,7 +55,7 @@ fi
 
 # ─── EDIT HERE (env 可临时覆盖, 文件值为默认) ──────────────────────
 EXP_NAME="${EXP_NAME:-prod3}"          # run 名 (result/<名>_current, OBS 前缀)
-CONFIGS_PER_ITER="${CONFIGS_PER_ITER:-20,10}"   # 本 run 轮次计划 (每轮新 d20 实验数)
+CONFIGS_PER_ITER="${CONFIGS_PER_ITER:-64,32,16}"   # 轮次计划 (每轮新 d20 实验数)。默认 = 论文 §2.2 值 (共 112 点; prod5 E2 同值) —— 默认给最优形态, 偏离 (smoke 8,4 / 缩水几何) 才显式
 K_ENHANCED="${K_ENHANCED:-15}"         # 池聚类数
 ADAPTIVE_CONFIGS="${ADAPTIVE_CONFIGS:-1}"          # 自适应波预算 (生产开)
 ADAPTIVE_COMPACT="${ADAPTIVE_COMPACT:-1}"          # 紧凑画像 (时间盒; 进指纹)
@@ -351,7 +351,7 @@ REMOTE_SUBMIT_RETRY_H="${REMOTE_SUBMIT_RETRY_H:-24}" # 提交被拒重试时限 
 REMOTE_MAX_PREP="${REMOTE_MAX_PREP:-8}"           # 本地混料/上传并发 (2026-09-22 用户定 8; 防 1.5G/exp 的 prep 洪峰)
 REMOTE_STORAGE_KIND="${REMOTE_STORAGE_KIND:-moxing}"  # 容器内存储后端
 REMOTE_STORAGE_ROOT="${REMOTE_STORAGE_ROOT:-}"    # mock 后端专用: 假 OBS 根目录
-REMOTE_JOB_TIMEOUT_H="${REMOTE_JOB_TIMEOUT_H:-8}" # 搜索作业 RUNTIME 超时 (小时, 排队不计, 首个 RUNNING 起算; 抓卡死非限长跑)。d28 臂作业不用此值 —— dispatch_target_arm 自带 9h(多节点)/13h(单节点) 缺省, 超大预算臂派发时覆盖
+REMOTE_JOB_TIMEOUT_H="${REMOTE_JOB_TIMEOUT_H:-24}" # 搜索作业防楔死天花板 (小时, 排队不计, 首个 RUNNING 起算)。语义 = 把"卡死但不报错的作业"(HCCL 死锁/IO 挂起, 不自行退出 → 永久占卡) 变成可见失败, 不是预算限制——设成天花板材 (当前作业 ~1h, 24h 覆盖 ~24×; 规模增长抬此值, smoke 2h 看门狗错杀即此类 bug)。d28 臂作业不用此值: dispatch_target_arm 自带 9h(多节点)/13h(单节点)
 REMOTE_QUEUE_TIMEOUT_H="${REMOTE_QUEUE_TIMEOUT_H:-24}" # 排队超时 (提交→起跑, 小时; 池满时作业可在平台队列里等卡)
 REMOTE_QUEUE_RETRY="${REMOTE_QUEUE_RETRY:-2}" # 排队超时后重提次数 (新排队时钟; 总排队耐心 = 超时 × (1+次数))
 # 自适应驱逐的 PENDING 宽限 (分钟, 仅 ADAPTIVE_CONFIGS=1 生效): 已提交作业
