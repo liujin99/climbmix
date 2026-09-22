@@ -98,6 +98,10 @@ fi
 # ── 发射 env（全部 env 覆盖, 引擎 EDIT 块默认值不参与）──────────────
 export EXP_NAME="$SMOKE_NAME"
 export CONFIGS_PER_ITER="8,4"
+export SEARCH_NUM_ITERATIONS="2"     # 必须随轮次数走: run_experiment.sh:244
+                                    # 默认 3, 与 2 条目的 CONFIGS_PER_ITER 组合
+                                    # 会被 run_climb.py 的一致性检查拒绝
+                                    # (2026-09-22 首跑实测)
 export PROXY_TARGET_TOKENS="50M"
 export EVAL_MAX_PER_TASK=100
 export NPU_PER_EXP=1
