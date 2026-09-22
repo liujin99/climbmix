@@ -653,7 +653,10 @@ def main() -> int:
             f"stage fingerprint was computed for a different arm shape; "
             f"relaunch the main script with TARGET_ARM_NODES={node_count}")
     load_optimizer = "0" if node_count > 1 else None
-    job_timeout_h = args.job_timeout_h or (9.0 if node_count > 1 else 13.0)
+    # 0 = 显式不限制 (falsy-or 会把它吞回缺省 — is not None 区分"没传"与"传了 0")
+    job_timeout_h = (args.job_timeout_h
+                     if args.job_timeout_h is not None
+                     else (9.0 if node_count > 1 else 13.0))
     if node_count > 1:
         print(f"  [{args.arm}] multi-node arm: node_count={node_count} "
               f"(ws={node_count * 8}), load_optimizer={load_optimizer}, "

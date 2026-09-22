@@ -168,19 +168,18 @@ EXP_NAME 区分、直接跑引擎，不设每轮 launcher 包装——曾建的
 launch_prod5.sh 已删；其机器对照价值降级为只读工具
 `scripts/check_launch_parity.py`，见 4.4）。
 
-引擎默认值吸收 prod4 战后学习 + 论文最优形态（2026-09-22 折入：
-CONFIGS_PER_ITER=64,32,16（论文 §2.2 值，E2 同值）/ TARGET_TOKENS=3B /
-TARGET_ARM_NODES=8 / REMOTE_MAX_PREP=8 / REMOTE_JOB_TIMEOUT_H=24（防楔死
-天花板，见下）；DISPATCH_RANDOM_ARM 旋钮连同搜索期 random 预发代码删除
-——臂已更名 uniform 且臂族统一派发取代了它；PROXY_TARGET_TOKENS 默认保留
-原生 640M——生产轮按 E1 显式覆盖 400M），**本轮显式 6 个键**（4 个环境
-身份键故意保持本地安全默认——裸跑引擎不会误发真集群；REMOTE_OBS_PREFIX
-留空自动拼 `{obs_prod_base}/prod5`；REMOTE_MAX_JOBS 默认 10 = 留卡给
-同池租户）：
+引擎默认值定稿（2026-09-22 用户裁决系列）：CONFIGS_PER_ITER=64,32,16
+（论文 §2.2 值）/ PROXY_TARGET_TOKENS=640M（原生默认，**prod5 按默认跑**
+——E1 修订，prod4 实跑 400M）/ TARGET_TOKENS=3B / TARGET_ARM_NODES=8 /
+REMOTE_MAX_PREP=8 / REMOTE_JOB_TIMEOUT_H=**0（不限制**——隐藏运行时天花板
+是雷，楔死交监控检测；DISPATCH_RANDOM_ARM 旋钮已删）。**本轮显式 5 个键**
+（4 个环境身份键故意保持本地安全默认——裸跑引擎不会误发真集群；
+REMOTE_OBS_PREFIX 留空自动拼 `{obs_prod_base}/prod5`；REMOTE_MAX_JOBS
+默认 10 = 留卡给同池租户）：
 
 ```
 cd /home/ma-user/work/climbmix
-EXP_NAME=prod5 PROXY_TARGET_TOKENS=400M \
+EXP_NAME=prod5 \
 REMOTE_ENABLED=1 REMOTE_BACKEND=modelarts \
 REMOTE_BACKEND_MODULE=climbmix_ma:create_backend \
 REMOTE_FLAVOR=modelarts.pool.visual.8xlarge \
@@ -189,21 +188,19 @@ bash runs/run_experiment.sh             # 干跑门（LAUNCH 默认 1, 加 LAUNC
 
 真发射 = 同一命令行（引擎默认 LAUNCH=1 即真发；后台化按需 nohup/setsid）。
 
-6 键之外全部吃默认，值得知道的四个：
-- `CONFIGS_PER_ITER=64,32,16`（**默认 = 论文值**（§2.2 共 112 点），E2
-  同值——默认给最优形态, 忘设得到的是推荐计划而非缩水计划；smoke 8,4 /
-  缩水几何属显式偏离）
-- `PROXY_TARGET_TOKENS=400M`（**E1 显式覆盖**——默认保留原生 640M；prod4
-  实跑 400M，跨轮 d20 分数可比性要求同预算）
-- `TARGET_TOKENS=3B`（默认。注意与 prod4 引擎实录 6B 的差异: prod4 终选
-  产物 6B 口径 12.3GB, 本轮 3B 口径 —— V1-V5 全部臂级比较不受影响（臂
-  本来都是 3B）, 偏差仅终选产物口径; 对账时此键为**预期 delta**。
-  臂派发也因 launch_env 实录 3B/2861 而无需任何 env 覆盖）
+5 键之外全部吃默认，值得知道的四个：
+- `CONFIGS_PER_ITER=64,32,16`（**默认 = 论文值**（§2.2 共 112 点）——
+  忘设得到的是推荐计划；smoke 8,4 / 缩水几何属显式偏离）
+- `PROXY_TARGET_TOKENS=640M`（**默认，prod5 按默认跑**——E1 修订：
+  prod4 实跑 400M/381 步, 本轮 610 步, d20 分数跨轮不同预算不可比）
+- `TARGET_TOKENS=3B`（默认。与 prod4 引擎实录 6B 的差异: prod4 终选产物
+  6B 口径 12.3GB, 本轮 3B 口径 —— V1-V5 全部臂级比较不受影响（臂本来
+  都是 3B）。臂派发因 launch_env 实录 3B/2861 而无需任何 env 覆盖）
 - `TARGET_ARM_NODES=8`（默认 = prod4 臂形态 8 节点 ws=64；多节点 ws≠8 →
-  派生 --load-optimizer=0 冷启 = prod4 2a 表同形。`REMOTE_JOB_TIMEOUT_H=24`
-  = 搜索作业防楔死天花板（HCCL 死锁/IO 挂起这类不报错的楔死 → 可见
-  失败；~1h 作业 ×24 覆盖，规模增长时抬它）；臂作业超时独立:
-  dispatch 自带 9h 多节点 / 13h 单节点）
+  派生 --load-optimizer=0 冷启 = prod4 2a 表同形。`REMOTE_JOB_TIMEOUT_H=0`
+  = 搜索作业无运行时上限（楔死交监控——log 流 30s 上传停滞可见；
+  opt-in 正值 = 防楔死天花板）；臂作业超时独立: dispatch 缺省 9h 多节点
+  / 13h 单节点，`--job-timeout-h 0` 可显式去掉）
 
 要点：
 - **缓存种子**：3 个聚类缓存文件已在 result/prod5_current（此前干跑拷入）；
@@ -218,9 +215,9 @@ remote_config.json 后立刻 diff 源轮，预期外的偏离趁早发现：
 python3 scripts/check_launch_parity.py result/prod4_current result/prod5_current
 ```
 
-预期 delta = 上面 6 键 + EXP_NAME + OBS 前缀末段 + **TARGET_TOKENS
-6B→3B** + **CONFIGS_PER_ITER 54,36,18→64,32,16**（两处默认值变更的
-预期偏离）；清单之外出现偏离 →
+预期 delta = 上面 5 键 + EXP_NAME + OBS 前缀末段 + **TARGET_TOKENS
+6B→3B** + **CONFIGS_PER_ITER 54,36,18→64,32,16** + **PROXY_TARGET_TOKENS
+400M→640M**（三处默认值/裁决的预期偏离）；清单之外出现偏离 →
 停引擎 → `rm -rf result/prod5_current`（种子重拷）→ 修正 → 重发。
 
 **4.5 监控**：

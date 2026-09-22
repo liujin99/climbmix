@@ -940,7 +940,11 @@ class RemoteExecutor(ProxyRunner):
         Two clocks: job_timeout_s measures RUNTIME (first RUNNING →
         terminal — platform queue time does not burn it; shared pools can
         hold a job PENDING for hours, 2026-09-04 prod pool had 0 idle
-        cards at launch), queue_timeout_s bounds the PENDING phase alone
+        cards at launch); job_timeout_s <= 0 DISABLES the runtime ceiling
+        entirely (2026-09-22 ruling: a hidden ceiling silently false-kills
+        legitimate long runs as workloads grow — wedge detection belongs
+        to monitoring, not a guess baked far from the workload).
+        queue_timeout_s bounds the PENDING phase alone
         (lost/zombie queue entries).
 
         Adaptive mode adds: (a) fleet RUNNING accounting — first RUNNING
@@ -1025,7 +1029,7 @@ class RemoteExecutor(ProxyRunner):
                                 f"dropped from the iteration (never re-run)")
                     else:
                         tail_pending_since = None
-            elif now - first_running_at > timeout:
+            elif timeout and timeout > 0 and now - first_running_at > timeout:
                 self.job_api.cancel(job_id)
                 raise RuntimeError(
                     f"remote job {job_id} (exp {experiment_id}) timed out "

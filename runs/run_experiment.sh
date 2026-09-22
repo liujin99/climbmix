@@ -187,10 +187,11 @@ TARGET_DEPTH="${TARGET_DEPTH:-28}"
 # Target: TARGET_TOKENS 是唯一真源 (退火预算), 步数由它派生 (见下方推导块),
 # 池子=预算/STEM_RATIO, 消耗=预算 → 恒单遍 (epoch≈0.7)。
 # 预算默认 = 原生设计值: 640M→610 步 (proxy) / 3B→2861 步 (target)。
-# 生产轮按 E1 裁决在发射线显式覆盖: prod4/prod5 = PROXY_TARGET_TOKENS=400M
-# (同 prod4; 臂 3B = prod4 战后现实 —— 6B 臂曾打穿 /work 撤回 3B)。
-# 引擎值管 Stage 5 终选口径 + launch_env 记录 (臂派发直接读);
-# prod4 的终选产物是 6B 口径 (12.3GB), 3B 引擎 = 终选 3B 口径。
+# prod5 按默认跑 640M (2026-09-22 用户裁决, E1 修订: prod4 实跑 400M/381 步
+# —— d20 分数跨轮不再同预算可比, 判定问题本就是臂级 d28 的, 不受影响)。
+# 臂 3B = prod4 战后现实 (6B 臂曾打穿 /work 撤回)。引擎值管 Stage 5 终选
+# 口径 + launch_env 记录 (臂派发直接读); prod4 终选产物 6B 口径 (12.3GB),
+# 3B 引擎 = 终选 3B 口径。
 PROXY_TARGET_TOKENS="${PROXY_TARGET_TOKENS:-640M}"
 TARGET_TOKENS="${TARGET_TOKENS:-3B}"
 
@@ -351,7 +352,7 @@ REMOTE_SUBMIT_RETRY_H="${REMOTE_SUBMIT_RETRY_H:-24}" # 提交被拒重试时限 
 REMOTE_MAX_PREP="${REMOTE_MAX_PREP:-8}"           # 本地混料/上传并发 (2026-09-22 用户定 8; 防 1.5G/exp 的 prep 洪峰)
 REMOTE_STORAGE_KIND="${REMOTE_STORAGE_KIND:-moxing}"  # 容器内存储后端
 REMOTE_STORAGE_ROOT="${REMOTE_STORAGE_ROOT:-}"    # mock 后端专用: 假 OBS 根目录
-REMOTE_JOB_TIMEOUT_H="${REMOTE_JOB_TIMEOUT_H:-24}" # 搜索作业防楔死天花板 (小时, 排队不计, 首个 RUNNING 起算)。语义 = 把"卡死但不报错的作业"(HCCL 死锁/IO 挂起, 不自行退出 → 永久占卡) 变成可见失败, 不是预算限制——设成天花板材 (当前作业 ~1h, 24h 覆盖 ~24×; 规模增长抬此值, smoke 2h 看门狗错杀即此类 bug)。d28 臂作业不用此值: dispatch_target_arm 自带 9h(多节点)/13h(单节点)
+REMOTE_JOB_TIMEOUT_H="${REMOTE_JOB_TIMEOUT_H:-0}" # 搜索作业运行时天花板: **0 = 不限制**（2026-09-22 用户裁决——隐藏的运行时天花板是雷: d24 级模型/预训练化搜索会让它静默误杀+重试循环; 楔死但不报错的作业交监控检测——log 流 30s 上传, 停滞可见）。opt-in: 正值 (小时) = 防楔死天花板 (排队不计, 首个 RUNNING 起算)。d28 臂作业独立: dispatch_target_arm 缺省 9h(多节点)/13h(单节点), --job-timeout-h 0 可显式去掉
 REMOTE_QUEUE_TIMEOUT_H="${REMOTE_QUEUE_TIMEOUT_H:-24}" # 排队超时 (提交→起跑, 小时; 池满时作业可在平台队列里等卡)
 REMOTE_QUEUE_RETRY="${REMOTE_QUEUE_RETRY:-2}" # 排队超时后重提次数 (新排队时钟; 总排队耐心 = 超时 × (1+次数))
 # 自适应驱逐的 PENDING 宽限 (分钟, 仅 ADAPTIVE_CONFIGS=1 生效): 已提交作业
