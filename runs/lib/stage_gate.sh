@@ -284,6 +284,30 @@ run_stage_gate() {
             # 的产物): 有意预放的种子目录 — 不归档。下面的统一写入会补上
             # 新指纹 (种子目录本就没有旧指纹可比对)。
             echo "  Warm-start seed detected (history_seed in search_state) — keeping seed, writing fresh fingerprints"
+        elif python3 - "$OUTPUT_DIR" <<'PYEOF'
+            # Cache-seed dir: run-level cluster caches pre-populated by a
+            # launcher/inheritance script (cluster_cache.npz +
+            # cluster_info_cache.json + balanced_profile.json), no
+            # fingerprints yet. The prod3 rescue pattern minus the manual
+            # fingerprint pre-write (TODO #124-ii) — pre-populating and
+            # launching used to orphan-archive the caches away and silently
+            # fall into a full pool re-embed (caught 2026-09-22: the first
+            # live smoke run ground in Step-1 embedding for exactly this
+            # reason). Only KNOWN seed artifacts qualify; anything else is
+            # still an orphan.
+import os, sys
+d = sys.argv[1]
+seed = {"cluster_cache.npz", "cluster_info_cache.json",
+        "balanced_profile.json"}
+try:
+    entries = set(os.listdir(d))
+except OSError:
+    sys.exit(1)
+sys.exit(0 if entries and entries <= seed else 1)
+PYEOF
+        then
+            echo "  Cache-seed dir detected (run-level cluster caches, no fingerprints) —"
+            echo "    keeping seed files, writing fresh fingerprints"
         else
             was_complete=false
             _is_complete "$OUTPUT_DIR" && was_complete=true
