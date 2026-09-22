@@ -90,14 +90,15 @@
 
 ### 搜索阶段执行记录（待）
 ### d28 验证全景（待）
-**报告自更新**：每个臂（含 base 锚点）的 eval CSV 落地时自动刷新 report.md
-的"赢家配方解剖"节（dispatch_target_arm 钩子，2026-09-22；cp4_report 收尾
-再链一次作冗余）——配方节是臂评测的函数，搜索收官时赢家尚不存在，臂落地
-即刷新是唯一正确的自动化点。内容：记分板 + §1b 每基准明细 + §1c 哪些基准
-在起作用 + 逐簇 α + 舰队语境 + 差异分解；PNG 平铺 run 根（recipe_*.png，
-单一 report）。CP4 判定命令 = `python3 scripts/diagnostics/cp4_report.py
-result/prod5_current --ref uniform`。簇语义调研 = `cluster_peek.py`
-（按需手动）。prod4 同工具已回填（experiment_prod4.md §4f）。
+**大报告自更新（2026-09-22 裁决：report.md = 搜索子报告 + CP4 判定节 +
+赢家配方节，自动长成完整大报告）**：每个臂（含 base 锚点）eval CSV 落地时
+dispatch_target_arm 自动刷新两节（幂等 marker；判定节在前配方节在后）——
+最后一臂落地即完整，零人工组装。配方节内容：记分板 + §1b 每基准明细 +
+§1c 哪些基准在起作用 + 逐簇 α + 舰队语境 + 差异分解；PNG 平铺 run 根
+（recipe_*.png）。人工正式判读 = `cp4_report.py result/prod5_current
+--ref uniform --base-expected <本轮校准值>`（锚点判定 + 显著性读数；
+--ref 默认已改 uniform）。簇语义调研 = `cluster_peek.py`（按需手动）。
+prod4 同工具已回填（experiment_prod4.md §4f）。
 ### 判决（待）
 ### 附录：时间线 / 工程细节 / 产物索引（待）
 

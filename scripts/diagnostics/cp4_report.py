@@ -153,14 +153,63 @@ def _tag(z):
     return "·"
 
 
+# ── 大报告缝入 (2026-09-22): CP4 判定节幂等写入 report.md ──
+# 用户裁决: 最终要看"整个实验跑完的大报告" — 搜索报告只是子报告。
+# 判定节与配方节 (recipe_report) 一样随臂落地自动刷新, report.md 在
+# 最后一臂落地时自动长成完整大报告: 搜索 → CP4 判定 → 赢家配方。
+_OUT = []
+CP4_MARK_BEGIN = "<!-- cp4_report:begin -->"
+CP4_MARK_END = "<!-- cp4_report:end -->"
+RECIPE_MARK_BEGIN = "<!-- recipe_report:begin -->"
+
+
+def out(*a):
+    """print + 收集 (供判定节写入 report.md)."""
+    line = " ".join(str(x) for x in a)
+    _OUT.append(line)
+    print(line)
+
+
+def write_cp4_section(run_dir):
+    """把本次判定写进 report.md (marker 幂等替换; 排在配方节之前;
+    report.md 缺失则创建)。best-effort — 失败只注记。"""
+    try:
+        rp = os.path.join(run_dir, "report.md")
+        existing = open(rp).read() if os.path.isfile(rp) else ""
+        body = CP4_MARK_BEGIN + "\n## CP4 判定 (Arm Verdict)\n\n" \
+            + "\n".join(_OUT).rstrip("\n") + "\n" + CP4_MARK_END + "\n"
+        if CP4_MARK_BEGIN in existing and CP4_MARK_END in existing:
+            pre = existing.split(CP4_MARK_BEGIN)[0].rstrip("\n")
+            post = existing.split(CP4_MARK_END, 1)[1].lstrip("\n")
+            new = (pre + "\n\n" + body.rstrip("\n")
+                   + (("\n\n" + post) if post.strip() else "\n"))
+        elif RECIPE_MARK_BEGIN in existing:
+            # 判定节排在配方节之前 (阅读顺序: 分数 → 判定 → 配方)
+            head = existing.split(RECIPE_MARK_BEGIN)[0].rstrip("\n")
+            tail = RECIPE_MARK_BEGIN + existing.split(RECIPE_MARK_BEGIN, 1)[1]
+            new = head + "\n\n" + body.rstrip("\n") + "\n\n" + tail
+        else:
+            new = (existing.rstrip("\n") + "\n\n" if existing.strip() else "") + body
+        tmp = rp + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(new)
+        os.replace(tmp, rp)
+        print(f"  (CP4 判定节已写入 {rp})")
+    except Exception as e:
+        print(f"  (CP4 判定节写入失败: {e})")
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="CP4 final report: all arms vs base anchor")
     ap.add_argument("run_dir", nargs="?", default="result/prod2_k15bal_current")
-    ap.add_argument("--ref", default="random",
-                    help="对照臂 (Δ/z/p 与判定的参照; 默认 random)")
-    ap.add_argument("--base-expected", type=float, default=0.1738,
-                    help="本地 base (d28) stem_metric 期望值")
+    ap.add_argument("--ref", default="uniform",
+                    help="对照臂 (Δ/z/p 与判定的参照; 默认 uniform — "
+                         "2026-09-22 起 prod 命名; prod4 回填用 --ref random3b)")
+    ap.add_argument("--base-expected", type=float, default=None,
+                    help="本地 base (d28) stem 期望值; 缺省跳过锚点 "
+                         "PASS/FAIL 判定 (自动刷新场景不做误导性判定, "
+                         "人工判读时显式传入本轮校准值)")
     ap.add_argument("--se", type=float, default=0.006,
                     help="单次评测 stem_metric 经验 SE (prod1 噪声地板)")
     ap.add_argument("--anchor-pass", type=float, default=0.002,
@@ -174,18 +223,18 @@ def main():
 
     arms = discover_arms(args.run_dir)
     if not arms:
-        print("═" * 62)
-        print(f"  CP4 report — {args.run_dir}")
-        print("═" * 62)
-        print(f"  [·] no eval_<arm>.csv under {args.run_dir}")
-        print("  → nothing to compare. CP4 fires after arms land.")
+        out("═" * 62)
+        out(f"  CP4 report — {args.run_dir}")
+        out("═" * 62)
+        out(f"  [·] no eval_<arm>.csv under {args.run_dir}")
+        out("  → nothing to compare. CP4 fires after arms land.")
         if args.json:
             _dump_json(args.json, verdict)
         return 0
 
     ref = args.ref if args.ref in arms else arms[0]
     if ref != args.ref:
-        print(f"  (ref '{args.ref}' not among landed arms — "
+        out(f"  (ref '{args.ref}' not among landed arms — "
               f"falling back to '{ref}')")
 
     # 解析 + stem (STEM 行缺失时回退 per-benchmark 均值)
@@ -193,7 +242,7 @@ def main():
     for a in arms:
         d = parse_eval_csv(os.path.join(args.run_dir, f"eval_{a}.csv"))
         if d is None:
-            print(f"  [·] eval_{a}.csv — not found (arm not finished yet?)")
+            out(f"  [·] eval_{a}.csv — not found (arm not finished yet?)")
             continue
         parsed[a] = d
         s = d["stem"] if d["stem"] is not None else _mean_centered(d)
@@ -202,41 +251,46 @@ def main():
         else:
             stems[a] = s
     if not stems:
-        print("  [!] no usable stem score in any arm — abort")
+        out("  [!] no usable stem score in any arm — abort")
         return 1
     for a in no_stem:
-        print(f"  [!] {a}: no usable stem score — excluded from comparison")
+        out(f"  [!] {a}: no usable stem score — excluded from comparison")
     if ref not in stems:
         ref = sorted(stems)[0]
-        print(f"  (ref has no usable stem — ref := {ref})")
+        out(f"  (ref has no usable stem — ref := {ref})")
 
     ranked = sorted(stems, key=lambda a: -stems[a])          # 分数降序
     others = [a for a in ranked if a != ref]                 # vs ref 的臂
     se_delta = math.sqrt(2.0) * args.se
 
-    print("═" * 62)
-    print(f"  CP4 report — {args.run_dir}  "
+    out("═" * 62)
+    out(f"  CP4 report — {args.run_dir}  "
           f"({len(ranked)} arms; ref = {ref})")
-    print("═" * 62)
+    out("═" * 62)
     verdict["ref"] = ref
     verdict["arms"] = {a: {"stem": stems[a],
                            "stem_nll": parsed[a]["stem_nll"]}
                        for a in ranked}
 
     # ── 1. 锚点校验 ─────────────────────────────────────────────────
-    print("── 1. base anchor (remote eval pipeline check) ──")
+    out("── 1. base anchor (remote eval pipeline check) ──")
     base = parse_eval_csv(os.path.join(args.run_dir, "eval_base_remote.csv"))
     if base is None:
-        print("  [·] eval_base_remote.csv — not found (skipped; optional)")
-        print("      NOTE: without the anchor a systematic eval bias would "
+        out("  [·] eval_base_remote.csv — not found (skipped; optional)")
+        out("      NOTE: without the anchor a systematic eval bias would "
               "shift ALL arms equally — the Δ comparisons stay valid,")
-        print("      but absolute levels (e.g. vs prod1) are unverified.")
+        out("      but absolute levels (e.g. vs prod1) are unverified.")
     else:
-        d = (base["stem"] - args.base_expected) if base["stem"] is not None else None
-        if d is None:
-            print("  [!] base CSV has no STEM row — unreadable")
+        if base["stem"] is None:
+            out("  [!] base CSV has no STEM row — unreadable")
             verdict["anchor"] = "UNREADABLE"
+        elif args.base_expected is None:
+            out(f"  [·] remote base stem = {base['stem']:.4f} "
+                f"(预期值未提供 — 跳过 PASS/FAIL 判定; 人工判读时传 "
+                f"--base-expected)")
+            verdict["anchor"] = {"stem": base["stem"], "tag": "UNJUDGED"}
         else:
+            d = base["stem"] - args.base_expected
             ad = abs(d)
             if ad <= args.anchor_pass:
                 tag, sym = "PASS", "✓"
@@ -244,43 +298,43 @@ def main():
                 tag, sym = "WARN", "·"
             else:
                 tag, sym = "FAIL", "✗"
-            print(f"  [{sym}] remote base stem = {base['stem']:.4f} vs local "
+            out(f"  [{sym}] remote base stem = {base['stem']:.4f} vs local "
                   f"{args.base_expected:.4f}  |Δ|={ad:.4f} → {tag}")
-            print(f"      (PASS ≤ {args.anchor_pass}, WARN ≤ SE={args.se}, "
+            out(f"      (PASS ≤ {args.anchor_pass}, WARN ≤ SE={args.se}, "
                   f"FAIL above — FAIL means the remote eval pipeline is")
-            print(f"       biased; investigate BEFORE trusting the arm "
+            out(f"       biased; investigate BEFORE trusting the arm "
                   f"comparison below)")
             verdict["anchor"] = {"stem": base["stem"], "delta": d, "tag": tag}
 
     # ── 2. 主指标: stem_metric (所有臂, vs ref) ─────────────────────
-    print("── 2. headline: stem_metric (centered, the search objective) ──")
-    print(f"  {'arm':<14} {'stem':>7}  {'Δvs ref':>8}  {'z':>6}  {'p':>5}  tag")
+    out("── 2. headline: stem_metric (centered, the search objective) ──")
+    out(f"  {'arm':<14} {'stem':>7}  {'Δvs ref':>8}  {'z':>6}  {'p':>5}  tag")
     pw = {}
     for a in ranked:
         if a == ref:
-            print(f"  {a:<14} {stems[a]:>7.4f}  {'(ref)':>8}")
+            out(f"  {a:<14} {stems[a]:>7.4f}  {'(ref)':>8}")
             continue
         delta = stems[a] - stems[ref]
         z = delta / se_delta if se_delta > 0 else 0.0
         p = norm_sf(z)
-        print(f"  {a:<14} {stems[a]:>7.4f}  {delta:>+8.4f}  {z:>+6.2f}  "
+        out(f"  {a:<14} {stems[a]:>7.4f}  {delta:>+8.4f}  {z:>+6.2f}  "
               f"{p:>5.3f}  {_tag(z)}")
         pw[a] = {"delta": delta, "z": z, "p_one_sided": p, "tag": _tag(z)}
     if not others:
-        print("  (only the ref arm has a usable score — nothing to compare yet)")
-    print(f"  (SE_Δ = √2×{args.se:.3f} = {se_delta:.4f}; "
+        out("  (only the ref arm has a usable score — nothing to compare yet)")
+    out(f"  (SE_Δ = √2×{args.se:.3f} = {se_delta:.4f}; "
           f"tags: WINS** z≥2 (~95% one-sided), WINS* z≥1.65 (~90%), "
           f"· noise; LOSES* / LOSES** mirror)")
     verdict["pairwise_vs_ref"] = pw
 
     # ── 3. 每基准表 (所有臂 raw acc ± 二项 SE) ─────────────────────
-    print("── 3. per-benchmark (raw accuracy ± binomial SE) ──")
+    out("── 3. per-benchmark (raw accuracy ± binomial SE) ──")
     all_tasks = [t for t in STEM_LABELS
                  if any(t in d["tasks"] for d in parsed.values())]
     hdr = (f"  {'benchmark':<15} {'N':>5}  "
            + " ".join(f"{a[:11]:>17}" for a in ranked))
-    print(hdr)
-    print("  " + "-" * (len(hdr) - 2))
+    out(hdr)
+    out("  " + "-" * (len(hdr) - 2))
     per_bench = []
     for t in all_tasks:
         n = BENCHMARK_SIZES.get(t)
@@ -290,14 +344,14 @@ def main():
             se = binom_se(r, n)
             raws[a] = r
             cells.append(f"{r:.4f}±{se:.4f}" if None not in (r, se) else "—")
-        print(f"  {t:<15} {str(n):>5}  " + " ".join(f"{c:>17}" for c in cells))
+        out(f"  {t:<15} {str(n):>5}  " + " ".join(f"{c:>17}" for c in cells))
         per_bench.append({"benchmark": t, "n": n, "raw": raws})
     absent = [t for t in STEM_LABELS if t not in all_tasks]
     if absent:
-        print(f"  (not scored on any arm: {', '.join(absent)})")
+        out(f"  (not scored on any arm: {', '.join(absent)})")
 
     # ── 4. 聚合 raw 均值 + 符号检验 (各臂 vs ref) ──────────────────
-    print(f"── 4. aggregate & sign test (vs ref = {ref}) ──")
+    out(f"── 4. aggregate & sign test (vs ref = {ref}) ──")
     st = {}
     for a in others:
         pairs = []
@@ -324,16 +378,16 @@ def main():
             line += (f"raw mean Δ {mean_d:+.4f} (binomial SE {se_mean:.4f}, "
                      f"z {z_mean:+.2f}, p {norm_sf(z_mean):.3f}); ")
         line += f"wins {wins}/{n_cmp} benchmarks, exact one-sided p = {sign_test_p(wins, n_cmp):.3f}"
-        print(line)
+        out(line)
         st[a] = {"wins": wins, "n": n_cmp, "p": sign_test_p(wins, n_cmp)}
     verdict["sign_test"] = st
     nlls = [f"{a} {parsed[a]['stem_nll']:.4f}" for a in ranked
             if parsed[a]["stem_nll"] is not None]
     if nlls:
-        print(f"  stem NLL (secondary): {' / '.join(nlls)}")
+        out(f"  stem NLL (secondary): {' / '.join(nlls)}")
 
     # ── 5. 判定 ────────────────────────────────────────────────────
-    print("── 5. verdict ──")
+    out("── 5. verdict ──")
     lines = []
     anchor_tag = verdict.get("anchor", {}).get("tag") if isinstance(
         verdict.get("anchor"), dict) else None
@@ -360,16 +414,19 @@ def main():
     if not lines:
         lines.append(f"only {ref} has landed — re-run after more arms finish")
     for v in lines:
-        print(f"  ► {v}")
+        out(f"  ► {v}")
     verdict["ranking"] = ranked
     verdict["verdict"] = lines
-    print(f"  reference: prod1 climb {PROD1['climb']:.4f} / random "
+    out(f"  reference: prod1 climb {PROD1['climb']:.4f} / random "
           f"{PROD1['random']:.4f} (Δ {PROD1['climb'] - PROD1['random']:+.4f}), "
           f"local base {PROD1['base']:.4f}")
-    print("═" * 62)
+    out("═" * 62)
     if args.json:
         verdict["per_benchmark"] = per_bench
         _dump_json(args.json, verdict)
+
+    # ── 大报告缝入: CP4 判定节 (在配方节链之前写, 阅读顺序 分数→判定→配方) ──
+    write_cp4_section(args.run_dir)
 
     # ── 配方节自动刷新 (best-effort; 2026-09-22 用户裁决: 手动负担砍掉) ──
     # CP4 判定与赢家配方解剖是同一时刻的动作 — 每次跑 cp4 自动把
@@ -383,13 +440,13 @@ def main():
             r = subprocess.run([sys.executable, rr, args.run_dir],
                                capture_output=True, text=True, timeout=600)
             if r.returncode == 0:
-                print(f"  (赢家配方节已自动刷新 → {args.run_dir}/report.md)")
+                out(f"  (赢家配方节已自动刷新 → {args.run_dir}/report.md)")
             else:
                 tail = (r.stdout or r.stderr or "").strip().splitlines()
-                print(f"  (recipe_report 未刷新: "
+                out(f"  (recipe_report 未刷新: "
                       f"{tail[-1] if tail else 'rc!=0'})")
     except Exception as e:
-        print(f"  (recipe_report 链接失败: {e})")
+        out(f"  (recipe_report 链接失败: {e})")
     return 0
 
 

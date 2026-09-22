@@ -465,29 +465,34 @@ def land_logs(obs, result_uri: str, output_dir: str, arm: str,
             print(f"  [{arm}] landed {os.path.basename(dst)}")
 
 
-def auto_refresh_recipe(output_dir: str, arm: str) -> None:
-    """臂 eval CSV 落地即自动刷新 report.md 的"赢家配方解剖"节
-    (2026-09-22 用户裁决: 报告自更新, 不留手动步骤)。
+def auto_refresh_report(output_dir: str, arm: str) -> None:
+    """臂 eval CSV 落地即自动刷新 report.md 的"CP4 判定"+"赢家配方"两节
+    (2026-09-22 用户裁决: 最终要看整个实验跑完的大报告, 不留手动步骤)。
 
-    配方节是 d28 臂评测的函数, 搜索收官生成 report.md 时赢家尚不存在,
-    唯一正确的自动化点就是每个臂落地这一刻。best-effort — recipe_report
-    失败只注记一行, 不影响臂落地本身。"""
+    report.md = 搜索报告(子报告) + CP4 判定节 + 赢家配方节, 臂每落地一个
+    自动幂等刷新 — 最后一臂落地时 report.md 自动成为完整大报告。
+    走 cp4_report (自带配方节链接); cp4 缺失时退回直接跑 recipe_report。
+    best-effort — 失败只注记一行, 不影响臂落地本身。"""
     try:
         import subprocess
-        rr = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                          "diagnostics", "recipe_report.py")
-        if not os.path.isfile(rr):
+        diag = os.path.dirname(os.path.abspath(__file__))
+        cp4 = os.path.join(diag, "diagnostics", "cp4_report.py")
+        rr = os.path.join(diag, "diagnostics", "recipe_report.py")
+        if os.path.isfile(cp4):
+            cmd = [sys.executable, cp4, output_dir, "--ref", "uniform"]
+        elif os.path.isfile(rr):
+            cmd = [sys.executable, rr, output_dir]
+        else:
             return
-        r = subprocess.run([sys.executable, rr, output_dir],
-                           capture_output=True, text=True, timeout=600)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
         if r.returncode == 0:
-            print(f"  [{arm}] report.md 赢家配方节已自动刷新")
+            print(f"  [{arm}] report.md 判定+配方节已自动刷新")
         else:
             tail = (r.stdout or r.stderr or "").strip().splitlines()
-            print(f"  [{arm}] (recipe 刷新跳过: "
+            print(f"  [{arm}] (report 刷新跳过: "
                   f"{tail[-1] if tail else 'rc!=0'})")
     except Exception as e:
-        print(f"  [{arm}] (recipe 刷新失败: {e})")
+        print(f"  [{arm}] (report 刷新失败: {e})")
 
 
 def land_checkpoint(obs, result_uri: str, nanochat_base_dir: str, tag: str) -> bool:
@@ -1047,7 +1052,7 @@ def main() -> int:
                 open(os.path.join(output_dir, marker), "w").close()
             print(f"  [{arm}] landed .done_mid_train_{arm} + .done_eval_{arm}")
         if csv_landed:
-            auto_refresh_recipe(output_dir, arm)
+            auto_refresh_report(output_dir, arm)
     elif (not base_check) and mid_rc == 0:
         # Salvage: training succeeded remotely (eval failed / job failed
         # later) — land the checkpoint + train marker; the main script
