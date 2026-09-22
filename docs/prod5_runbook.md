@@ -236,7 +236,7 @@ report.md 最终结构：搜索子报告 → CP4 判定 → 赢家配方 → 终
   base_checkpoints，`--min-age-hours 12` 保护在跑实验）：
   ```
   python3 scripts/sweep_optim.py /home/ma-user/work/nanochat_model_dir/mid_checkpoints result/prod4_current
-  python3 scripts/sweep_optim.py --remote-config <remote_config.json> --obs-prefix obs://<bucket>/<前缀>/prod4/exps
+  python3 scripts/sweep_optim.py --remote-config result/prod4_current/remote_config.json
   # 清单确认后加 --apply
   ```
 - OBS 孤儿清理（prod4/target_arms 旧无键路径 1136 片 ≈6B 等，一次性 obsutil）；

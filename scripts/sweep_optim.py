@@ -9,9 +9,11 @@
 #    python3 scripts/sweep_optim.py <上述目录> --apply        # 真删
 #
 #  用法 (OBS, 服务器上, 同样默认 dry-run):
-#    python3 scripts/sweep_optim.py --remote-config <remote_config.json> \
-#        --obs-prefix obs://<bucket>/<内部前缀>/prod4/exps
-#    # 确认清单无误后加 --apply
+#    python3 scripts/sweep_optim.py --remote-config result/prod4_current/remote_config.json
+#    # exps 前缀自动推导 = remote_config 的 obs_prefix + /exps (run 目录里
+#    # 那份的 obs_prefix 就是该轮前缀, 内部值零手抄); 显式覆盖用
+#    # --obs-prefix obs://<bucket>/<前缀>/<run>/exps
+#    # 确认清单后加 --apply
 #
 #  背景: mid_train 每 rank 写 optim_<step>_rank<r>.pt (fp32 动量/双矩,
 #  ≈1.5× 权重大小), 但全链路零消费者 — eval 只读 model
@@ -101,8 +103,10 @@ def sweep_local(roots, min_age_ts, apply):
 def sweep_obs(remote_config_path, obs_prefix, apply):
     """OBS 侧: 递归列出 prefix 下对象, 删 /mid_checkpoint/optim_ 键。
 
-    真实后端的 list_objects 是键前缀列举 (递归); dry-run 先看清单再
-    --apply。OBS 无 mtime — 只对已收官轮次的 exps 前缀使用。"""
+    obs_prefix 缺省 = {remote_config.obs_prefix}/exps —— 传 run 目录里
+    的 remote_config.json（其 obs_prefix 就是该轮前缀）即可, 内部值零
+    手抄。真实后端的 list_objects 是键前缀列举 (递归); dry-run 先看
+    清单再 --apply。OBS 无 mtime — 只对已收官轮次的 exps 前缀使用。"""
     for _p in ("src", "climbmix-ma"):
         _d = os.path.normpath(os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "..", _p))
@@ -112,16 +116,41 @@ def sweep_obs(remote_config_path, obs_prefix, apply):
     from climbmix.remote.remote_executor import RemoteConfig
 
     remote_config = RemoteConfig.from_json_file(remote_config_path)
+    prefix = (obs_prefix or remote_config.obs_prefix).rstrip("/")
+    if not prefix:
+        raise SystemExit(
+            "obs 前缀为空: remote_config.json 里没有 obs_prefix, 且未传 "
+            "--obs-prefix")
+    if not obs_prefix:
+        prefix = f"{prefix}/exps"
+        print(f"[OBS] 前缀推导自 remote_config: {prefix}")
     bundle = resolve_backend(remote_config)
     obs = bundle.make_obs_storage(remote_config)
 
-    prefix = obs_prefix.rstrip("/")
+    # ── 列举: 兼容两种后端形状 ──
+    # SDK 后端 list_objects = 键前缀列举 (递归, 一次拿全对象键); mount/mock
+    # 后端 = 单层列举 (只回该层条目)。先按递归形状匹配; 空/无匹配则结构化
+    # 探测 exp_NNNN 目录 (stat 对目录有效; 编号连续, 连续 8 个缺失即止)。
     keys = obs.list_objects(prefix)
-    targets = [k for k in sorted(keys)
+    targets = [k for k in sorted(set(keys))
                if "/mid_checkpoint/optim_" in k]
-    skipped = len(keys) - len(targets)
-    print(f"[OBS] {prefix} 下共 {len(keys)} 个对象, "
-          f"其中 mid optim {len(targets)} 个 (其余 {skipped} 个不动)")
+    mode = "递归列举"
+    if not targets:
+        mode = "结构化探测 exp_NNNN"
+        i, misses = 0, 0
+        while misses < 8:
+            exp_uri = f"{prefix}/exp_{i:04d}"
+            if not obs.stat(exp_uri):
+                misses += 1
+            else:
+                misses = 0
+                mid_uri = f"{exp_uri}/mid_checkpoint"
+                targets.extend(
+                    k for k in obs.list_objects(mid_uri)
+                    if k.rsplit("/", 1)[-1].startswith("optim_"))
+            i += 1
+        targets = sorted(set(targets))
+    print(f"[OBS] mid optim {len(targets)} 个 ({mode}; 其余对象不动)")
     for k in targets:
         print(f"[{'DEL ' if apply else 'list'}] {k}")
         if apply:
@@ -144,20 +173,23 @@ def main():
     ap.add_argument("--min-age-hours", type=float, default=12.0,
                     help="文件最小年龄 (小时, 默认 12) — 保护在跑的实验")
     ap.add_argument("--remote-config", default=None,
-                    help="OBS 模式: remote_config.json 路径")
+                    help="OBS 模式: remote_config.json 路径 (run 目录里那份的 "
+                         "obs_prefix = 该轮前缀, exps 前缀自动推导)")
     ap.add_argument("--obs-prefix", default=None,
-                    help="OBS 模式: 已收官轮次的 exps 前缀 "
-                         "(obs://bucket/.../<run>/exps)")
+                    help="OBS 模式: 显式 exps 前缀 (obs://bucket/.../<run>/exps), "
+                         "缺省用 remote_config.obs_prefix/exps")
     args = ap.parse_args()
 
-    if not args.roots and not (args.remote_config and args.obs_prefix):
-        ap.error("需要本地 roots 或 --remote-config + --obs-prefix")
+    if not args.roots and not args.remote_config:
+        ap.error("需要本地 roots 或 --remote-config")
+    if args.obs_prefix and not args.remote_config:
+        ap.error("--obs-prefix 需要 --remote-config (后端身份从那来)")
 
     min_age_ts = time.time() - args.min_age_hours * 3600
     n = 0
     if args.roots:
         n += sweep_local(args.roots, min_age_ts, args.apply)
-    if args.remote_config and args.obs_prefix:
+    if args.remote_config:
         n += sweep_obs(args.remote_config, args.obs_prefix, args.apply)
 
     if not args.apply and n:
