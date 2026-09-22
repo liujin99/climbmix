@@ -24,7 +24,7 @@
 | 规模 | 同 prod4（E1 裁决）：d20 代理 @400M 单遍 / d28 臂 @3B tokens（= 臂派发时的 env 覆盖，同 prod4 终态 2861 步；**引擎 `TARGET_TOKENS=6B`** —— Stage 5 终选 6B 口径 + 20B 可行性耦合同基，prod4 实录 launch_env=6B，2026-09-22 干跑机器对照熔断后修正）/ 同池 `100B_stem_parquet_filtered`（116.1M docs / 91.84B est tokens） |
 | 聚类 | K=15 balanced（D14），**聚类缓存继承自 prod4**（cluster_cache 双文件照抄，簇与 prod4 逐位一致；全新跑 ≠ 重新聚类） |
 | 搜索预算 | CONFIGS_PER_ITER=**64,32,16** = 112 新点（E2 裁决，对齐论文 §3.1 的 112；预计 ~16h 舰队时间） |
-| 代码基线 | climbmix main（发射时 HEAD，runbook 记录实际 SHA；含 D19 终选机制）+ nanochat dev-data-mix @ `6e5baa2`（D17 协议 + D18 b16）——**本轮起全程 b16 era** |
+| 代码基线 | climbmix main **`e3b4d7e`**（2026-09-22 发射窗冻结：D19 终选机制 + 全自动大报告链 + mid optim 全砍 + TARGET_TOKENS 6B 引擎口径修正）+ nanochat dev-data-mix @ `6e5baa2`（D17 协议 + D18 b16），worker-tar sha `ae25386b030dea91`——**本轮起全程 b16 era** |
 | 预检 | smoke 彩排通过（`scripts/diagnostics/smoke_round.sh`，D1 激活后、发射前执行） |
 | 臂族 | **top-3 CLIMB 候选**（`topk_mixture_candidates.json`，k=3 裁决）+ uniform / natural / domainfix 各 ×1（基线全员单种子裁决）+ base 参考；no-claim 守卫若放行外推 → +1 臂 |
 | 臂命名 | 实测点晋臂 `ARM_NAME=climb-cfgXX`（D19 A3 约定，产物自解释）；簇等权基线臂 **`uniform`**（2026-09-21 更名裁决，取代 prod1-4 的 random3b——语义 = 论文 App. C.1 Random 的簇等权 1/K；"3b" 后缀去除 = 与 natural/domainfix 命名对齐，全基线同 3B 预算无需后缀；CP4 渲染须显式 `--ref uniform`，cp4_report 默认 ref=random 不再命中） |
