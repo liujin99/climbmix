@@ -63,8 +63,7 @@ NPU_PER_EXP="${NPU_PER_EXP:-8}"         # 每 d20 实验卡数 k (全程固定)
 REMOTE_MAX_JOBS="${REMOTE_MAX_JOBS:-10}"           # 远端在飞上限
 REMOTE_LOCAL_PARALLEL="${REMOTE_LOCAL_PARALLEL:-1}"  # 本地卡加入舰队 (k=8 整槽)
 REMOTE_OBS_PREFIX="${REMOTE_OBS_PREFIX:-}"         # 留空则自动读 climbmix-ma 配置 (见下)
-TARGET_ARM_NODES="${TARGET_ARM_NODES:-1}"          # 1=单节点 ~10h/臂; 4=多节点 ~3.4h/臂 (2 的幂)
-DISPATCH_RANDOM_ARM="${DISPATCH_RANDOM_ARM:-1}"    # 1=搜索期间并行预发 random 臂
+TARGET_ARM_NODES="${TARGET_ARM_NODES:-8}"          # 8=prod4 战后形态 (8 节点 ws=64, ~3.4h/臂; 1=单节点 ~10h/臂)
 LAUNCH="${LAUNCH:-1}"                   # 0=干跑
 # ─── 平台身份 (不确定就保持默认/留空, 由后端配置文件解析) ───────────
 # REMOTE_BACKEND_MODULE="climbmix_ma:create_backend"
@@ -78,7 +77,7 @@ LAUNCH="${LAUNCH:-1}"                   # 0=干跑
 # (TARGET_TOKENS / PROXY_TARGET_TOKENS 是唯一真源), 外部设置 = 遗留配置, 就地报错。
 if [ -n "${TARGET_STEPS:-}" ]; then
     echo "✗ TARGET_STEPS=${TARGET_STEPS} is no longer a knob — it is DERIVED from TARGET_TOKENS."
-    echo "  unset TARGET_STEPS and set the budget instead (TARGET_TOKENS=2B → 1907 steps @ 1,048,576)."
+    echo "  unset TARGET_STEPS and set the budget instead (TARGET_TOKENS=3B → 2861 steps @ 1,048,576)."
     exit 1
 fi
 if [ "${TARGET_TOKENS:-}" = "0" ]; then
@@ -158,15 +157,9 @@ case "$REMOTE_OBS_PREFIX" in
     *) echo "✗ REMOTE_OBS_PREFIX 未含 run 名 '${EXP_NAME}' — per-run 隔离要求前缀以 /${EXP_NAME} 结尾"; exit 1 ;;
 esac
 
-# random 臂预发: dispatch 自带 cluster-cache 等待 + flock, 与主脚本 Step 4
-# 的准备共享 .done 产物, 双方幂等。热启动/续跑时池缓存已在, 秒过等待。
-if [ "$DISPATCH_RANDOM_ARM" = "1" ]; then
-    mkdir -p "$OUTPUT_DIR"
-    setsid nohup python3 scripts/dispatch_target_arm.py --arm random \
-        --output-dir "$OUTPUT_DIR" \
-        > "$OUTPUT_DIR/dispatch_random.log" 2>&1 &
-    echo "  random 臂已预发 (log: ${OUTPUT_DIR}/dispatch_random.log)"
-fi
+# random 臂预发已删 (2026-09-22): 臂已更名 uniform (旧名会造成命名不一致的
+# 重复臂), 且现行设计 = 搜索收官后统一派发全臂族 (top-3 + uniform/natural/
+# domainfix + 锚点, 见 runbook 4.6 + 落臂自动报告钩子)。
 
 # ═══════════════════════════════════════════════════════════════════════
 #  引擎体 (原 runs/run_climbmix.sh, 2026-09-20 并入)
@@ -193,11 +186,14 @@ TARGET_DEPTH="${TARGET_DEPTH:-28}"
 # 800M → 762 步 = 论文等量; 400M → 381 步 = prod2 原样 (信号减半)。
 # Target: TARGET_TOKENS 是唯一真源 (退火预算), 步数由它派生 (见下方推导块),
 # 池子=预算/STEM_RATIO, 消耗=预算 → 恒单遍 (epoch≈0.7)。
-# 默认 2B → 1907 步 — 与 proxy 等比: d28/d20 参数 3.4× (scaling 435M→1.5B,
-# scoring_metric_design §12), 2B/640M = 3.1× → 臂与搜索同 tokens/参数 regime,
+# 默认 3B → 2861 步 — prod4 战后现实固化 (6B 臂曾打穿 /work 撤回 3B; launch_env
+# 实录 6B 是当时引擎值, 臂是 3B 重派)。d28/d20 参数 3.4× (scaling 435M→1.5B,
+# scoring_metric_design §12), 3B/400M 与搜索同 tokens/参数 regime,
 # predictor 选出的配比在臂预算下保持最优 (配比转移保真)。
-PROXY_TARGET_TOKENS="${PROXY_TARGET_TOKENS:-640M}"
-TARGET_TOKENS="${TARGET_TOKENS:-2B}"
+# 注意: 引擎值管 Stage 5 终选口径 + launch_env 记录 (臂派发直接读);
+# prod4 的终选产物是 6B 口径 (12.3GB), 3B 引擎 = 终选 3B 口径。
+PROXY_TARGET_TOKENS="${PROXY_TARGET_TOKENS:-400M}"
+TARGET_TOKENS="${TARGET_TOKENS:-3B}"
 
 # TARGET_STEPS 派生 (单一真源): steps = TARGET_TOKENS / total_batch_size (d28 ckpt meta)。
 # 消耗 ≈ 预算、池子 = 预算/STEM_RATIO ≈ 1.43×消耗 → 恒单遍 (epoch≈0.7, 守卫恒过)。
@@ -353,10 +349,10 @@ REMOTE_POOL_NAME="${REMOTE_POOL_NAME:-}"          # 专属池 (可空=用配置�
 REMOTE_NPU_PER_JOB="${REMOTE_NPU_PER_JOB:-$NPU_PER_EXP}"  # 每作业卡数 (单 exp 不跨节点)
 REMOTE_MAX_JOBS="${REMOTE_MAX_JOBS:-14}"          # 在飞作业上限 (动态提交的上界)
 REMOTE_SUBMIT_RETRY_H="${REMOTE_SUBMIT_RETRY_H:-24}" # 提交被拒重试时限 (小时)
-REMOTE_MAX_PREP="${REMOTE_MAX_PREP:-4}"           # 本地混料/上传并发
+REMOTE_MAX_PREP="${REMOTE_MAX_PREP:-6}"           # 本地混料/上传并发 (prod4 调优值折入; 防 1.5G/exp 的 prep 洪峰)
 REMOTE_STORAGE_KIND="${REMOTE_STORAGE_KIND:-moxing}"  # 容器内存储后端
 REMOTE_STORAGE_ROOT="${REMOTE_STORAGE_ROOT:-}"    # mock 后端专用: 假 OBS 根目录
-REMOTE_JOB_TIMEOUT_H="${REMOTE_JOB_TIMEOUT_H:-6}" # 单作业 RUNTIME 超时 (小时, 排队时间不计 — 首个 RUNNING 起算)
+REMOTE_JOB_TIMEOUT_H="${REMOTE_JOB_TIMEOUT_H:-8}" # 单作业 RUNTIME 超时 (小时, 排队时间不计 — 首个 RUNNING 起算; prod4 值折入)
 REMOTE_QUEUE_TIMEOUT_H="${REMOTE_QUEUE_TIMEOUT_H:-24}" # 排队超时 (提交→起跑, 小时; 池满时作业可在平台队列里等卡)
 REMOTE_QUEUE_RETRY="${REMOTE_QUEUE_RETRY:-2}" # 排队超时后重提次数 (新排队时钟; 总排队耐心 = 超时 × (1+次数))
 # 自适应驱逐的 PENDING 宽限 (分钟, 仅 ADAPTIVE_CONFIGS=1 生效): 已提交作业

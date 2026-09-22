@@ -168,34 +168,32 @@ EXP_NAME 区分、直接跑引擎，不设每轮 launcher 包装——曾建的
 launch_prod5.sh 已删；其机器对照价值降级为只读工具
 `scripts/check_launch_parity.py`，见 4.4）。
 
-引擎默认值 = prod4 值（引擎就是 prod4 的发射器），**本轮只需显式 12 个
-delta**（其余键吃默认；REMOTE_OBS_PREFIX 留空自动拼
-`{obs_prod_base}/prod5`；REMOTE_MAX_JOBS 默认 10 = 留卡给同池租户）：
+引擎默认值已吸收 prod4 战后学习（2026-09-22 折入：TARGET_TOKENS=3B /
+PROXY_TARGET_TOKENS=400M / TARGET_ARM_NODES=8 / REMOTE_MAX_PREP=6 /
+REMOTE_JOB_TIMEOUT_H=8；DISPATCH_RANDOM_ARM 旋钮连同搜索期 random 预发
+代码删除——臂已更名 uniform 且臂族统一派发取代了它），**本轮只需显式
+6 个键**（4 个环境身份键故意保持本地安全默认——裸跑引擎不会误发真集群；
+REMOTE_OBS_PREFIX 留空自动拼 `{obs_prod_base}/prod5`；REMOTE_MAX_JOBS
+默认 10 = 留卡给同池租户）：
 
 ```
 cd /home/ma-user/work/climbmix
 EXP_NAME=prod5 CONFIGS_PER_ITER=64,32,16 \
-TARGET_TOKENS=6B PROXY_TARGET_TOKENS=400M \
-DISPATCH_RANDOM_ARM=0 TARGET_ARM_NODES=8 \
 REMOTE_ENABLED=1 REMOTE_BACKEND=modelarts \
 REMOTE_BACKEND_MODULE=climbmix_ma:create_backend \
 REMOTE_FLAVOR=modelarts.pool.visual.8xlarge \
-REMOTE_MAX_PREP=6 REMOTE_JOB_TIMEOUT_H=8 \
 bash runs/run_experiment.sh             # 干跑门（LAUNCH 默认 1, 加 LAUNCH=0 只看计划）
 ```
 
 真发射 = 同一命令行（引擎默认 LAUNCH=1 即真发；后台化按需 nohup/setsid）。
 
-12 个 delta 的依据：
-- `CONFIGS_PER_ITER=64,32,16`（E2）；`SEARCH_NUM_ITERATIONS=3` 默认即对
-- `TARGET_TOKENS=6B` = 同 prod4 **引擎值**（Stage 5 终选 6B 口径 + 20B
-  可行性耦合同基，prod4 实录 launch_env=6B；引擎默认 2B 必须显式）。
-  **d28 臂预算 3B ≠ 引擎值**：臂派发时 env 覆盖，见 4.6
-- `PROXY_TARGET_TOKENS=400M`（E1；引擎默认 640M）
-- `DISPATCH_RANDOM_ARM=0`（引擎默认 1 会预发已更名的 random 臂）
-- `TARGET_ARM_NODES=8`（prod4 臂形态 = 8 节点 ws=64；引擎默认 1）
-- REMOTE_* 六键：后端身份 + 8 卡规格 + 混料并发 6 + 作业超时 8h
-  （引擎默认 mock/空/4/6h——不设 = 本地仿真或错规格）
+6 键之外全部吃默认（= prod4 战后现实），其中值得知道的两个默认：
+- `TARGET_TOKENS=3B`（2026-09-22 裁决改默认。注意与 prod4 引擎实录 6B 的
+  差异: prod4 终选产物 6B 口径 12.3GB, 本轮 3B 口径 —— V1-V5 全部臂级比较
+  不受影响（臂本来都是 3B）, 偏差仅终选产物口径; 对账时此键为**预期 delta**。
+  臂派发也因 launch_env 实录 3B/2861 而无需任何 env 覆盖）
+- `TARGET_ARM_NODES=8`（prod4 臂形态 = 8 节点 ws=64；多节点 ws≠8 → 派生
+  --load-optimizer=0 冷启 = prod4 2a 表同形）
 
 要点：
 - **缓存种子**：3 个聚类缓存文件已在 result/prod5_current（此前干跑拷入）；
@@ -210,7 +208,8 @@ remote_config.json 后立刻 diff 源轮，预期外的偏离趁早发现：
 python3 scripts/check_launch_parity.py result/prod4_current result/prod5_current
 ```
 
-预期 delta = 上面 12 键 + EXP_NAME + OBS 前缀末段；清单之外出现偏离 →
+预期 delta = 上面 6 键 + EXP_NAME + OBS 前缀末段 + **TARGET_TOKENS
+6B→3B**（默认值变更的预期偏离）；清单之外出现偏离 →
 停引擎 → `rm -rf result/prod5_current`（种子重拷）→ 修正 → 重发。
 
 **4.5 监控**：

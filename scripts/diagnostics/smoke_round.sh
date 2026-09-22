@@ -12,7 +12,7 @@
 #       SMOKE_CACHE_SRC 抄入 —— Steps 0-2 纯缓存命中, 簇与源轮逐位一致）
 #    2. 发射 Step 1-3: 12 个 d20 实验（8+4, 凑够 10 触发 A2 全量重拟合）
 #       × 50M token 代理预算 × 100 题/任务子采样评测 × NPU_PER_EXP=1
-#       （8 卡 8 路并行, 2 波）; REMOTE_ENABLED=0 + DISPATCH_RANDOM_ARM=0
+#       （8 卡 8 路并行, 2 波）; REMOTE_ENABLED=0（全本地, 零远端提交）
 #    3. 看到搜索完成（run_climb "Done!" / 引擎进入 Step 4 横幅）即停
 #       —— smoke 范围 = Step 1-3, 臂准备与派发不进彩排
 #    4. 自动验证清单（舰队/终选模式/topk JSON/claim 渲染/权重和/落盘）
@@ -126,7 +126,6 @@ export NPU_PER_EXP=1
 export ADAPTIVE_CONFIGS=0
 export ADAPTIVE_COMPACT=0
 export REMOTE_ENABLED=0            # 零远端提交 —— 无排队暴露
-export DISPATCH_RANDOM_ARM=0       # 搜索期不并行预发 random 臂（那是远端派发）
 export TARGET_TOKENS=200M          # 看门狗若滞后进 Step 4, 其工作量也被钳小
 export LAUNCH="$SMOKE_LAUNCH"
 
