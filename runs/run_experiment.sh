@@ -186,13 +186,12 @@ TARGET_DEPTH="${TARGET_DEPTH:-28}"
 # 800M → 762 步 = 论文等量; 400M → 381 步 = prod2 原样 (信号减半)。
 # Target: TARGET_TOKENS 是唯一真源 (退火预算), 步数由它派生 (见下方推导块),
 # 池子=预算/STEM_RATIO, 消耗=预算 → 恒单遍 (epoch≈0.7)。
-# 默认 3B → 2861 步 — prod4 战后现实固化 (6B 臂曾打穿 /work 撤回 3B; launch_env
-# 实录 6B 是当时引擎值, 臂是 3B 重派)。d28/d20 参数 3.4× (scaling 435M→1.5B,
-# scoring_metric_design §12), 3B/400M 与搜索同 tokens/参数 regime,
-# predictor 选出的配比在臂预算下保持最优 (配比转移保真)。
-# 注意: 引擎值管 Stage 5 终选口径 + launch_env 记录 (臂派发直接读);
+# 预算默认 = 原生设计值: 640M→610 步 (proxy) / 3B→2861 步 (target)。
+# 生产轮按 E1 裁决在发射线显式覆盖: prod4/prod5 = PROXY_TARGET_TOKENS=400M
+# (同 prod4; 臂 3B = prod4 战后现实 —— 6B 臂曾打穿 /work 撤回 3B)。
+# 引擎值管 Stage 5 终选口径 + launch_env 记录 (臂派发直接读);
 # prod4 的终选产物是 6B 口径 (12.3GB), 3B 引擎 = 终选 3B 口径。
-PROXY_TARGET_TOKENS="${PROXY_TARGET_TOKENS:-400M}"
+PROXY_TARGET_TOKENS="${PROXY_TARGET_TOKENS:-640M}"
 TARGET_TOKENS="${TARGET_TOKENS:-3B}"
 
 # TARGET_STEPS 派生 (单一真源): steps = TARGET_TOKENS / total_batch_size (d28 ckpt meta)。
@@ -349,10 +348,10 @@ REMOTE_POOL_NAME="${REMOTE_POOL_NAME:-}"          # 专属池 (可空=用配置�
 REMOTE_NPU_PER_JOB="${REMOTE_NPU_PER_JOB:-$NPU_PER_EXP}"  # 每作业卡数 (单 exp 不跨节点)
 REMOTE_MAX_JOBS="${REMOTE_MAX_JOBS:-14}"          # 在飞作业上限 (动态提交的上界)
 REMOTE_SUBMIT_RETRY_H="${REMOTE_SUBMIT_RETRY_H:-24}" # 提交被拒重试时限 (小时)
-REMOTE_MAX_PREP="${REMOTE_MAX_PREP:-6}"           # 本地混料/上传并发 (prod4 调优值折入; 防 1.5G/exp 的 prep 洪峰)
+REMOTE_MAX_PREP="${REMOTE_MAX_PREP:-8}"           # 本地混料/上传并发 (2026-09-22 用户定 8; 防 1.5G/exp 的 prep 洪峰)
 REMOTE_STORAGE_KIND="${REMOTE_STORAGE_KIND:-moxing}"  # 容器内存储后端
 REMOTE_STORAGE_ROOT="${REMOTE_STORAGE_ROOT:-}"    # mock 后端专用: 假 OBS 根目录
-REMOTE_JOB_TIMEOUT_H="${REMOTE_JOB_TIMEOUT_H:-8}" # 单作业 RUNTIME 超时 (小时, 排队时间不计 — 首个 RUNNING 起算; prod4 值折入)
+REMOTE_JOB_TIMEOUT_H="${REMOTE_JOB_TIMEOUT_H:-8}" # 搜索作业 RUNTIME 超时 (小时, 排队不计, 首个 RUNNING 起算; 抓卡死非限长跑)。d28 臂作业不用此值 —— dispatch_target_arm 自带 9h(多节点)/13h(单节点) 缺省, 超大预算臂派发时覆盖
 REMOTE_QUEUE_TIMEOUT_H="${REMOTE_QUEUE_TIMEOUT_H:-24}" # 排队超时 (提交→起跑, 小时; 池满时作业可在平台队列里等卡)
 REMOTE_QUEUE_RETRY="${REMOTE_QUEUE_RETRY:-2}" # 排队超时后重提次数 (新排队时钟; 总排队耐心 = 超时 × (1+次数))
 # 自适应驱逐的 PENDING 宽限 (分钟, 仅 ADAPTIVE_CONFIGS=1 生效): 已提交作业

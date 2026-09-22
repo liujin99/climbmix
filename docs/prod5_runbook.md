@@ -168,17 +168,17 @@ EXP_NAME 区分、直接跑引擎，不设每轮 launcher 包装——曾建的
 launch_prod5.sh 已删；其机器对照价值降级为只读工具
 `scripts/check_launch_parity.py`，见 4.4）。
 
-引擎默认值已吸收 prod4 战后学习（2026-09-22 折入：TARGET_TOKENS=3B /
-PROXY_TARGET_TOKENS=400M / TARGET_ARM_NODES=8 / REMOTE_MAX_PREP=6 /
-REMOTE_JOB_TIMEOUT_H=8；DISPATCH_RANDOM_ARM 旋钮连同搜索期 random 预发
-代码删除——臂已更名 uniform 且臂族统一派发取代了它），**本轮只需显式
-6 个键**（4 个环境身份键故意保持本地安全默认——裸跑引擎不会误发真集群；
-REMOTE_OBS_PREFIX 留空自动拼 `{obs_prod_base}/prod5`；REMOTE_MAX_JOBS
-默认 10 = 留卡给同池租户）：
+引擎默认值吸收 prod4 战后学习（2026-09-22 折入：TARGET_TOKENS=3B /
+TARGET_ARM_NODES=8 / REMOTE_MAX_PREP=8 / REMOTE_JOB_TIMEOUT_H=8；
+DISPATCH_RANDOM_ARM 旋钮连同搜索期 random 预发代码删除——臂已更名 uniform
+且臂族统一派发取代了它；PROXY_TARGET_TOKENS 默认保留原生 640M——生产轮
+按 E1 显式覆盖 400M），**本轮显式 7 个键**（4 个环境身份键故意保持本地
+安全默认——裸跑引擎不会误发真集群；REMOTE_OBS_PREFIX 留空自动拼
+`{obs_prod_base}/prod5`；REMOTE_MAX_JOBS 默认 10 = 留卡给同池租户）：
 
 ```
 cd /home/ma-user/work/climbmix
-EXP_NAME=prod5 CONFIGS_PER_ITER=64,32,16 \
+EXP_NAME=prod5 CONFIGS_PER_ITER=64,32,16 PROXY_TARGET_TOKENS=400M \
 REMOTE_ENABLED=1 REMOTE_BACKEND=modelarts \
 REMOTE_BACKEND_MODULE=climbmix_ma:create_backend \
 REMOTE_FLAVOR=modelarts.pool.visual.8xlarge \
@@ -187,13 +187,16 @@ bash runs/run_experiment.sh             # 干跑门（LAUNCH 默认 1, 加 LAUNC
 
 真发射 = 同一命令行（引擎默认 LAUNCH=1 即真发；后台化按需 nohup/setsid）。
 
-6 键之外全部吃默认（= prod4 战后现实），其中值得知道的两个默认：
-- `TARGET_TOKENS=3B`（2026-09-22 裁决改默认。注意与 prod4 引擎实录 6B 的
-  差异: prod4 终选产物 6B 口径 12.3GB, 本轮 3B 口径 —— V1-V5 全部臂级比较
-  不受影响（臂本来都是 3B）, 偏差仅终选产物口径; 对账时此键为**预期 delta**。
+7 键之外全部吃默认，其中值得知道的三个：
+- `PROXY_TARGET_TOKENS=400M`（**E1 显式覆盖**——默认保留原生 640M；prod4
+  实跑 400M，跨轮 d20 分数可比性要求同预算）
+- `TARGET_TOKENS=3B`（默认。注意与 prod4 引擎实录 6B 的差异: prod4 终选
+  产物 6B 口径 12.3GB, 本轮 3B 口径 —— V1-V5 全部臂级比较不受影响（臂
+  本来都是 3B）, 偏差仅终选产物口径; 对账时此键为**预期 delta**。
   臂派发也因 launch_env 实录 3B/2861 而无需任何 env 覆盖）
-- `TARGET_ARM_NODES=8`（prod4 臂形态 = 8 节点 ws=64；多节点 ws≠8 → 派生
-  --load-optimizer=0 冷启 = prod4 2a 表同形）
+- `TARGET_ARM_NODES=8`（默认 = prod4 臂形态 8 节点 ws=64；多节点 ws≠8 →
+  派生 --load-optimizer=0 冷启 = prod4 2a 表同形。臂作业超时独立:
+  dispatch 自带 9h 多节点 / 13h 单节点, 不吃引擎 REMOTE_JOB_TIMEOUT_H）
 
 要点：
 - **缓存种子**：3 个聚类缓存文件已在 result/prod5_current（此前干跑拷入）；
@@ -208,7 +211,7 @@ remote_config.json 后立刻 diff 源轮，预期外的偏离趁早发现：
 python3 scripts/check_launch_parity.py result/prod4_current result/prod5_current
 ```
 
-预期 delta = 上面 6 键 + EXP_NAME + OBS 前缀末段 + **TARGET_TOKENS
+预期 delta = 上面 7 键 + EXP_NAME + OBS 前缀末段 + **TARGET_TOKENS
 6B→3B**（默认值变更的预期偏离）；清单之外出现偏离 →
 停引擎 → `rm -rf result/prod5_current`（种子重拷）→ 修正 → 重发。
 
