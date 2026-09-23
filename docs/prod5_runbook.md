@@ -265,18 +265,24 @@ CP0 聚类结构 / CP1 SNR / CP2 online ρ / CP3 Selection mode / CP4 臂+锚点
 `Selection mode`（D19：`best_measured_no_claim` / `…claimed`）、
 `Top-k arm candidates`（预期 3 个 climb-cfgXX）。
 
-**4.6 搜索收官 → 臂族**：`topk_mixture_candidates.json` top-3 晋臂
-（`ARM_NAME=climb-cfgXX`，权重文件直接 `--weights` 可用）；**uniform**
-（簇等权基线，2026-09-21 更名裁决；prod1-4 臂名 random3b）/ natural /
-domainfix 同批单种子；base 锚点先行；no-claim 若放行外推 → 额外 +1 臂。
-**臂预算 3B = env 覆盖，不是引擎值**（引擎 TARGET_TOKENS=6B 只管 Stage 5
-终选口径，同 prod4）：dispatch 时 CLI-time env 盖过 launch_env
-（dispatch_target_arm.py load_launch_env），**必须成对覆盖**——
-`TARGET_TOKENS=3B TARGET_STEPS=2861`（2861 = 3B ÷ 2²⁰ total_batch，
-同 prod4 终态；漏 TARGET_STEPS 会用引擎 6B 步数 → 单遍守卫拒发，漏
-TARGET_TOKENS 则 random 基线 shards 按 6B 备料）。臂发射沿用 prod4 流程
-（dispatch_target_arm / arm_engine，含单遍守卫与磁盘
-preflight）。**大报告自更新（2026-09-22 用户裁决：最终要看整个实验跑完的
+**4.6 搜索收官 → 臂族（验证阶段）**：`topk_mixture_candidates.json` top-3
+晋臂（`ARM_NAME=climb-cfgXX`，权重文件直接 `--weights` 可用）；
+**uniform**（簇等权基线，2026-09-21 更名裁决；prod1-4 臂名 random3b）/
+natural / domainfix 同批单种子；base 锚点先行；no-claim 若放行外推 →
+额外 +1 臂。**臂预算零覆盖**：引擎默认 TARGET_TOKENS=3B、launch_env 实录
+3B/2861 → 臂派发**无需任何 env 覆盖**（prod4 时代"成对覆盖
+TARGET_TOKENS=3B TARGET_STEPS=2861"已成历史——引擎默认吸收了 prod4 终态）。
+臂发射沿用 prod4 流程（dispatch_target_arm / arm_engine，含单遍守卫与
+磁盘 preflight）。**臂族并发 = 自动排队（2026-09-23 裁决）**：全部臂命令
+可连发（各开终端或顺序执行），机器侧 `REMOTE_MAX_VALIDATION_NODES`
+（默认 **16** = 2 臂 × 8 节点；dispatch CLI `--max-validation-nodes`）管
+在飞**训练臂节点总和**——超限的派发自动排队（`--queue-poll-s` 默认 60s
+轮询，先到先得无 FIFO，Ctrl+C 干净退出）；1 节点作业（base 锚点等
+eval-only）入册可见但**免计**（1 与 8 节点不同类不可比）。与
+`TARGET_ARM_NODES`（每臂形状）的区分：后者 = 单臂长什么样（8 节点/臂），
+前者 = 全族在飞总和。注册表 `.validation_fleet/` 随派发进程存活（atexit
+注销 + 死 pid 清扫——dispatch 被杀 = 该臂脱离记账）；report.md 刷新已
+flock 串行化（`.report_refresh.lock`），并发臂落地无写入竞争。**大报告自更新（2026-09-22 用户裁决：最终要看整个实验跑完的
 大报告）**：report.md = 搜索子报告 + **CP4 判定节** + **赢家配方节**，每个臂
 （含 base 锚点）的 eval CSV 落地时 dispatch_target_arm 自动幂等刷新两节
 （走 cp4_report，自带配方链；--ref 默认已改 uniform，锚点预期值缺省不做

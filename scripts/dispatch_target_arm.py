@@ -51,6 +51,16 @@ main script's Step-6 call); the second arriver sees the landed markers
 and exits 0 without submitting. A prior FAILED attempt short-circuits
 (exit 1, local fallback) unless --retry-failed.
 
+Fleet budget: the validation-fleet registry ($OUTPUT_DIR/.validation_fleet/)
+caps the total NODES of concurrently in-flight multi-node arms
+(--max-validation-nodes / $REMOTE_MAX_VALIDATION_NODES, default 16 = 2
+arms x 8 nodes; 1-node jobs like the base anchor are registered but
+exempt — different class). Over budget -> the dispatch QUEUES
+automatically (poll --queue-poll-s, first-come-first-served, no FIFO);
+entries live with their dispatch process (atexit deregister; dead-pid
+entries swept on admission). report.md refreshes are flock-serialized
+(.report_refresh.lock) so concurrent arm landings cannot interleave.
+
 Config sources (priority): CLI args > environment variables >
 $OUTPUT_DIR/launch_env.json (written by run_experiment.sh on every launch —
 makes the separate nohup independent of the launching shell) +
@@ -58,6 +68,7 @@ $OUTPUT_DIR/remote_config.json (the search fleet's RemoteConfig).
 """
 
 import argparse
+import atexit
 import fcntl
 import glob
 import json
@@ -66,8 +77,9 @@ import re
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from multiprocessing.pool import ThreadPool
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 # src + vendored backend (climbmix-ma) — a bare-shell manual dispatch has
@@ -487,7 +499,11 @@ def auto_refresh_report(output_dir: str, arm: str) -> None:
             cmd = [sys.executable, rr, output_dir]
         else:
             return
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        # 串行化: 并发臂同时落地 → 两个 final_report --auto 并发写
+        # report.md = 写入竞争 (开放臂族并发后必须锁上)
+        with flock_exclusive(os.path.join(output_dir,
+                                          ".report_refresh.lock")):
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
         if r.returncode == 0:
             tail = [ln for ln in (r.stdout or "").strip().splitlines()
                     if ln.strip()]
@@ -538,6 +554,122 @@ def _validate_node_count(n: int, ctx: str) -> None:
             f"(AdamW reduce_scatter assert)")
 
 
+# ── validation-fleet node budget (d28 臂族在飞节点上限, 2026-09-23 裁决) ──
+# 单位 = 节点 (与搜索侧 REMOTE_MAX_SEARCH_NODES 对称的阶段词对; 两阶段单任务
+# 节点数不同 (搜索 1 / 验证 8) 恰是必须统一成节点的理由 — 节点是唯一公共
+# 资源分母, 预算→作业数换算在工具内部完成, 用户只表达"这个阶段允许占多少
+# 节点")。ModelArts 网关无配额查询 API (free_job_slots -> None) → 自管注册表
+# 是唯一可用机制, 也正是想要的语义 (自律上限, 非池容量反射)。
+
+FLEET_DIRNAME = ".validation_fleet"
+FLEET_LOCK = ".validation_fleet.lock"
+FLEET_COUNTABLE_MIN_NODES = 2
+# ↑ 只计 ≥2 节点的训练臂; 1 节点作业 (base 锚点等 eval-only) 入册可见但
+#   免计 — 1 与 8 节点不同类不可比 (用户裁决 2026-09-23)。
+
+
+@contextmanager
+def flock_exclusive(path: str):
+    """进程间互斥 (臂族注册表 / report 刷新共用; 与 .random_arm.lock 同款)."""
+    fh = open(path, "w")
+    fcntl.flock(fh, fcntl.LOCK_EX)
+    try:
+        yield
+    finally:
+        fcntl.flock(fh, fcntl.LOCK_UN)
+        fh.close()
+
+
+def _pid_alive(pid) -> bool:
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def fleet_sweep(output_dir: str) -> List[dict]:
+    """读取在飞条目; 进程已死的陈旧条目就地清扫 — dispatch 被杀 = 该臂
+    脱离记账 (远程作业仍在跑, 但注册表只记活进程; 下次准入自动回收)。"""
+    d = os.path.join(output_dir, FLEET_DIRNAME)
+    if not os.path.isdir(d):
+        return []
+    out = []
+    for name in sorted(os.listdir(d)):
+        if not name.endswith(".json"):
+            continue
+        p = os.path.join(d, name)
+        try:
+            with open(p) as f:
+                e = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if not _pid_alive(e.get("pid")):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+            continue
+        out.append(e)
+    return out
+
+
+def fleet_countable_nodes(entries: List[dict]) -> Tuple[int, str]:
+    """在飞可计节点和 + 人读清单 (含免计标注)。"""
+    used = sum(int(e.get("nodes") or 0) for e in entries
+               if int(e.get("nodes") or 0) >= FLEET_COUNTABLE_MIN_NODES)
+    listing = ", ".join(
+        f"{e.get('arm')}={e.get('nodes')}n"
+        + ("" if int(e.get("nodes") or 0) >= FLEET_COUNTABLE_MIN_NODES
+           else "(免计)")
+        for e in entries) or "空"
+    return used, listing
+
+
+def fleet_register(output_dir: str, arm: str, nodes: int,
+                   pid: Optional[int] = None) -> None:
+    d = os.path.join(output_dir, FLEET_DIRNAME)
+    os.makedirs(d, exist_ok=True)
+    entry = {"arm": arm, "nodes": int(nodes),
+             "pid": int(pid if pid is not None else os.getpid()),
+             "ts": time.strftime("%Y-%m-%d %H:%M:%S")}
+    with open(os.path.join(d, f"{arm}.json"), "w") as f:
+        json.dump(entry, f)
+
+
+def fleet_deregister(output_dir: str, arm: str) -> None:
+    try:
+        os.remove(os.path.join(output_dir, FLEET_DIRNAME, f"{arm}.json"))
+    except OSError:
+        pass
+
+
+def fleet_admit(output_dir: str, arm: str, nodes: int, cap: int,
+                poll_s: float, log=print) -> float:
+    """臂族节点预算准入: 超限自动排队 (每 poll_s 轮询注册表, 先到先得无
+    FIFO, Ctrl+C 干净退出 — 未注册无需清理)。返回排队耗时 (秒)。"""
+    my_count = int(nodes) if int(nodes) >= FLEET_COUNTABLE_MIN_NODES else 0
+    t0 = time.time()
+    while True:
+        with flock_exclusive(os.path.join(output_dir, FLEET_LOCK)):
+            entries = fleet_sweep(output_dir)
+            used, listing = fleet_countable_nodes(entries)
+            if my_count + used <= cap:
+                fleet_register(output_dir, arm, nodes)
+                if my_count:
+                    log(f"  [{arm}] fleet admit: +{my_count} nodes "
+                        f"(在飞 {used + my_count}/{cap}: {listing}, "
+                        f"{arm}={nodes}n)")
+                else:
+                    log(f"  [{arm}] fleet admit: {nodes}n 作业免计 "
+                        f"(在飞 {used}/{cap}: {listing})")
+                return time.time() - t0
+        log(f"  [{arm}] fleet 满: 在飞 {used}/{cap} nodes ({listing}) — "
+            f"已等 {(time.time() - t0) / 60:.0f}m, {poll_s:.0f}s 后重试 "
+            f"(Ctrl+C 退出)", flush=True)
+        time.sleep(poll_s)
+
+
 def main() -> int:
     p = argparse.ArgumentParser(
         description="dispatch a d28 target arm (or base anchor) as a remote job")
@@ -584,6 +716,15 @@ def main() -> int:
                    help="random arm: max minutes to wait for the cluster "
                          "cache + balanced profile (default 120)")
     p.add_argument("--cluster-poll-s", type=float, default=60.0)
+    p.add_argument("--max-validation-nodes", type=int, default=None,
+                   help="validation-fleet node budget: sum of in-flight "
+                        "multi-node arm nodes (default: "
+                        "$REMOTE_MAX_VALIDATION_NODES or 16 = 2 arms x 8 "
+                        "nodes; 1-node jobs like base_eval_check are "
+                        "registered but exempt — different class). Over "
+                        "budget -> queue automatically (no FIFO)")
+    p.add_argument("--queue-poll-s", type=float, default=60.0,
+                   help="fleet queue poll interval in seconds (default 60)")
     args = p.parse_args()
 
     # Custom arms (docs/reuse_design.md §4.4): any name beyond the three
@@ -661,6 +802,14 @@ def main() -> int:
         print(f"  [{args.arm}] multi-node arm: node_count={node_count} "
               f"(ws={node_count * 8}), load_optimizer={load_optimizer}, "
               f"timeout {job_timeout_h:.0f}h")
+
+    # validation-fleet node budget (CLI > env > 16; 与搜索侧
+    # REMOTE_MAX_SEARCH_NODES 对称的阶段词对 — 见函数区注释)
+    max_validation_nodes = (args.max_validation_nodes
+                            if args.max_validation_nodes is not None
+                            else int(os.environ.get(
+                                "REMOTE_MAX_VALIDATION_NODES") or 0)
+                            or 16)
 
     # ── per-arm mutex + early exits ──
     os.makedirs(output_dir, exist_ok=True)
@@ -1015,6 +1164,14 @@ def main() -> int:
         obs.delete(uri)
     obs.upload_bytes(spec.to_json().encode("utf-8"), spec_uri)
     print(f"  [{arm}] spec -> {spec_uri}")
+
+    # ── validation-fleet admission (节点预算, 超限自动排队) ──
+    # 条目随进程存活 (atexit 注销 — 成败两路都被覆盖; 被杀 = 下次准入清扫)
+    queue_wait = fleet_admit(output_dir, arm, node_count,
+                             max_validation_nodes, args.queue_poll_s)
+    if queue_wait > 60.0:
+        print(f"  [{arm}] fleet 排队 {queue_wait / 60:.0f}m 后获准")
+    atexit.register(fleet_deregister, output_dir, arm)
 
     # ── submit + wait ──
     worker_argv = [remote.container_python, remote.worker_path,
