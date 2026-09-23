@@ -358,9 +358,9 @@ def main():
                 env["REMOTE_FLAVOR"] != rc.flavor:
             mism.append(f"flavor: env={env['REMOTE_FLAVOR']} "
                         f"rc={rc.flavor}")
-        if env.get("REMOTE_MAX_JOBS") and \
-                int(env["REMOTE_MAX_JOBS"]) != rc.max_concurrent_jobs:
-            mism.append(f"max_jobs: env={env['REMOTE_MAX_JOBS']} "
+        if env.get("REMOTE_MAX_SEARCH_NODES") and \
+                int(env["REMOTE_MAX_SEARCH_NODES"]) != rc.max_concurrent_jobs:
+            mism.append(f"max_jobs: env={env['REMOTE_MAX_SEARCH_NODES']} "
                         f"rc={rc.max_concurrent_jobs}")
         if mism:
             check(YELLOW, "; ".join(mism),

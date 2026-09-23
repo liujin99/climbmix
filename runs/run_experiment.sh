@@ -60,7 +60,7 @@ K_ENHANCED="${K_ENHANCED:-15}"         # 池聚类数
 ADAPTIVE_CONFIGS="${ADAPTIVE_CONFIGS:-1}"          # 自适应波预算 (生产开)
 ADAPTIVE_COMPACT="${ADAPTIVE_COMPACT:-1}"          # 紧凑画像 (时间盒; 进指纹)
 NPU_PER_EXP="${NPU_PER_EXP:-8}"         # 每 d20 实验卡数 k (全程固定)
-REMOTE_MAX_JOBS="${REMOTE_MAX_JOBS:-10}"           # 远端在飞上限
+REMOTE_MAX_SEARCH_NODES="${REMOTE_MAX_SEARCH_NODES:-10}"  # 搜索阶段节点上限 (d20; 作业恒 1 节点 → 节点数=作业数)
 REMOTE_LOCAL_PARALLEL="${REMOTE_LOCAL_PARALLEL:-1}"  # 本地卡加入舰队 (k=8 整槽)
 REMOTE_OBS_PREFIX="${REMOTE_OBS_PREFIX:-}"         # 留空则自动读 climbmix-ma 配置 (见下)
 TARGET_ARM_NODES="${TARGET_ARM_NODES:-8}"          # 8=prod4 战后形态 (8 节点 ws=64, ~3.4h/臂; 1=单节点 ~10h/臂)
@@ -89,6 +89,12 @@ if [ -n "${PROXY_NUM_ITERATIONS:-}" ]; then
     echo "  unset it and set the budget instead (PROXY_TARGET_TOKENS=640M → 610 steps @ 1,048,576)."
     exit 1
 fi
+if [ -n "${REMOTE_MAX_JOBS:-}" ]; then
+    echo "✗ REMOTE_MAX_JOBS is no longer a knob — renamed REMOTE_MAX_SEARCH_NODES (2026-09-23)."
+    echo "  old-name interception: a recalled command line must fail loudly, not silently fall back to the default."
+    echo "  set REMOTE_MAX_SEARCH_NODES=13 (node budget; search jobs are 1-node each → nodes == jobs)."
+    exit 1
+fi
 
 # ─── OBS 前缀自动配置 (真实内网路径不进 public repo) ────────────────
 # 优先级: env 显式 > climbmix-ma 配置的 obs_prod_base (自动拼 /<EXP_NAME>)
@@ -112,7 +118,7 @@ fi
 
 # 子进程 (dispatch / 臂引擎) 只见已 export 的变量:
 export EXP_NAME CONFIGS_PER_ITER K_ENHANCED ADAPTIVE_CONFIGS ADAPTIVE_COMPACT \
-       NPU_PER_EXP REMOTE_MAX_JOBS REMOTE_LOCAL_PARALLEL REMOTE_OBS_PREFIX \
+       NPU_PER_EXP REMOTE_MAX_SEARCH_NODES REMOTE_LOCAL_PARALLEL REMOTE_OBS_PREFIX \
        TARGET_ARM_NODES \
        REMOTE_BACKEND_MODULE REMOTE_PLATFORM_CONFIG REMOTE_IMAGE \
        REMOTE_FLAVOR REMOTE_POOL_NAME
@@ -329,7 +335,7 @@ COMPLETION_MARKERS=(".done_eval_climb" ".done_eval_random")
 #     docs/parallel_k_selection.md); 想让本地卡出力需 NPU_PER_EXP <= NUM_NPU
 #   - 动态提交 (池容量波动): 提交被配额/频控拒绝时指数退避重试,
 #     配置不因瞬时拒绝烧毁; 一个迭代的作业随配额释放分多轮落地。
-#     在飞上限 = REMOTE_MAX_JOBS, 池变大时调高即可; 本地混料/上传并发
+#     在飞上限 = REMOTE_MAX_SEARCH_NODES, 池变大时调高即可; 本地混料/上传并发
 #     由 REMOTE_MAX_PREP 限流, 不随作业上限放大。
 # 平台后端在独立的 (私有) 适配仓实现, 经 REMOTE_BACKEND_MODULE 注册 —
 # 见 docs/remote_setup.md "Writing a backend"。
@@ -347,7 +353,6 @@ REMOTE_IMAGE="${REMOTE_IMAGE:-}"                   # 镜像 URI (可留空=用�
 REMOTE_FLAVOR="${REMOTE_FLAVOR:-}"                 # 规格名 (可留空=用平台配置 default_flavor)
 REMOTE_POOL_NAME="${REMOTE_POOL_NAME:-}"          # 专属池 (可空=用配置文件 pool_id)
 REMOTE_NPU_PER_JOB="${REMOTE_NPU_PER_JOB:-$NPU_PER_EXP}"  # 每作业卡数 (单 exp 不跨节点)
-REMOTE_MAX_JOBS="${REMOTE_MAX_JOBS:-14}"          # 在飞作业上限 (动态提交的上界)
 REMOTE_SUBMIT_RETRY_H="${REMOTE_SUBMIT_RETRY_H:-24}" # 提交被拒重试时限 (小时)
 REMOTE_MAX_PREP="${REMOTE_MAX_PREP:-8}"           # 本地混料/上传并发 (2026-09-22 用户定 8; 防 1.5G/exp 的 prep 洪峰)
 REMOTE_STORAGE_KIND="${REMOTE_STORAGE_KIND:-moxing}"  # 容器内存储后端
@@ -543,7 +548,7 @@ if [ "$REMOTE_ENABLED" = "1" ]; then
     # Export for the config-gen heredoc below (namespaced, harmless).
     export REMOTE_OBS_PREFIX REMOTE_BACKEND REMOTE_BACKEND_MODULE \
            REMOTE_PLATFORM_CONFIG REMOTE_IMAGE REMOTE_FLAVOR \
-           REMOTE_POOL_NAME REMOTE_NPU_PER_JOB REMOTE_MAX_JOBS \
+           REMOTE_POOL_NAME REMOTE_NPU_PER_JOB REMOTE_MAX_SEARCH_NODES \
            REMOTE_SUBMIT_RETRY_H REMOTE_MAX_PREP REMOTE_LOCAL_PARALLEL \
            REMOTE_STORAGE_KIND REMOTE_STORAGE_ROOT REMOTE_JOB_TIMEOUT_H \
            REMOTE_QUEUE_TIMEOUT_H REMOTE_QUEUE_RETRY REMOTE_PENDING_GRACE_MIN \
@@ -560,7 +565,7 @@ cfg = {
     "flavor": flavor,
     "pool_name": os.environ["REMOTE_POOL_NAME"],
     "npu_per_job": int(os.environ["REMOTE_NPU_PER_JOB"]),
-    "max_concurrent_jobs": int(os.environ["REMOTE_MAX_JOBS"]),
+    "max_concurrent_jobs": int(os.environ["REMOTE_MAX_SEARCH_NODES"]),
     "submit_retry_timeout_s": float(os.environ["REMOTE_SUBMIT_RETRY_H"]) * 3600.0,
     "max_prep_parallel": int(os.environ["REMOTE_MAX_PREP"]),
     "local_parallel": os.environ["REMOTE_LOCAL_PARALLEL"] == "1",
@@ -601,16 +606,16 @@ if os.environ["REMOTE_BACKEND"] != "mock" and os.environ["REMOTE_STORAGE_KIND"] 
 with open(cfg_path, "w") as f:
     json.dump(cfg, f, indent=2)
 PYEOF
-    echo "  Remote fleet: ${REMOTE_MAX_JOBS} jobs x ${REMOTE_NPU_PER_JOB} NPU (backend=${REMOTE_BACKEND}, prefix=${REMOTE_OBS_PREFIX})"
+    echo "  Remote fleet: ${REMOTE_MAX_SEARCH_NODES} jobs x ${REMOTE_NPU_PER_JOB} NPU (backend=${REMOTE_BACKEND}, prefix=${REMOTE_OBS_PREFIX})"
     if [ "$REMOTE_LOCAL_PARALLEL" = "1" ]; then
         if [ "$NPU_PER_EXP" -lt 1 ] || [ "$NPU_PER_EXP" -gt "$NUM_NPU" ] || [ $((NUM_NPU % NPU_PER_EXP)) -ne 0 ]; then
             echo "  ⚠ REMOTE_LOCAL_PARALLEL=1 but NPU_PER_EXP=${NPU_PER_EXP} does not slice NUM_NPU=${NUM_NPU}: master-node NPUs will IDLE (need a divisor of NUM_NPU, <= NUM_NPU)"
         elif [ "$REMOTE_NPU_PER_JOB" != "$NPU_PER_EXP" ]; then
             echo "  ⚠ remote k (REMOTE_NPU_PER_JOB=$REMOTE_NPU_PER_JOB) != local k (NPU_PER_EXP=$NPU_PER_EXP): k should stay fleet-wide fixed for score comparability"
         elif [ "$NPU_PER_EXP" -eq "$NUM_NPU" ]; then
-            echo "  Hybrid fleet: local 1 x ${NPU_PER_EXP}-NPU whole-node slot (serial full-card path) + ${REMOTE_MAX_JOBS} remote jobs x ${REMOTE_NPU_PER_JOB} NPU"
+            echo "  Hybrid fleet: local 1 x ${NPU_PER_EXP}-NPU whole-node slot (serial full-card path) + ${REMOTE_MAX_SEARCH_NODES} remote jobs x ${REMOTE_NPU_PER_JOB} NPU"
         else
-            echo "  Hybrid fleet: local $((NUM_NPU / NPU_PER_EXP)) x ${NPU_PER_EXP} NPU + ${REMOTE_MAX_JOBS} remote jobs x ${REMOTE_NPU_PER_JOB} NPU"
+            echo "  Hybrid fleet: local $((NUM_NPU / NPU_PER_EXP)) x ${NPU_PER_EXP} NPU + ${REMOTE_MAX_SEARCH_NODES} remote jobs x ${REMOTE_NPU_PER_JOB} NPU"
         fi
     fi
 fi

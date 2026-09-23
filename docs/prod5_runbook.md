@@ -174,8 +174,9 @@ launch_prod5.sh 已删；其机器对照价值降级为只读工具
 REMOTE_MAX_PREP=8 / REMOTE_JOB_TIMEOUT_H=**0（不限制**——隐藏运行时天花板
 是雷，楔死交监控检测；DISPATCH_RANDOM_ARM 旋钮已删）。**本轮显式 5 个键**
 （4 个环境身份键故意保持本地安全默认——裸跑引擎不会误发真集群；
-REMOTE_OBS_PREFIX 留空自动拼 `{obs_prod_base}/prod5`；REMOTE_MAX_JOBS
-默认 10 = 留卡给同池租户）：
+REMOTE_OBS_PREFIX 留空自动拼 `{obs_prod_base}/prod5`；REMOTE_MAX_SEARCH_NODES
+默认 10 = 搜索阶段节点上限，留卡给同池租户——作业恒 1 节点 → 节点数=作业数；
+更名自 REMOTE_MAX_JOBS，旧名被发射最早期 guard fail-loud 拦截）：
 
 ```
 cd /home/ma-user/work/climbmix
@@ -242,7 +243,8 @@ python3 scripts/wipe_obs_exps.py result/prod5_current --exp-name prod5 --apply
 # 2) 清本地（引擎自建目录；聚类缓存由池级缓存自动续，见 §4 要点）
 rm -rf result/prod5_current
 # 3) 干净 shell 重发——先确认无残留 env 覆盖（输出必须为空，有输出=开新终端）
-env | grep -E "^(CONFIGS_PER_ITER|PROXY_TARGET_TOKENS|TARGET_TOKENS|TARGET_STEPS|TARGET_ARM_NODES|REMOTE_MAX_PREP|REMOTE_JOB_TIMEOUT_H|REMOTE_MAX_JOBS|EXP_NAME|OUTPUT_DIR)="
+env | grep -E "^(CONFIGS_PER_ITER|PROXY_TARGET_TOKENS|TARGET_TOKENS|TARGET_STEPS|TARGET_ARM_NODES|REMOTE_MAX_PREP|REMOTE_JOB_TIMEOUT_H|REMOTE_MAX_SEARCH_NODES|REMOTE_MAX_VALIDATION_NODES|REMOTE_MAX_JOBS|EXP_NAME|OUTPUT_DIR)="
+# ↑ 必须零输出（含旧名 REMOTE_MAX_JOBS 双查）——有输出 = shell 脏，开新终端
 # 4) §4 发射线重发（新开或已确认干净的终端）+ §4.4 对账复核
 ```
 
