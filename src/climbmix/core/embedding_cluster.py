@@ -178,6 +178,83 @@ def _flush_device_cache(device: str, tag: str) -> None:
         print(f"{tag} Embedding model released, NPU cache returned to driver")
 
 
+def _verify_sharded_cache(cache, tag: str) -> bool:
+    """Fast integrity check for a merge-published sharded cache.
+
+    embed_merge validates every block (NaN/Inf/norms) before publishing
+    the manifest and records each block's sha256 + byte size there —
+    that validation is the content guarantee; this check verifies the
+    files were not touched since. Default (stat): one stat per block +
+    a deterministic 2M-row sample validation — ~1 min instead of the
+    ~55-min single-thread full scan that every process start re-paid.
+
+    CLIMBMIX_EMB_VERIFY=sha additionally re-hashes every block
+    (parallel, catches same-size bit flips, ~minutes); =full forces
+    the legacy full-content scan. A size/hash mismatch names the block
+    and stops (re-merge is the cheap fix — OBS unit partials are
+    kept); sample anomalies fall back to the full scan, preserving the
+    existing corruption FATAL path.
+
+    Returns True when trusted (caller skips the full scan); False when
+    the manifest predates hash fields (legacy cache) or the sample
+    flagged anomalies — the caller then runs the full scan.
+    """
+    blocks = cache.manifest["blocks"]
+    if not all("sha256" in b and "bytes" in b for b in blocks):
+        return False
+    mode = (os.environ.get("CLIMBMIX_EMB_VERIFY", "stat").strip().lower()
+            or "stat")
+    if mode not in ("stat", "sha", "full"):
+        raise SystemExit(f"{tag} FATAL: CLIMBMIX_EMB_VERIFY={mode!r} "
+                         "(want stat|sha|full)")
+    if mode == "full":
+        return False
+    for b in blocks:
+        path = os.path.join(cache.cache_dir, b["file"])
+        actual = os.path.getsize(path) if os.path.exists(path) else -1
+        if actual != int(b["bytes"]):
+            raise SystemExit(
+                f"{tag} FATAL: block {b['file']} is {actual:,} bytes, "
+                f"manifest says {int(b['bytes']):,} — modified/truncated "
+                "since merge; re-run scripts/embed_merge.py (OBS unit "
+                "partials are kept) or delete the key dir to re-embed")
+    if mode == "sha":
+        import hashlib
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _sha(p):
+            h = hashlib.sha256()
+            with open(p, "rb") as f:
+                for buf in iter(lambda: f.read(1 << 22), b""):
+                    h.update(buf)
+            return h.hexdigest()
+
+        with ThreadPoolExecutor(max_workers=min(24, len(blocks))) as ex:
+            paths = [os.path.join(cache.cache_dir, b["file"])
+                     for b in blocks]
+            for b, got in zip(blocks, ex.map(_sha, paths)):
+                if got != b["sha256"]:
+                    raise SystemExit(
+                        f"{tag} FATAL: block {b['file']} sha256 mismatch "
+                        f"({got[:12]}... != {b['sha256'][:12]}...) — "
+                        "bit-level corruption; re-run scripts/embed_merge.py")
+        print(f"{tag} Verify: sha256 OK on all {len(blocks)} blocks")
+    n_sample = min(2_000_000, cache.shape[0])
+    sample = cache.gather_train_sample(n_sample, 42)
+    counts = _validate_embeddings(sample, f"{tag} Verify(sample)",
+                                  fail_on_nan=False)
+    n_anom = (counts["nan"] + counts["inf"] + counts["zero"]
+              + counts["off_norm"])
+    if n_anom:
+        print(f"{tag} Verify: sample found {n_anom} anomalous rows — "
+              "falling back to the full-content scan")
+        return False
+    print(f"{tag} Verify: fast-trusted ({len(blocks)} blocks size-checked"
+          f"{', sha256-checked' if mode == 'sha' else ''}, "
+          f"{n_sample:,}-row sample clean)")
+    return True
+
+
 def _load_cached_embeddings(
     cache_path: Optional[str],
     expected_n: Optional[int],
@@ -219,7 +296,8 @@ def _load_cached_embeddings(
         print(f"{tag} Loading cached embeddings from: {cache_path} "
               f"(sharded, {cache.block_count} blocks)")
         print(f"{tag} Loaded {cache.shape[0]:,} embeddings, dim={cache.shape[1]}")
-        _validate_embeddings(cache, tag, fail_on_nan=False)
+        if not _verify_sharded_cache(cache, tag):
+            _validate_embeddings(cache, tag, fail_on_nan=False)
         return cache
     if cache_path.endswith(".npy"):
         embeddings = np.load(cache_path, mmap_mode="r")
@@ -464,6 +542,13 @@ def _validate_embeddings(
     rows_per_chunk = max(1, min(65536, (1 << 28) // max(1, dim)))
     stride = max(1, n // 2_000_000)  # norm percentile subsample cap
 
+    # progress at quarter steps — a full-pool scan is ~55 min single
+    # thread and was completely silent before (looked like a hang)
+    total_chunks = sum((v.shape[0] + rows_per_chunk - 1) // rows_per_chunk
+                       for _, v in views)
+    done_chunks = 0
+    done_rows = 0
+
     counts = {"nan": 0, "inf": 0, "zero": 0, "off_norm": 0}
     sq_sample: List[np.ndarray] = []
     starts = np.array([r[0] for r in ranges], dtype=np.int64) if ranges else None
@@ -498,6 +583,13 @@ def _validate_embeddings(
                 rows = np.arange(0, c.shape[0], stride)
                 if rows.size:
                     sq_sample.append(sq[rows])
+
+            done_chunks += 1
+            done_rows += c.shape[0]
+            if total_chunks > 4 and done_chunks % max(1, total_chunks // 4) == 0:
+                print(f"{tag} Validate: {done_rows:,}/{n:,} rows "
+                      f"({100.0 * done_chunks / total_chunks:.0f}%)",
+                      flush=True)
 
     n_bad = counts["nan"] + counts["inf"]
     n_anom = n_bad + counts["zero"] + counts["off_norm"]

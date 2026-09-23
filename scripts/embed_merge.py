@@ -297,7 +297,11 @@ def _fetch_unit(unit_id, man):
 
 def _validate_block(task):
     """One block: mmap + full finite/shape scan (chunked views inside
-    _validate_embeddings). task = (key_dir, block_meta, ranges, emb_dim)."""
+    _validate_embeddings), then the file's sha256 + byte size — the
+    trust root the loader's fast-verify checks against (see
+    _verify_sharded_cache in embedding_cluster). task = (key_dir,
+    block_meta, ranges, emb_dim). Returns (unit_id, sha256, nbytes)."""
+    import hashlib
     import numpy as np
     from climbmix.core.embedding_cluster import _validate_embeddings
     key_dir, b, ranges, emb_dim = task
@@ -309,7 +313,12 @@ def _validate_block(task):
             f"!= ({b['rows']}, {emb_dim})")
     _validate_embeddings(block, f"[Embed-Merge {b['unit_id']}]",
                          ranges=ranges)
-    return b["unit_id"]
+    del block
+    h = hashlib.sha256()
+    with open(block_path, "rb") as f:
+        for buf in iter(lambda: f.read(1 << 22), b""):
+            h.update(buf)
+    return b["unit_id"], h.hexdigest(), os.path.getsize(block_path)
 
 
 def load_and_check_units(ed, obs, shard_infos, args, done_units):
@@ -693,12 +702,15 @@ def main() -> int:
                              initializer=_merge_worker_init,
                              initargs=(cfg,))
     vfuts = {}
+    vhash = {}
     try:
         for t in vtasks:
             vfuts[ex.submit(_validate_block, t)] = t[1]["unit_id"]
         vdone = 0
         for fut in as_completed(vfuts):
-            print(f"[merge] {fut.result()} validated "
+            uid, sha, nbytes = fut.result()
+            vhash[uid] = (sha, nbytes)
+            print(f"[merge] {uid} validated "
                   f"({vdone + 1}/{len(vfuts)})", flush=True)
             vdone += 1
     except BaseException as e:
@@ -712,6 +724,11 @@ def main() -> int:
         print(f"{e}", file=sys.stderr)
         return 1
     ex.shutdown(wait=True)
+
+    # per-block sha256+bytes: the loader's fast-verify trust root
+    # (stat/sample instead of a full-pool rescan on every process start)
+    for b in blocks_meta:
+        b["sha256"], b["bytes"] = vhash[b["unit_id"]]
 
     manifest = {
         "format": "sharded-v1",

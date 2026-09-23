@@ -224,6 +224,17 @@ bash runs/run_experiment.sh             # 干跑门（LAUNCH 默认 1, 加 LAUNC
   声明带星号：新代码 discovery 路径没跑到）；stage-gate 的 cache-seed
   豁免保种子存活。当日教训（⑬k 根因）：池缓存本地层在 09-04 合并后被
   磁盘清理清掉、恢复动作未补做、种子谱系掩盖
+- **加载时快速校验（2026-09-23，⑬o）**：merge 发布 manifest 时逐块捎带
+  sha256+bytes（验证同趟，零额外读）→ 引擎加载分片缓存默认走
+  **stat+样本快路径**（~1min，代替曾白烧 ~55min 的全池单线程重扫，且
+  旧路径补了 25% 步进进度打印——全量扫描永不静默）。`CLIMBMIX_EMB_VERIFY
+  =sha`（并行重哈希，抓同尺寸位翻转）/`=full`（强制旧全扫）；size/sha
+  不符 → fail-loud 点名 block 指路重 merge。存量无哈希缓存跑一次
+  `python3 scripts/backfill_block_hashes.py cache/embeddings/<key>`
+  （纯本地 ~3-5min，幂等）即启用快路径。**本地 443GB = 可再生暂存**
+  （用户设计指令：本地盘只放可再生数据，跑完即清；OBS units 耐久层
+  40min 重 merge 再生）——prod5 收官后 `rm -rf` 该 key 目录，
+  kmeans_K*.npz 在同目录旁不受影响
 - **重发射注意**：`_current` 已有指纹且其间代码/参数变过 → 引擎归档整个
   目录后空目录重来 → 先 `rm -rf result/prod5_current` 再发
 
