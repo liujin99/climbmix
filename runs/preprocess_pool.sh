@@ -128,6 +128,10 @@ if not obs.stat(f"{root}/embed_units/u0000"):
              f"embed_dispatch (waves; 池增长场景 = 对新分片补波)")
 
 # ── 5. merge (耐久层 → 性能层; IO-bound ~1-2h, 按块可续) ──
+print("[safe]   写入面 = 仅 <key>/ 的新块 + manifest（及 merge 自身 scratch/"
+      "崩溃残渣）；不删其他 key 目录、不删 OBS units（耐久层只读——代码无"
+      " obs.delete）、不碰 kmeans_*.npz；key 下已有有效缓存时 merge 直接"
+      " 'already present' 拒绝写入")
 cmd = [sys.executable, os.path.join("scripts", "embed_merge.py"),
        "--remote-config", rc_path,
        "--shard-info", shard_info_path,
