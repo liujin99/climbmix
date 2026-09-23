@@ -204,6 +204,15 @@ bash runs/run_experiment.sh             # 干跑门（LAUNCH 默认 1, 加 LAUNC
   / 13h 单节点，`--job-timeout-h 0` 可显式去掉）
 
 要点：
+- **池嵌入的供给/消费分层（架构注记）**：全池嵌入（116M docs）的**供给**与
+  **消费**是分离的两层——供给 = `embed_dispatch.py`（集群 waves，产出
+  bank 到 OBS `{root}/embed_units/`，~475GB 耐久层，设计上永不清删）+
+  `embed_merge.py`（拉回本地组装成 `cache/embeddings/<key>/` 分片缓存，
+  一次性 ~1-2h）；消费 = run_experiment Stage 1 读 `<key>/`（设计稳态：
+  零嵌入工作）。引擎的**内联嵌入只是 fallback**（本机 8 NPU 流式嵌入，
+  小池/采样/smoke 可用；全池 ≈ 40h，勿踩——09-22 smoke 孤儿归档事故与
+  2026-09-23 prod5 两次踩中）。本地层被磁盘清理清掉后的正确恢复 =
+  重跑 merge（不是让引擎 fallback）
 - **发射姿态（2026-09-23 用户裁决：未备好新代码不发射）**：prod5 的使命 =
   新代码从头到尾全新验证 → **标准路径 = 池级缓存复热后无种子发射**。
   一次性 `embed_merge` 从 OBS embed_units 合到本地（~443GB，~1-2h）→
