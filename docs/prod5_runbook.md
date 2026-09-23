@@ -203,10 +203,16 @@ bash runs/run_experiment.sh             # 干跑门（LAUNCH 默认 1, 加 LAUNC
   / 13h 单节点，`--job-timeout-h 0` 可显式去掉）
 
 要点：
-- **缓存种子**：3 个聚类缓存文件已在 result/prod5_current（此前干跑拷入）；
-  未来轮次 = `cp result/<源轮>_current/{cluster_cache.npz,cluster_info_cache.json,balanced_profile.json} result/<新轮>_current/`——stage-gate 的 cache-seed 豁免保它存活
+- **聚类缓存（无需种子拷贝，2026-09-23 裁决）**：池级缓存（embedding +
+  K-means，内容键控 `cache/embeddings/<sha256>`）跨轮自动命中——run 目录
+  **不必预放种子**；`cluster_cache.npz` 由本轮 merge 段确定性重生成
+  （merge 路径代码未漂移时与源轮逐位一致），各轮簇语义自含（natural =
+  逐文档等概率抽样的簇占比等价实现；报告/recipe 全轮内自洽）。冷启动
+  日志预期形态：`Pool-level embedding/kmeans cache` + merge 实跑 +
+  `Cached → cluster_cache.npz`（而非 "Loading cached clusters"）。stage-gate
+  的 cache-seed 豁免保留（兼容手工预放场景）
 - **重发射注意**：`_current` 已有指纹且其间代码/参数变过 → 引擎归档整个
-  目录（含种子）后空目录重来 → 先 `rm -rf result/prod5_current` 再发
+  目录后空目录重来 → 先 `rm -rf result/prod5_current` 再发（引擎自建目录）
 
 **4.4 发射后 1 分钟对账（机器对照，只读）**：引擎落 launch_env.json +
 remote_config.json 后立刻 diff 源轮，预期外的偏离趁早发现：
@@ -233,10 +239,8 @@ pkill -f run_experiment.sh
 #    默认 dry-run，清单确认后 --apply）
 python3 scripts/wipe_obs_exps.py result/prod5_current --exp-name prod5
 python3 scripts/wipe_obs_exps.py result/prod5_current --exp-name prod5 --apply
-# 2) 清本地 + 种子重拷
+# 2) 清本地（引擎自建目录；聚类缓存由池级缓存自动续，见 §4 要点）
 rm -rf result/prod5_current
-mkdir -p result/prod5_current
-cp result/prod4_current/cluster_cache.npz result/prod4_current/cluster_info_cache.json result/prod4_current/balanced_profile.json result/prod5_current/
 # 3) 干净 shell 重发——先确认无残留 env 覆盖（输出必须为空，有输出=开新终端）
 env | grep -E "^(CONFIGS_PER_ITER|PROXY_TARGET_TOKENS|TARGET_TOKENS|TARGET_STEPS|TARGET_ARM_NODES|REMOTE_MAX_PREP|REMOTE_JOB_TIMEOUT_H|REMOTE_MAX_JOBS|EXP_NAME|OUTPUT_DIR)="
 # 4) §4 发射线重发（新开或已确认干净的终端）+ §4.4 对账复核
