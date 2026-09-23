@@ -204,9 +204,18 @@ bash runs/run_experiment.sh             # 干跑门（LAUNCH 默认 1, 加 LAUNC
   / 13h 单节点，`--job-timeout-h 0` 可显式去掉）
 
 要点：
-- **缓存种子（标准路径）**：发射前 `cp result/<源轮>_current/{cluster_cache.npz,cluster_info_cache.json,balanced_profile.json} result/<新轮>_current/`——cluster cache 命中即整个绕过 Stage 1。理论上"不拷种子"（⑬k，2026-09-23）成立的前提 = 池级 embedding 缓存（`cache/embeddings/<sha256>`）是热的；**当日实跑推翻**：当前 key 下 0/1000 分片 → 全池 116M docs 重嵌（ETA 数十小时，用户 Ctrl+C），根因待查（key 输入漂移 vs 从未本地合并 vs 被清理）。池缓存复热之前，种子拷贝 = 唯一快路径；stage-gate 的 cache-seed 豁免保它存活
+- **发射姿态（2026-09-23 用户裁决：未备好新代码不发射）**：prod5 的使命 =
+  新代码从头到尾全新验证 → **标准路径 = 池级缓存复热后无种子发射**。
+  一次性 `embed_merge` 从 OBS embed_units 合到本地（~443GB，~1-2h）→
+  之后 Stage 1 走新代码完整 discovery：分片缓存直读（discovery.py:38，
+  manifest 优先级高于 npz）→ kmeans 确定性重跑（产 kmeans_K*.npz）→
+  merge 段 → 本轮自产 cluster_cache.npz。**种子拷贝 = 池缓存冷时的
+  fallback 快路径**（cluster cache 命中整个绕过 Stage 1——会给"全新验证"
+  声明带星号：新代码 discovery 路径没跑到）；stage-gate 的 cache-seed
+  豁免保种子存活。当日教训（⑬k 根因）：池缓存本地层在 09-04 合并后被
+  磁盘清理清掉、恢复动作未补做、种子谱系掩盖
 - **重发射注意**：`_current` 已有指纹且其间代码/参数变过 → 引擎归档整个
-  目录后空目录重来 → 先 `rm -rf result/prod5_current` 再发（种子重拷）
+  目录后空目录重来 → 先 `rm -rf result/prod5_current` 再发
 
 **4.4 发射后 1 分钟对账（机器对照，只读）**：引擎落 launch_env.json +
 remote_config.json 后立刻 diff 源轮，预期外的偏离趁早发现：
@@ -237,7 +246,8 @@ pkill -f run_experiment.sh
 #    默认 dry-run，清单确认后 --apply）
 python3 scripts/wipe_obs_exps.py result/prod5_current --exp-name prod5
 python3 scripts/wipe_obs_exps.py result/prod5_current --exp-name prod5 --apply
-# 2) 清本地 + 种子重拷（池级 embedding 缓存当前为冷，种子 = 唯一快路径，见 §4 要点）
+# 2) 清本地（发射姿态见 §4 要点：池缓存已复热 → no-seed 直接发；
+#    未复热 → 下面两行种子重拷 = fallback 快路径）
 rm -rf result/prod5_current
 mkdir -p result/prod5_current
 cp result/prod4_current/cluster_cache.npz result/prod4_current/cluster_info_cache.json result/prod4_current/balanced_profile.json result/prod5_current/
