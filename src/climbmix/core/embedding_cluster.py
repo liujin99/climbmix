@@ -963,6 +963,13 @@ def _embed_streaming_worker(worker_id, shard_indices, shard_infos, text_col,
           f"({docs_done/elapsed:.0f} docs/s{nan_msg})", flush=True)
 
 
+# ── full-pool inline-embed guard threshold (两入口设计, 2026-09-23) ──
+# 超过此 docs 数的池, 内联嵌入 (本机 NPU 流式) 是 ~40h 级陷阱 → 拒绝并
+# 指路 preprocess_pool.sh (OBS 耐久层 merge ~1-2h)。小池/采样/smoke 不受
+# 影响; EMBED_INLINE_FULL_POOL=1 = 知情越权。
+_INLINE_EMBED_MAX_DOCS = 2_000_000
+
+
 def embed_texts_streaming(
     metadata_manager,
     model_name: str = "NovaSearch/stella_en_400M_v5",
@@ -987,6 +994,20 @@ def embed_texts_streaming(
         cache_path, getattr(metadata_manager, "num_docs", None), "[Embed-Stream]")
     if cached is not None:
         return cached
+
+    # ── full-pool inline-embed guard (2026-09-23 prod5 实踩后裁决) ──
+    # 缓存 miss + 全池规模 = 本机 ~40h 静默重嵌 (09-22 smoke 孤儿归档
+    # 事故、09-23 prod5 两次踩中)。正确恢复 = OBS 耐久层 merge。
+    _n_docs = int(getattr(metadata_manager, "num_docs", 0) or 0)
+    if (_n_docs > _INLINE_EMBED_MAX_DOCS
+            and not os.environ.get("EMBED_INLINE_FULL_POOL")):
+        raise SystemExit(
+            f"✗ [Embed-Stream] pool cache miss on a full-scale pool "
+            f"({_n_docs:,} docs > {_INLINE_EMBED_MAX_DOCS:,}) — inline "
+            f"embedding is a ~40h grind on the local NPUs. Run "
+            f"`bash runs/preprocess_pool.sh` first (merges the OBS "
+            f"durable tier into the local cache, ~1-2h), or set "
+            f"EMBED_INLINE_FULL_POOL=1 to embed inline anyway.")
 
     actual_device = device
 

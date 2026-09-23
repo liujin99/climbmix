@@ -204,18 +204,19 @@ bash runs/run_experiment.sh             # 干跑门（LAUNCH 默认 1, 加 LAUNC
   / 13h 单节点，`--job-timeout-h 0` 可显式去掉）
 
 要点：
-- **池嵌入的供给/消费分层（架构注记）**：全池嵌入（116M docs）的**供给**与
-  **消费**是分离的两层——供给 = `embed_dispatch.py`（集群 waves，产出
-  bank 到 OBS `{root}/embed_units/`，~475GB 耐久层，设计上永不清删）+
-  `embed_merge.py`（拉回本地组装成 `cache/embeddings/<key>/` 分片缓存，
-  一次性 ~1-2h）；消费 = run_experiment Stage 1 读 `<key>/`（设计稳态：
-  零嵌入工作）。引擎的**内联嵌入只是 fallback**（本机 8 NPU 流式嵌入，
-  小池/采样/smoke 可用；全池 ≈ 40h，勿踩——09-22 smoke 孤儿归档事故与
-  2026-09-23 prod5 两次踩中）。本地层被磁盘清理清掉后的正确恢复 =
-  重跑 merge（不是让引擎 fallback）
+- **池嵌入的两入口设计（2026-09-23 用户裁决：供给/消费分离 + 40h 陷阱
+  封死）**：① `runs/preprocess_pool.sh` = **供给入口**（全幂等：缓存已热
+  秒级退出；冷则磁盘守卫 → 从 OBS 耐久层 `{root}/embed_units/`（waves
+  产出 ~475GB，设计上永不清删）merge 到本地 `cache/embeddings/<key>/`
+  分片缓存，~1-2h → 探针行数对账；`DRY_RUN=1` 预览）；②
+  `run_experiment.sh` = **消费入口**（Stage 1 读 `<key>/`；全池 miss →
+  **fail-loud 指路 preprocess**——内联嵌入守卫
+  `embedding_cluster._INLINE_EMBED_MAX_DOCS=2M`，`EMBED_INLINE_FULL_POOL=1`
+  知情越权；小池/采样/waves worker 不受影响）。历史：09-22 smoke 孤儿
+  归档事故、09-23 prod5 两次踩中 40h fallback 后封死
 - **发射姿态（2026-09-23 用户裁决：未备好新代码不发射）**：prod5 的使命 =
   新代码从头到尾全新验证 → **标准路径 = 池级缓存复热后无种子发射**。
-  一次性 `embed_merge` 从 OBS embed_units 合到本地（~443GB，~1-2h）→
+  供给 = `bash runs/preprocess_pool.sh`（~475GB，~1-2h，幂等）→
   之后 Stage 1 走新代码完整 discovery：分片缓存直读（discovery.py:38，
   manifest 优先级高于 npz）→ kmeans 确定性重跑（产 kmeans_K*.npz）→
   merge 段 → 本轮自产 cluster_cache.npz。**种子拷贝 = 池缓存冷时的
