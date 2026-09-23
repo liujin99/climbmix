@@ -215,7 +215,7 @@ HISTORY_RUN="$HIST_ARM" EXP_NAME=ws_arm LAUNCH=0 DATA_DIR="$TMP/pool" \
     bash runs/run_extend_experiment.sh \
     > "$TMP/ws_arm.log" 2>&1
 check "arm-layer budget mismatch (1B vs 2B) passes with warning" $? "$(tail -3 "$TMP/ws_arm.log")"
-grep -q "⚠ TARGET_TOKENS: 源=1B  当前=2B (臂层" "$TMP/ws_arm.log"
+grep -q "⚠ TARGET_TOKENS: 源=1B  当前=3B (臂层" "$TMP/ws_arm.log"
 check "arm-layer warn names the key and both values" $?
 grep -q "1 个臂层警告" "$TMP/ws_arm.log"
 check "arm warns counted in the summary line" $?
@@ -432,8 +432,10 @@ printf 'arc_easy,0.23,0.2160,2.47\narc_challenge,0.19,0.1760,2.63\nSTEM,,0.1960,
 printf 'arc_easy,0.26,0.2460,2.38\narc_challenge,0.22,0.2060,2.51\nSTEM,,0.2260,2.44\n' > "$TAIL/eval_fixratio_v1.csv"
 auto_cp4_report "$TAIL" > "$TMP/tail_ok.log" 2>&1
 check "auto_cp4_report all-arms exit 0" $? "$(tail -2 "$TMP/tail_ok.log")"
-grep -q "3 arms; ref = random" "$TMP/tail_ok.log"
-check "panorama discovers all 3 arms (ref=random default)" $?
+grep -q "ref 'uniform' not among landed arms — falling back to 'climb'" "$TMP/tail_ok.log"
+check "ref=uniform default announces fallback (no uniform arm)" $?
+grep -q "3 arms; ref = climb" "$TMP/tail_ok.log"
+check "panorama discovers all 3 arms (ref falls back to climb)" $?
 grep -q "ranking:" "$TMP/tail_ok.log"
 check "ranking line present" $?
 grep -q "fixratio_v1" "$TMP/tail_ok.log"
