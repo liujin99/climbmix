@@ -233,8 +233,11 @@ bash runs/run_experiment.sh             # 干跑门（LAUNCH 默认 1, 加 LAUNC
   `python3 scripts/backfill_block_hashes.py cache/embeddings/<key>`
   （纯本地 ~3-5min，幂等）即启用快路径。**本地 443GB = 可再生暂存**
   （用户设计指令：本地盘只放可再生数据，跑完即清；OBS units 耐久层
-  40min 重 merge 再生）——prod5 收官后 `rm -rf` 该 key 目录，
-  kmeans_K*.npz 在同目录旁不受影响
+  40min 重 merge 再生）——收官清理**只删块文件与清单**：
+  `rm -f cache/embeddings/<key>/block_*.npy cache/embeddings/<key>/manifest.json`
+  （**kmeans_K*.npz 存在 key 目录内**——prod5 实测
+  `f8dcb9d7c29b/kmeans_K1000.npz`，整目录 rm 会连带删掉它，下轮白付
+  39min kmeans；保留 = 重 merge 后 kmeans 直接命中）
 - **重发射注意**：`_current` 已有指纹且其间代码/参数变过 → 引擎归档整个
   目录后空目录重来 → 先 `rm -rf result/prod5_current` 再发
 
