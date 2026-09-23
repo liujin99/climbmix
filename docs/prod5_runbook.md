@@ -204,16 +204,9 @@ bash runs/run_experiment.sh             # 干跑门（LAUNCH 默认 1, 加 LAUNC
   / 13h 单节点，`--job-timeout-h 0` 可显式去掉）
 
 要点：
-- **聚类缓存（无需种子拷贝，2026-09-23 裁决）**：池级缓存（embedding +
-  K-means，内容键控 `cache/embeddings/<sha256>`）跨轮自动命中——run 目录
-  **不必预放种子**；`cluster_cache.npz` 由本轮 merge 段确定性重生成
-  （merge 路径代码未漂移时与源轮逐位一致），各轮簇语义自含（natural =
-  逐文档等概率抽样的簇占比等价实现；报告/recipe 全轮内自洽）。冷启动
-  日志预期形态：`Pool-level embedding/kmeans cache` + merge 实跑 +
-  `Cached → cluster_cache.npz`（而非 "Loading cached clusters"）。stage-gate
-  的 cache-seed 豁免保留（兼容手工预放场景）
+- **缓存种子（标准路径）**：发射前 `cp result/<源轮>_current/{cluster_cache.npz,cluster_info_cache.json,balanced_profile.json} result/<新轮>_current/`——cluster cache 命中即整个绕过 Stage 1。理论上"不拷种子"（⑬k，2026-09-23）成立的前提 = 池级 embedding 缓存（`cache/embeddings/<sha256>`）是热的；**当日实跑推翻**：当前 key 下 0/1000 分片 → 全池 116M docs 重嵌（ETA 数十小时，用户 Ctrl+C），根因待查（key 输入漂移 vs 从未本地合并 vs 被清理）。池缓存复热之前，种子拷贝 = 唯一快路径；stage-gate 的 cache-seed 豁免保它存活
 - **重发射注意**：`_current` 已有指纹且其间代码/参数变过 → 引擎归档整个
-  目录后空目录重来 → 先 `rm -rf result/prod5_current` 再发（引擎自建目录）
+  目录后空目录重来 → 先 `rm -rf result/prod5_current` 再发（种子重拷）
 
 **4.4 发射后 1 分钟对账（机器对照，只读）**：引擎落 launch_env.json +
 remote_config.json 后立刻 diff 源轮，预期外的偏离趁早发现：
@@ -222,10 +215,14 @@ remote_config.json 后立刻 diff 源轮，预期外的偏离趁早发现：
 python3 scripts/check_launch_parity.py result/prod4_current result/prod5_current
 ```
 
-预期 delta = 上面 5 键 + EXP_NAME + OBS 前缀末段 + **TARGET_TOKENS
-6B→3B** + **CONFIGS_PER_ITER 54,36,18→64,32,16** + **PROXY_TARGET_TOKENS
-400M→640M**（三处默认值/裁决的预期偏离）；清单之外出现偏离 → 按 4.4b
-停发重发。
+预期 delta = **9 个**：EXP_NAME / OUTPUT_DIR / TARGET_TOKENS 6B→3B /
+TARGET_STEPS 5722→2861（launch_env）+ OBS 前缀末段 / job_timeout_s
+28800→0 / max_concurrent_jobs 18→本轮值 / max_prep_parallel 6→8 /
+asset_mounts 记录性缺失（remote_config）。**盲区须知**：CONFIGS_PER_ITER
+与 PROXY_TARGET_TOKENS 不在 launch_env.json 记录清单 → 对账对这两个形状键
+零可见——形状核对靠发射横幅日志两行（"轮次计划: 64,32,16" +
+"PROXY_TARGET_TOKENS=640M -> 610 steps"）；补记两键排队 post-search 窗口。
+清单之外出现偏离 → 按 4.4b 停发重发。
 
 **4.4b 停发重发（对账红灯 / 错形发射时）**：对账超出预期 delta → 趁早
 止损——警报挂一小时 = 多烧一小时卡。流程（2026-09-23 prod5 首用：recall
@@ -240,8 +237,10 @@ pkill -f run_experiment.sh
 #    默认 dry-run，清单确认后 --apply）
 python3 scripts/wipe_obs_exps.py result/prod5_current --exp-name prod5
 python3 scripts/wipe_obs_exps.py result/prod5_current --exp-name prod5 --apply
-# 2) 清本地（引擎自建目录；聚类缓存由池级缓存自动续，见 §4 要点）
+# 2) 清本地 + 种子重拷（池级 embedding 缓存当前为冷，种子 = 唯一快路径，见 §4 要点）
 rm -rf result/prod5_current
+mkdir -p result/prod5_current
+cp result/prod4_current/cluster_cache.npz result/prod4_current/cluster_info_cache.json result/prod4_current/balanced_profile.json result/prod5_current/
 # 3) 干净 shell 重发——先确认无残留 env 覆盖（输出必须为空，有输出=开新终端）
 env | grep -E "^(CONFIGS_PER_ITER|PROXY_TARGET_TOKENS|TARGET_TOKENS|TARGET_STEPS|TARGET_ARM_NODES|REMOTE_MAX_PREP|REMOTE_JOB_TIMEOUT_H|REMOTE_MAX_SEARCH_NODES|REMOTE_MAX_VALIDATION_NODES|REMOTE_MAX_JOBS|EXP_NAME|OUTPUT_DIR)="
 # ↑ 必须零输出（含旧名 REMOTE_MAX_JOBS 双查）——有输出 = shell 脏，开新终端
