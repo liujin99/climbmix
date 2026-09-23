@@ -122,6 +122,15 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _SRC = os.path.normpath(os.path.join(_HERE, "..", "src"))
 if os.path.isdir(_SRC) and _SRC not in sys.path:
     sys.path.insert(0, _SRC)  # source-tree fallback (no pip install needed)
+# the backend package (climbmix-ma) lives out-of-tree — a bare-shell merge
+# has neither layout on sys.path (same failure class as the prod2 anchor
+# dispatch, 2026-09-09; live again 2026-09-23 via preprocess_pool.sh):
+# try the in-repo checkout, then the sibling next to the repo
+for _ma in (os.path.normpath(os.path.join(_HERE, "..", "climbmix-ma")),
+            os.path.normpath(os.path.join(_HERE, "..", "..", "climbmix-ma"))):
+    _pkg = os.path.join(_ma, "climbmix_ma")
+    if os.path.isdir(_pkg) and _ma not in sys.path:
+        sys.path.insert(0, _ma)
 
 DEFAULT_MODEL = "NovaSearch/stella_en_400M_v5"
 MANIFEST_NAME = "manifest.json"
