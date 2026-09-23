@@ -217,8 +217,34 @@ python3 scripts/check_launch_parity.py result/prod4_current result/prod5_current
 
 预期 delta = 上面 5 键 + EXP_NAME + OBS 前缀末段 + **TARGET_TOKENS
 6B→3B** + **CONFIGS_PER_ITER 54,36,18→64,32,16** + **PROXY_TARGET_TOKENS
-400M→640M**（三处默认值/裁决的预期偏离）；清单之外出现偏离 →
-停引擎 → `rm -rf result/prod5_current`（种子重拷）→ 修正 → 重发。
+400M→640M**（三处默认值/裁决的预期偏离）；清单之外出现偏离 → 按 4.4b
+停发重发。
+
+**4.4b 停发重发（对账红灯 / 错形发射时）**：对账超出预期 delta → 趁早
+止损——警报挂一小时 = 多烧一小时卡。流程（2026-09-23 prod5 首用：recall
+prod4 旧命令行残留 `CONFIGS_PER_ITER=54,36,18` + `PROXY_TARGET_TOKENS=
+400M` 两键未删，实跑 108 点 @ 400M/381 步，iter1 跑完才处置）：
+
+```
+# 0) 停引擎（孤儿安全 trap；远端在跑作业不受影响、各自跑完上传）
+pkill -f run_experiment.sh
+#    …等 ≥2h 让在跑作业排空（~1.3h/作业 + 余量）…
+# 1) 清 OBS 该轮 exps（守卫：三方同名 + 已收官拒扫 + 只删 exp_XXXX；
+#    默认 dry-run，清单确认后 --apply）
+python3 scripts/wipe_obs_exps.py result/prod5_current --exp-name prod5
+python3 scripts/wipe_obs_exps.py result/prod5_current --exp-name prod5 --apply
+# 2) 清本地 + 种子重拷
+rm -rf result/prod5_current
+mkdir -p result/prod5_current
+cp result/prod4_current/cluster_cache.npz result/prod4_current/cluster_info_cache.json result/prod4_current/balanced_profile.json result/prod5_current/
+# 3) 干净 shell 重发——先确认无残留 env 覆盖（输出必须为空，有输出=开新终端）
+env | grep -E "^(CONFIGS_PER_ITER|PROXY_TARGET_TOKENS|TARGET_TOKENS|TARGET_STEPS|TARGET_ARM_NODES|REMOTE_MAX_PREP|REMOTE_JOB_TIMEOUT_H|REMOTE_MAX_JOBS|EXP_NAME|OUTPUT_DIR)="
+# 4) §4 发射线重发（新开或已确认干净的终端）+ §4.4 对账复核
+```
+
+两点说明：迟到上传自愈——作废轮 id 空间 ⊆ 重发 id 空间，扫描后残照的
+残留会被同 id 覆盖，终态干净；发射终端 ≠ 体检终端时对账在体检终端跑
+（引擎前台占住发射终端）。
 
 **4.5 监控**：
 
