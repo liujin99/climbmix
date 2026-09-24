@@ -208,7 +208,12 @@ def main():
     notes = []          # 降级/口径注记
 
     # ── 簇信息 (地基; 缺它什么都做不了) ──
-    ci_path = os.path.join(run_dir, "cluster_info_cache.json")
+    # ⑬r naming: macro_info.json with legacy cluster_info_cache.json fallback
+    try:
+        from climbmix.utils.io_utils import stage1_pair
+        _, ci_path = stage1_pair(run_dir)
+    except ImportError:
+        ci_path = os.path.join(run_dir, "cluster_info_cache.json")
     cluster_info = load_json(ci_path)
     if not isinstance(cluster_info, list) or not cluster_info:
         print(f"[!] no usable cluster_info_cache.json under {run_dir} — abort")

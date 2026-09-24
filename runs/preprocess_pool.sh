@@ -10,17 +10,23 @@
 #  用法 (服务器; 全幂等 — 缓存已热时秒级退出):
 #    bash runs/preprocess_pool.sh
 #    DRY_RUN=1 bash runs/preprocess_pool.sh    # 预览 key/守卫/命令, 不执行
+#    PREPROCESS_MODE=manifest-only bash runs/preprocess_pool.sh
+#        # ⑬r 上量模式: 只发布 manifest (记录 units_obs_prefix +
+#        # remote_config, 供 run_experiment 的 OBS 流式直读层) — 不落
+#        # 443GB 块文件, Stage 1 按需流读 unit partials; 磁盘占用 0
 #
 #  分层 (详见 docs/prod5_runbook.md §4):
 #    耐久层 = {obs_prod_base}/embed_units/uXXXX (waves 产出, ~475GB,
 #             设计上永不清删 — 本地被清盘后的恢复源)
-#    性能层 = cache/embeddings/<key>/ (分片缓存, 引擎 Stage 1 直读)
+#    性能层 = cache/embeddings/<key>/ (分片缓存, 引擎 Stage 1 直读;
+#             全量 merge 后由 ⑬r 自动清块 → manifest 即流式行图)
 #    key   = sha256(池分片清单 + 嵌入模型 + truncate) — 与引擎同公式
 #            同默认 (覆盖 DATA_DIR/EMBEDDING_MODEL/EMBEDDING_TRUNCATE_LEN
 #            时须与发射一致, 否则 merge 落在引擎不读的 key 上)
 #
 #  env 覆盖: DATA_DIR / EMBEDDING_CACHE_DIR / EMBEDDING_MODEL /
-#            EMBEDDING_TRUNCATE_LEN / EMB_DIM / UNIT_SHARDS / DRY_RUN
+#            EMBEDDING_TRUNCATE_LEN / EMB_DIM / UNIT_SHARDS / DRY_RUN /
+#            PREPROCESS_MODE (full|manifest-only)
 # ═════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
@@ -35,8 +41,9 @@ EMBEDDING_TRUNCATE_LEN="${EMBEDDING_TRUNCATE_LEN:-512}"
 EMB_DIM="${EMB_DIM:-1024}"
 UNIT_SHARDS="${UNIT_SHARDS:-16}"
 DRY_RUN="${DRY_RUN:-0}"
+PREPROCESS_MODE="${PREPROCESS_MODE:-full}"
 export DATA_DIR EMBEDDING_CACHE_DIR EMBEDDING_MODEL EMBEDDING_TRUNCATE_LEN \
-       EMB_DIM UNIT_SHARDS DRY_RUN
+       EMB_DIM UNIT_SHARDS DRY_RUN PREPROCESS_MODE
 
 python3 - <<'PYEOF'
 import json
@@ -57,6 +64,9 @@ trunc = int(os.environ["EMBEDDING_TRUNCATE_LEN"])
 emb_dim = int(os.environ["EMB_DIM"])
 unit_shards = int(os.environ["UNIT_SHARDS"])
 dry = os.environ["DRY_RUN"] == "1"
+mode = os.environ.get("PREPROCESS_MODE", "full").strip() or "full"
+if mode not in ("full", "manifest-only"):
+    sys.exit(f"✗ PREPROCESS_MODE={mode!r} (want full|manifest-only)")
 
 # ── 1. key = 引擎同公式同默认 ──
 from climbmix.utils.embed_cache import pool_embedding_cache_key
@@ -72,15 +82,16 @@ print(f"[pool]   {data_dir}: {len(shards)} shards, model={model}, "
       f"truncate={trunc}")
 print(f"[cache]  key = {key}")
 
-# ── 2. 已就绪? (幂等快路径) ──
-if os.path.isfile(os.path.join(key_dir, "manifest.json")):
+# ── 2. 已就绪? (幂等快路径; manifest-only 模式下 manifest 需要重发布/
+#    升级流式字段, 不走秒退) ──
+if os.path.isfile(os.path.join(key_dir, "manifest.json")) and mode == "full":
     from climbmix.core.embedding_cache import ShardedEmbeddingCache
     c = ShardedEmbeddingCache(key_dir)
     print(f"[ready]  sharded cache 在位: {c.n_rows:,} rows x {c.dim} dims, "
           f"{c.block_count} blocks — 无事可做")
     sys.exit(0)
 
-# ── 3. 磁盘守卫 ──
+# ── 3. 磁盘守卫 (manifest-only 不落块, 无盘需求) ──
 shard_info_path = os.path.join(data_dir, "metadata_shard_info.json")
 if not os.path.isfile(shard_info_path):
     sys.exit(f"✗ {shard_info_path} 不在 (waves 产物) — 先跑 embed_dispatch "
@@ -95,11 +106,14 @@ if n_docs <= 0:
     sys.exit(f"✗ {shard_info_path} 的 num_docs 总和为 0 — 文件损坏?")
 need = int(n_docs * emb_dim * 4 * 1.1)  # fp32 + 10% 余量
 free = shutil.disk_usage(cache_dir).free
-print(f"[guard]  估算需 ~{need / 2**30:.0f} GiB, 可用 {free / 2**30:.0f} GiB")
-if free < need + max(50 * 2**30, int(0.15 * need)):
-    sys.exit(f"✗ 磁盘余量不足: 需 ≥ {need / 2**30:.0f} GiB + 15%/50G 余量, "
-             f"现有 {free / 2**30:.0f} GiB — 清理 cache/embeddings/ 下旧 key "
-             f"或腾空间后重试")
+if mode == "manifest-only":
+    print("[guard]  manifest-only: 不落块文件, 跳过磁盘守卫")
+else:
+    print(f"[guard]  估算需 ~{need / 2**30:.0f} GiB, 可用 {free / 2**30:.0f} GiB")
+    if free < need + max(50 * 2**30, int(0.15 * need)):
+        sys.exit(f"✗ 磁盘余量不足: 需 ≥ {need / 2**30:.0f} GiB + 15%/50G 余量, "
+                 f"现有 {free / 2**30:.0f} GiB — 清理 cache/embeddings/ 下旧 key "
+                 f"或腾空间后重试 (上量场景可改用 PREPROCESS_MODE=manifest-only)")
 
 # ── 4. root 前缀 + 耐久层探测 ──
 try:
@@ -139,6 +153,8 @@ cmd = [sys.executable, os.path.join("scripts", "embed_merge.py"),
        "--cache-dir", cache_dir,
        "--emb-dim", str(emb_dim),
        "--unit-shards", str(unit_shards)]
+if mode == "manifest-only":
+    cmd.append("--manifest-only")
 print(f"[merge]  {' '.join(cmd)}")
 if dry:
     print("[dry]    DRY_RUN=1 — 只预览, 未执行")
@@ -148,12 +164,21 @@ if r.returncode != 0:
     sys.exit(r.returncode)
 
 # ── 6. 探针 (行数对账 shard-info; 维度/块链 manifest 校验已内建) ──
-from climbmix.core.embedding_cache import ShardedEmbeddingCache
+from climbmix.core.embedding_cache import (
+    ShardedEmbeddingCache, streaming_fields)
 
 c = ShardedEmbeddingCache(key_dir)
 if c.n_rows != n_docs:
     sys.exit(f"✗ 探针对账失败: cache {c.n_rows:,} rows != shard-info "
              f"{n_docs:,} docs")
-print(f"[ok]     {c.n_rows:,} rows x {c.dim} dims, {c.block_count} blocks "
-      f"— 池缓存就绪, run_experiment 可直接发射 (no-seed)")
+if mode == "manifest-only" and not streaming_fields(c.manifest):
+    sys.exit("✗ manifest-only 探针失败: manifest 缺 units_obs_prefix/"
+             "remote_config 流式字段")
+if mode == "manifest-only":
+    print(f"[ok]     {c.n_rows:,} rows x {c.dim} dims, {c.block_count} "
+          f"units, 流式字段就绪 — Stage 1 将从 OBS 按需流读 "
+          f"({c.manifest['units_obs_prefix']}), 本地零块文件")
+else:
+    print(f"[ok]     {c.n_rows:,} rows x {c.dim} dims, {c.block_count} blocks "
+          f"— 池缓存就绪, run_experiment 可直接发射 (no-seed)")
 PYEOF

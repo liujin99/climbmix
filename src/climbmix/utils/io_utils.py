@@ -71,6 +71,45 @@ def _clear_tmp(tmp_path: str) -> None:
         pass
 
 
+# ── Stage-1 product naming (⑬r) ──────────────────────────────────────────
+# The Stage-1 product (116M docs → 15 macro labels + cluster profiles)
+# used to live in files named cluster_cache.npz / cluster_info_cache.json
+# at two tiers (run dir + pool stage1_key_<hash>/) — "cache" named the
+# role, not the content, and read as a checksum to humans. New writes
+# use content names; legacy names keep loading (existing run dirs and
+# copied seeds), and _save paths supersede the legacy pair.
+STAGE1_NPZ = "macro_labels.npz"
+STAGE1_JSON = "macro_info.json"
+STAGE1_NPZ_LEGACY = "cluster_cache.npz"
+STAGE1_JSON_LEGACY = "cluster_info_cache.json"
+
+
+def stage1_pair(directory: str):
+    """(npz_path, json_path) for a Stage-1 product directory: the
+    content-named pair when present, else the legacy pair, else the
+    content-named paths (fresh-write targets)."""
+    npz = os.path.join(directory, STAGE1_NPZ)
+    jsn = os.path.join(directory, STAGE1_JSON)
+    if os.path.exists(npz) and os.path.exists(jsn):
+        return npz, jsn
+    legacy_npz = os.path.join(directory, STAGE1_NPZ_LEGACY)
+    legacy_jsn = os.path.join(directory, STAGE1_JSON_LEGACY)
+    if os.path.exists(legacy_npz) and os.path.exists(legacy_jsn):
+        return legacy_npz, legacy_jsn
+    return npz, jsn
+
+
+def supersede_legacy_stage1(directory: str) -> None:
+    """Remove a legacy-named pair after a content-named save (both load,
+    but a stale same-tier copy invites exactly the confusion ⑬r fixed)."""
+    for name in (STAGE1_NPZ_LEGACY, STAGE1_JSON_LEGACY):
+        p = os.path.join(directory, name)
+        try:
+            os.remove(p)
+        except FileNotFoundError:
+            pass
+
+
 def atomic_savez(path: str, **arrays) -> None:
     """np.savez with tmp+rename so a crash can never leave a truncated npz."""
     import numpy as np

@@ -475,6 +475,15 @@ def main() -> int:
     p.add_argument("--upload-backup", default="",
                    help="obs:// URI to copy the manifest + blocks to "
                         "(redundancy)")
+    p.add_argument("--manifest-only", action="store_true",
+                   help="⑬r scale-up mode: cross-check units against the "
+                        "shard layout and publish ONLY the manifest "
+                        "(recording units_obs_prefix + remote_config for "
+                        "the OBS streaming read tier) — no 443GB block "
+                        "materialization, Stage 1 then streams unit "
+                        "partial_block.npz on demand. Also upgrades an "
+                        "existing manifest in place (blocks, if present, "
+                        "are untouched and keep their hash fields).")
     p.add_argument("--force", action="store_true",
                    help="re-merge over an existing cache at the key")
     args = p.parse_args()
@@ -563,7 +572,7 @@ def main() -> int:
                     f"[merge] FATAL: {path} exists with shape {got} "
                     f"(expected {shape}) — stale cache at this key; "
                     "delete it or pass --force")
-        if os.path.isfile(man_path):
+        if os.path.isfile(man_path) and not args.manifest_only:
             from climbmix.core.embedding_cache import load_manifest
             man = load_manifest(key_dir)
             if (int(man["row_count"]), int(man["emb_dim"])) == shape:
@@ -617,64 +626,7 @@ def main() -> int:
 
     row_bytes = args.emb_dim * 4
 
-    # staging dir for the scratch npz round-trips (RAM when available —
-    # see the module docstring's parallelism notes)
-    if args.tmp_dir and args.tmp_dir != "auto":
-        tmp_dir, tmp_kind = os.path.abspath(args.tmp_dir), "explicit"
-    else:
-        unit_bytes = (total_docs * row_bytes) // max(1, len(all_units)) + 1
-        tmp_dir, tmp_kind = pick_tmp_dir(
-            key_dir, args.workers, unit_bytes)
-    os.makedirs(tmp_dir, exist_ok=True)
-    n_fetch = len(unit_list)
-    workers = max(1, min(args.workers, n_fetch or 1))
-    if n_fetch:
-        print(f"[merge] staging npz in {tmp_dir} ({tmp_kind}), "
-              f"{workers} worker(s) fetching in parallel", flush=True)
-    else:
-        print(f"[merge] staging: {tmp_dir} ({tmp_kind}) — all blocks "
-              "already banked, nothing to fetch", flush=True)
-
-    from concurrent.futures import (
-        ProcessPoolExecutor, as_completed)
-    cfg = {"remote_config": args.remote_config,
-           "obs_prefix": args.obs_prefix,
-           "key_dir": key_dir,
-           "emb_dim": args.emb_dim,
-           "keep_downloads": args.keep_downloads,
-           "tmp_dir": tmp_dir}
-    t0 = time.time()
-    ex = ProcessPoolExecutor(max_workers=workers,
-                             initializer=_merge_worker_init,
-                             initargs=(cfg,))
-    futs = {}
-    try:
-        for unit_id, man in unit_list:
-            futs[ex.submit(_fetch_unit, unit_id, man)] = unit_id
-        banked_ct = 0
-        for fut in as_completed(futs):
-            unit_id, rows, secs = fut.result()
-            banked_ct += 1
-            rate = banked_ct / (time.time() - t0)
-            eta = (n_fetch - banked_ct) / rate if rate > 0 else 0
-            print(f"[merge] {unit_id} banked ({banked_ct}/{n_fetch}, "
-                  f"{rows:,} rows, {secs:.0f}s, "
-                  f"ETA {eta/60:.0f}m)", flush=True)
-    except BaseException as e:
-        # a failing unit fails the run loudly; in-flight units finish
-        # (their banked blocks keep resume value), pending ones cancel
-        for f in futs:
-            f.cancel()
-        ex.shutdown(wait=True)
-        if isinstance(e, KeyboardInterrupt):
-            print("[merge] interrupted — banked blocks are kept "
-                  "(re-run resumes per block)", file=sys.stderr)
-            return 130
-        print(f"{e}", file=sys.stderr)
-        return 1
-    ex.shutdown(wait=True)
-
-    # ── validate every block, then publish the manifest ──────────────
+    # ── assemble: per-unit blocks + sidecars, then publish ───────────
     blocks_meta = []
     for unit_id, shards in all_units:
         blocks_meta.append({
@@ -684,51 +636,138 @@ def main() -> int:
             "global_start": int(shards[0]["start_idx"]),
             "shards": [os.path.basename(s["path"]) for s in shards],
         })
-    vtasks = []
-    for b in blocks_meta:
-        block_path = os.path.join(key_dir, b["file"])
-        if not os.path.isfile(block_path):
-            raise SystemExit(
-                f"[merge] FATAL: block missing after assembly: "
-                f"{block_path}")
-        ranges = [(int(s["start_idx"]), int(s["start_idx"])
-                   + int(s["num_docs"]), os.path.basename(s["path"]))
-                  for s in shard_infos
-                  if s["start_idx"] >= b["global_start"]
-                  and s["start_idx"] < b["global_start"] + b["rows"]]
-        vtasks.append((key_dir, b, ranges, args.emb_dim))
-    vworkers = max(1, min(args.workers, len(vtasks) or 1))
-    ex = ProcessPoolExecutor(max_workers=vworkers,
-                             initializer=_merge_worker_init,
-                             initargs=(cfg,))
-    vfuts = {}
-    vhash = {}
-    try:
-        for t in vtasks:
-            vfuts[ex.submit(_validate_block, t)] = t[1]["unit_id"]
-        vdone = 0
-        for fut in as_completed(vfuts):
-            uid, sha, nbytes = fut.result()
-            vhash[uid] = (sha, nbytes)
-            print(f"[merge] {uid} validated "
-                  f"({vdone + 1}/{len(vfuts)})", flush=True)
-            vdone += 1
-    except BaseException as e:
-        for f in vfuts:
-            f.cancel()
-        ex.shutdown(wait=True)
-        if isinstance(e, KeyboardInterrupt):
-            print("[merge] interrupted — banked blocks are kept "
-                  "(re-run resumes per block)", file=sys.stderr)
-            return 130
-        print(f"{e}", file=sys.stderr)
-        return 1
-    ex.shutdown(wait=True)
 
-    # per-block sha256+bytes: the loader's fast-verify trust root
-    # (stat/sample instead of a full-pool rescan on every process start)
-    for b in blocks_meta:
-        b["sha256"], b["bytes"] = vhash[b["unit_id"]]
+    if args.manifest_only:
+        # ⑬r: publish the row map WITHOUT materializing blocks. Unit
+        # partials are cross-checked above (coverage/layout/model/
+        # truncate_len); the byte-level guarantee for STREAMED rows is
+        # the wave's per-unit validation + the streaming tier's own
+        # sample gate. Hash fields are LOCAL-file facts — carry them
+        # over only when the block file still exists from a previous
+        # full merge, so a local re-materialization later keeps its
+        # fast stat-verify.
+        prev = {}
+        if os.path.isfile(man_path):
+            try:
+                with open(man_path) as f:
+                    prev = {b.get("unit_id"): b
+                            for b in json.load(f).get("blocks", [])}
+            except (OSError, ValueError):
+                prev = {}
+        kept = 0
+        for b in blocks_meta:
+            old = prev.get(b["unit_id"])
+            if (old and "sha256" in old and "bytes" in old
+                    and os.path.isfile(os.path.join(key_dir, b["file"]))):
+                b["sha256"], b["bytes"] = old["sha256"], old["bytes"]
+                kept += 1
+        print(f"[merge] manifest-only: {len(blocks_meta)} units "
+              f"cross-checked{f', {kept} hash field set(s) carried over' if kept else ''}")
+    else:
+        # staging dir for the scratch npz round-trips (RAM when
+        # available — see the module docstring's parallelism notes)
+        if args.tmp_dir and args.tmp_dir != "auto":
+            tmp_dir, tmp_kind = os.path.abspath(args.tmp_dir), "explicit"
+        else:
+            unit_bytes = (total_docs * row_bytes) // max(1, len(all_units)) + 1
+            tmp_dir, tmp_kind = pick_tmp_dir(
+                key_dir, args.workers, unit_bytes)
+        os.makedirs(tmp_dir, exist_ok=True)
+        n_fetch = len(unit_list)
+        workers = max(1, min(args.workers, n_fetch or 1))
+        if n_fetch:
+            print(f"[merge] staging npz in {tmp_dir} ({tmp_kind}), "
+                  f"{workers} worker(s) fetching in parallel", flush=True)
+        else:
+            print(f"[merge] staging: {tmp_dir} ({tmp_kind}) — all blocks "
+                  "already banked, nothing to fetch", flush=True)
+
+        from concurrent.futures import (
+            ProcessPoolExecutor, as_completed)
+        cfg = {"remote_config": args.remote_config,
+               "obs_prefix": args.obs_prefix,
+               "key_dir": key_dir,
+               "emb_dim": args.emb_dim,
+               "keep_downloads": args.keep_downloads,
+               "tmp_dir": tmp_dir}
+        t0 = time.time()
+        ex = ProcessPoolExecutor(max_workers=workers,
+                                 initializer=_merge_worker_init,
+                                 initargs=(cfg,))
+        futs = {}
+        try:
+            for unit_id, man in unit_list:
+                futs[ex.submit(_fetch_unit, unit_id, man)] = unit_id
+            banked_ct = 0
+            for fut in as_completed(futs):
+                unit_id, rows, secs = fut.result()
+                banked_ct += 1
+                rate = banked_ct / (time.time() - t0)
+                eta = (n_fetch - banked_ct) / rate if rate > 0 else 0
+                print(f"[merge] {unit_id} banked ({banked_ct}/{n_fetch}, "
+                      f"{rows:,} rows, {secs:.0f}s, "
+                      f"ETA {eta/60:.0f}m)", flush=True)
+        except BaseException as e:
+            # a failing unit fails the run loudly; in-flight units finish
+            # (their banked blocks keep resume value), pending ones cancel
+            for f in futs:
+                f.cancel()
+            ex.shutdown(wait=True)
+            if isinstance(e, KeyboardInterrupt):
+                print("[merge] interrupted — banked blocks are kept "
+                      "(re-run resumes per block)", file=sys.stderr)
+                return 130
+            print(f"{e}", file=sys.stderr)
+            return 1
+        ex.shutdown(wait=True)
+
+        # ── validate every block, then publish the manifest ──────────
+        vtasks = []
+        for b in blocks_meta:
+            block_path = os.path.join(key_dir, b["file"])
+            if not os.path.isfile(block_path):
+                raise SystemExit(
+                    f"[merge] FATAL: block missing after assembly: "
+                    f"{block_path}")
+            ranges = [(int(s["start_idx"]), int(s["start_idx"])
+                       + int(s["num_docs"]), os.path.basename(s["path"]))
+                      for s in shard_infos
+                      if s["start_idx"] >= b["global_start"]
+                      and s["start_idx"] < b["global_start"] + b["rows"]]
+            vtasks.append((key_dir, b, ranges, args.emb_dim))
+        vworkers = max(1, min(args.workers, len(vtasks) or 1))
+        ex = ProcessPoolExecutor(max_workers=vworkers,
+                                 initializer=_merge_worker_init,
+                                 initargs=(cfg,))
+        vfuts = {}
+        vhash = {}
+        try:
+            for t in vtasks:
+                vfuts[ex.submit(_validate_block, t)] = t[1]["unit_id"]
+            vdone = 0
+            for fut in as_completed(vfuts):
+                uid, sha, nbytes = fut.result()
+                vhash[uid] = (sha, nbytes)
+                print(f"[merge] {uid} validated "
+                      f"({vdone + 1}/{len(vfuts)})", flush=True)
+                vdone += 1
+        except BaseException as e:
+            for f in vfuts:
+                f.cancel()
+            ex.shutdown(wait=True)
+            if isinstance(e, KeyboardInterrupt):
+                print("[merge] interrupted — banked blocks are kept "
+                      "(re-run resumes per block)", file=sys.stderr)
+                return 130
+            print(f"{e}", file=sys.stderr)
+            return 1
+        ex.shutdown(wait=True)
+
+        # per-block sha256+bytes: the loader's fast-verify trust root
+        # (stat/sample instead of a full-pool rescan on every process
+        # start)
+        for b in blocks_meta:
+            b["sha256"], b["bytes"] = vhash[b["unit_id"]]
 
     manifest = {
         "format": "sharded-v1",
@@ -736,6 +775,11 @@ def main() -> int:
         "emb_dim": args.emb_dim,
         "model": args.model,
         "truncate_len": args.truncate_len,
+        # ⑬r streaming fields: where the unit partials live and how to
+        # build a client that reaches them — recorded at merge time so
+        # a blocks-cleaned pool dir can stream without any launch keys
+        "units_obs_prefix": args.obs_prefix,
+        "remote_config": os.path.abspath(args.remote_config),
         "blocks": blocks_meta,
     }
     tmp = f"{man_path}.tmp.{os.getpid()}"
@@ -744,26 +788,28 @@ def main() -> int:
     os.replace(tmp, man_path)
     total_bytes = total_docs * row_bytes
     print(f"[merge] published {man_path} ({len(blocks_meta)} blocks, "
-          f"{total_bytes / (1024**3):.1f} GB of embeddings)")
+          f"{total_bytes / (1024**3):.1f} GB of embeddings"
+          + (", manifest-only" if args.manifest_only else "") + ")")
 
-    # cleanup partial-state files (the published cache is the product)
-    for side in glob.glob(os.path.join(key_dir, "block_*.json")):
-        os.remove(side)
-    if not args.keep_downloads:
-        if tmp_kind == "explicit":
-            print(f"[merge] note: --tmp-dir {tmp_dir} left in place "
-                  "(explicit dirs are the caller's to manage)")
-        elif os.path.isdir(tmp_dir):
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-    if os.path.isdir(dl_dir) and not args.keep_downloads:
-        shutil.rmtree(dl_dir, ignore_errors=True)
+    if not args.manifest_only:
+        # cleanup partial-state files (the published cache is the product)
+        for side in glob.glob(os.path.join(key_dir, "block_*.json")):
+            os.remove(side)
+        if not args.keep_downloads:
+            if tmp_kind == "explicit":
+                print(f"[merge] note: --tmp-dir {tmp_dir} left in place "
+                      "(explicit dirs are the caller's to manage)")
+            elif os.path.isdir(tmp_dir):
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+        if os.path.isdir(dl_dir) and not args.keep_downloads:
+            shutil.rmtree(dl_dir, ignore_errors=True)
 
-    if args.upload_backup:
-        print(f"[merge] uploading backup -> {args.upload_backup}")
-        obs.upload_file(man_path, f"{args.upload_backup}/{MANIFEST_NAME}")
-        for b in blocks_meta:
-            obs.upload_file(os.path.join(key_dir, b["file"]),
-                            f"{args.upload_backup}/{b['file']}")
+        if args.upload_backup:
+            print(f"[merge] uploading backup -> {args.upload_backup}")
+            obs.upload_file(man_path, f"{args.upload_backup}/{MANIFEST_NAME}")
+            for b in blocks_meta:
+                obs.upload_file(os.path.join(key_dir, b["file"]),
+                                f"{args.upload_backup}/{b['file']}")
 
     print(f"[merge] done: {total_docs:,} docs, dim={args.emb_dim}, "
           f"{len(blocks_meta)} blocks")

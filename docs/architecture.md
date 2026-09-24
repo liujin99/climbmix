@@ -112,6 +112,8 @@ OBS 是唯一的数据中转（远程作业之间互不通信）；本地 8 NPU 
       ▼  runs/preprocess_pool.sh（幂等：热则秒退）
   磁盘守卫 → embed_merge（40min）→ 本地块 443GB
       （block_*.npy + manifest.json + 每块 sha256）
+      上量模式: PREPROCESS_MODE=manifest-only → 只发布行图（分钟级,
+      零落盘; Stage 1 改从 OBS 流读）
       │
 【每轮实验 · 实验入口】
       ▼  runs/run_experiment.sh（显式 5 键：EXP_NAME + 4 个 REMOTE 环境身份键）
@@ -142,26 +144,29 @@ Stage 1 秒级~2min（缓存热时）→ 搜索 ~16h（每轮大头）→ 臂族
 ```
 寿命最长 ◀──────────────────────────────────────────▶ 随时可删
 
- OBS 耐久层        本地性能层         派生缓存层            运行目录
- embed_units       block_*.npy        kmeans_K1000.npz      cluster_cache
- ~475GB 永存        443GB 可再生        stage1_<hash>/        搜索状态/报告
-                                     各 ~1GB 跨轮常驻        每轮归档重建
+  OBS 耐久层        本地性能层         派生缓存层            运行目录
+  embed_units       block_*.npy        kmeans_K1000.npz      macro_labels.npz
+  ~475GB 永存        443GB 可再生        stage1_key_<hash>/    搜索状态/报告
+                                      各 ~1GB 跨轮常驻        每轮归档重建
 
- 丢了 = 40h 重嵌入   丢了 = 40min 重merge  丢了 = 2~40min 重算     丢了 = 本轮重跑
- （设计上永不清删）  （收官后清理省盘）     （保留！清理只删块）    （指纹失配即归档）
+  丢了 = 40h 重嵌入   丢了 = 40min 重merge  丢了 = 2~40min 重算     丢了 = 本轮重跑
+  （设计上永不清删）  （Stage 1 后自动清⑬r） （保留!清理只删块）    （指纹失配即归档）
 ```
 
 设计指令（用户裁决）：**本地盘只放可再生暂存**——不是"零本地"：discovery
-（③a 起）要对 116M×1024 做多趟全量扫描，需要本地读吞吐；但这层只是
-40min 可再生的燃料，不是常驻资产。"上量必爆"拆成两个问题：
+要对 116M×1024 做多趟全量扫描，需要本地读吞吐；但这层只是可再生的燃料，
+不是常驻资产。"上量必爆"拆成两个问题，⑬r 都已落地：
 
-- **跨轮累积（已解决）**：块文件收官即清（`rm -f <key>/block_*.npy
-  <key>/manifest.json`），稳态常驻只剩 ~1.5GB 派生缓存；臂暂存成功后
-  自动清（~31GB/臂）；远程备料上传即删——轮与轮之间零残留。且 ② 命中时
-  块根本不读：收官清块后只要旋钮+代码不变，重发连 preprocess 都免。
-- **单轮占用（上量才触发）**：性能层随池大小线性——prod5 形态 merge 后
-  盘余 ~414G 放得下，池翻倍必爆。结构性解 = OBS 直读流式层（Stage 1
-  按块流读、不再全量落盘）+ 自动清块——已排队，触发条件 = 换池/上量。
+- **跨轮累积（已解决）**：Stage 1 完成（①②③ 任何路径）后自动清块——
+  删 `block_*.npy`，保留 manifest.json（它是流式行图）、kmeans npz、
+  stage1_key_*/；臂暂存成功后自动清（~31GB/臂）；远程备料上传即删。
+  稳态本地常驻 ~2.4GB，轮与轮之间零残留。
+- **单轮占用（已解决：OBS 流式直读）**：preprocess 上量模式
+  `PREPROCESS_MODE=manifest-only` 只发布 manifest（记录 units_obs_prefix
+  + remote_config，分钟级、零落盘）；Stage 1 的 ③a 在块缺失时按需流读
+  OBS unit partials（LRU 暂存 ~2 单元 ≈ 15GB RAM），磁盘占用与池大小
+  解耦。全量 merge（40min 落块）退化为**性能选项**：多趟扫描走本地 NVMe
+  比走网络快，当前规模用它；池大到放不下时用流式。
 
 ### 4.2 文件地图
 
@@ -170,16 +175,18 @@ Stage 1 秒级~2min（缓存热时）→ 搜索 ~16h（每轮大头）→ 臂族
   ~/work/100B_stem_parquet_filtered/            池数据（1000 分片 + 元数据缓存）
   ~/work/climbmix/
     cache/embeddings/<key>/                     池缓存（key = 池内容哈希）
-      ├─ block_u00XX.npy + manifest.json        性能层（收官可删）
+      ├─ block_u00XX.npy                        性能层（⑬r: Stage 1 后自动清）
+      ├─ manifest.json                          行图 + 流式字段（保留!）
       ├─ kmeans_K1000.npz                       派生 · 保留（细簇基底标签）
-      └─ stage1_<hash16>/                       派生 · 保留（Stage 1 整段产物）
+      └─ stage1_key_<hash16>/                   派生 · 保留（Stage 1 整段产物）
+           └─ macro_labels.npz + macro_info.json   （内容命名，⑬r）
     result/<EXP>_current/                       运行目录（指纹失配整目录归档）
       ├─ launch_env.json / remote_config.json   发射实录（对账用）
-      ├─ cluster_cache.npz + cluster_info_cache.json   run 级簇缓存
+      ├─ macro_labels.npz + macro_info.json     run 级簇缓存（旧名仍可读）
       ├─ search_state.json / exp_XXXX/ / report.md    搜索状态与产物
       └─ {arm}_shards/ {arm}_mixed/             臂暂存（成功后自动清理）
 OBS:
-  {obs_prod_base}/embed_units/u00XX/            耐久层（~475GB）
+  {obs_prod_base}/embed_units/u00XX/            耐久层（~475GB；流式直读的源）
   {obs_prod_base}/prod/climbmix/<EXP>/exps/     实验数据面
   .../climbmix_resource_package/{d20,...}/      资源包（挂载给远程作业）
 ```
@@ -192,27 +199,35 @@ Stage 1 的全部产物只有两样：**final_labels**（116M 文档 → 15 大�
 930MB）和 **cluster_info**（15 个簇的档案）。从哪拿，四级瀑布：
 
 ```
- ① run 目录 cluster_cache.npz 存在?        ◀ 种子/resume 路径（优先级最高）
+ ① run 目录 macro_labels.npz 存在?          ◀ 种子/resume 路径（优先级最高）
     │是 → 载入 [守卫: 行数=池 / doc 总和自洽 / 标签 id 越界] → 完成
-    │否
- ② 池目录 stage1_<hash>/ 存在?             ◀ 键 = 全量 discovery 旋钮
+    │否   （旧名 cluster_cache.npz 仍可读——种子兼容）
+ ② 池目录 stage1_key_<hash>/ 存在?          ◀ 键 = 全量 discovery 旋钮
     │是 → 载入 [行数守卫] → 完成             + 全仓源码哈希（代码漂移自动重键）
     │否                                       （命中时嵌入根本不用载）
- ③ 现算（进入 discovery）:
-     3a. 载入本地块（嵌入矩阵，只读 memmap）
-         └─ 完整性校验（只守这道门，不是常规路径的一环）:
-              stat（默认）: 63 块 size 对账 + 2M 行抽样 ≈ 1min
-              sha: 并行重哈希（抓同尺寸位翻转）
-              抽样异常 → 回退全扫（带 quarter 进度）
-              ✗ 不符 → FATAL 指路 preprocess（绝不自动重建——两入口裁决）
-              块整体缺失 → 同上 FATAL（绝不内联重嵌 ~40h）
-     3b. kmeans_K1000.npz 存在?              ◀ 细簇基底，与旋钮无关
-         │是 → 载入标签（~40min 免付）
-         │否 → prescan（块级并行 ~3min）→ 训练 + 全池指派 → 写 npz
+ ③ 现算（进入 discovery）——先查基底，命中则嵌入矩阵整个不载（⑬r）:
+    3b. kmeans_K1000.npz 存在?              ◀ 细簇基底，与旋钮无关
+        │是 → 载入标签（~40min 免付）→ 直跳 3c
+        │否 → 3a 载入嵌入矩阵:
+             · 本地块在   → ShardedEmbeddingCache（只读 memmap）
+             · 块被清/从未落 → OBS 流式直读 StreamingShardedEmbeddingCache
+               （unit partials 按需 LRU 暂存 ~2 单元; 磁盘零占用;
+                 每趟全池扫描 = 一遍网络; prescan 走串行——fork 的子进程
+                 不能共享 OBS 客户端）
+             └─ 完整性校验（只守这道门，不是常规路径的一环）:
+                  stat（默认）: 63 块 size 对账 + 2M 行抽样 ≈ 1min
+                  sha: 并行重哈希（抓同尺寸位翻转）
+                  抽样异常 → 回退全扫（带 quarter 进度）
+                  ✗ 不符 → FATAL 指路 preprocess（绝不自动重建——两入口裁决）
+                  块整体缺失 → 同上 FATAL（绝不内联重嵌 ~40h）
+                  （流式 tier: 63 个 unit 对象在位 + unit[0] 抽验，同语义）
+             → prescan（本地块级并行 ~3min）→ 训练 + 全池指派 → 写 npz
                 （~40min，prod5 实测 38.8min；大头 = 116M 全池指派）
     3c. merge 段（~2min，已向量化）:
         1000 细簇 → prune（质量分）→ balanced（容量划分）→ 15 大簇
-    3d. 写回: run 级 cluster_cache + 晋升池级 stage1_<hash>/
+    3d. 写回: run 级 macro_labels + 晋升池级 stage1_key_<hash>/
+        + 自动清块（⑬r: 删 block_*.npy; manifest=行图 / kmeans npz /
+          stage1 保留 → 稳态 ~2.4GB）
 ```
 
 四种典型场景对账：
@@ -220,9 +235,9 @@ Stage 1 的全部产物只有两样：**final_labels**（116M 文档 → 15 大�
 | 场景 | 走到哪 | 代价 |
 |---|---|---|
 | 旋钮 + 代码都没变（块清没清无所谓，② 不读块） | ② 命中 | 秒级 |
-| 旋钮变了（K / 阈值）或代码变了，块在 | ③b 命中 → ③c | ~3min（载块 + merge 段） |
-| 块被清 + 代码变更（stage1 重键） | preprocess + ③b 命中 → ③c | ~40min + ~3min |
-| 池变了（新 key 目录，kmeans 一并重算） | preprocess + ③ 全程 | ~40min + ~45min |
+| 旋钮变了（K / 阈值）或代码变了（块在不在无所谓） | ③b 命中 → ③c | ~2min（嵌入不载） |
+| kmeans npz 缺失（新池），本地块在 | preprocess 全量 + ③ 全程 | ~40min + ~45min |
+| kmeans npz 缺失，上量零落盘 | preprocess manifest-only + 流式 ③ | 分钟级 + 网络 ~3 趟 |
 | 嵌入文件被动过（异常） | 3a 抓住 | FATAL → 人工重 merge |
 
 ### 常见误读（历史困惑点存档）
@@ -237,8 +252,13 @@ Stage 1 的全部产物只有两样：**final_labels**（116M 文档 → 15 大�
   ② 池 key 目录绑定 + 内容键 + 行数）覆盖同一"坏得响"语义，加 sha 不
   改变任何行为；
 - ② 的键哈希**包内全部源码**（src/climbmix；scripts/runs 不参与簇计算，
-  不入键）——误重键只付 ~3min（③b 命中 → merge 段），漏重键会静默供
+  不入键）——误重键只付 ~2min（③b 命中 → merge 段），漏重键会静默供
   旧代码算出的簇；风险不对称，宁粗勿细。
+- `stage1_key_<hash>/` **不是校验文件**——是内容寻址的缓存目录（Stage 1
+  整段产物的一份副本，目录名里的哈希 = "这份产物由什么配置+代码算出来"的
+  键）。⑬r 起文件也叫内容名：`macro_labels.npz` + `macro_info.json`
+  （旧名 cluster_cache.npz / cluster_info_cache.json 仍可读，旧种子免迁移）；
+  同一内容在 run 目录与池目录同名，目录即层级。
 
 ---
 
@@ -302,14 +322,17 @@ Stage 1 的全部产物只有两样：**final_labels**（116M 文档 → 15 大�
 | 场景 | 路径 | 发射 → 首批派发 |
 |---|---|---|
 | 旋钮 + 代码不变（常规重发；块清没清无所谓） | ② 命中 | **~20min**（爬坡主导） |
-| 代码变更后首发（块在） | ③b 命中 + merge 段 | ~22min |
-| 收官清块后 + 代码变更 | preprocess + ③b + merge 段 | ~65min |
+| 代码变更后首发（块在不在无所谓） | ③b 命中 + merge 段，不载嵌入 | ~22min |
+| kmeans npz 缺失 + 本地块在 | preprocess 全量 + ③ | ~20min + ~85min |
+| kmeans npz 缺失 + 上量零落盘 | preprocess manifest-only + 流式 ③ | ~20min + 网络扫 ~3 趟 |
 | 换池 / 换嵌入模型 | 嵌入波 + 全链 | ~40h + 上述 |
 
 ### 8.2 常用命令（详见 runbook）
 
 ```
 bash runs/preprocess_pool.sh                  # 供给入口（幂等，冷才跑）
+PREPROCESS_MODE=manifest-only bash runs/preprocess_pool.sh
+                                              # 上量: 只发行图，零落盘
 EXP_NAME=prodN REMOTE_ENABLED=1 REMOTE_BACKEND=modelarts \
   REMOTE_BACKEND_MODULE=climbmix_ma:create_backend \
   REMOTE_FLAVOR=modelarts.pool.visual.8xlarge \
@@ -317,4 +340,7 @@ EXP_NAME=prodN REMOTE_ENABLED=1 REMOTE_BACKEND=modelarts \
 python3 scripts/check_launch_parity.py <src_run> <dst_run>   # 发射后 1min 对账
 bash scripts/diagnostics/prod2_watch.sh result/<EXP>_current # 监控
 python3 scripts/backfill_block_hashes.py cache/embeddings/<key>  # 存量缓存补哈希
+
+⑬r 旋钮: CLIMBMIX_EMB_AUTOCLEAN=0 关自动清块 · CLIMBMIX_EMB_STREAM=0 关流式
+直读 · CLIMBMIX_EMB_STREAM_LRU=N 流式 LRU 单元数（默认 2 ≈ 15GB RAM）
 ```

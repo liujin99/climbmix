@@ -109,7 +109,9 @@ def attach_cluster_state(executor, args):
     from climbmix.data.metadata_manager import ShardMetadataManager
     from climbmix.data.column_schema import DatasetSchema
 
-    npz = os.path.join(args.cluster_cache_dir, "cluster_cache.npz")
+    # ⑬r naming: macro_labels.npz with legacy cluster_cache.npz fallback
+    from climbmix.utils.io_utils import stage1_pair
+    npz, _ = stage1_pair(args.cluster_cache_dir)
     if not os.path.isfile(npz):
         raise FileNotFoundError(
             f"cluster cache not found: {npz} — run Steps 1-2 first (or point "

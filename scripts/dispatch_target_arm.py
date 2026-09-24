@@ -866,7 +866,9 @@ def main() -> int:
 
     # ── data preparation (random arm only; climb expects Steps 4-5 done) ──
     if arm == "random":
-        cluster_cache = os.path.join(output_dir, "cluster_cache.npz")
+        # ⑬r naming: macro_labels.npz with legacy cluster_cache.npz fallback
+        from climbmix.utils.io_utils import stage1_pair
+        cluster_cache, _ = stage1_pair(output_dir)
         balanced_profile = os.path.join(output_dir, "balanced_profile.json")
         deadline = time.time() + args.wait_cluster_min * 60.0
         while not (os.path.isfile(cluster_cache) and os.path.isfile(balanced_profile)):

@@ -225,9 +225,15 @@ def scan_row_anomalies(
 
     Sharded caches take the block-parallel path (see
     _scan_sharded_parallel); anything else runs the serial chunk loop.
+    Streaming caches deliberately stay serial: forked workers would
+    inherit a dead OBS client (the merge builds one client per process
+    for exactly this reason), and the network — not CPU — is the
+    bottleneck, so block-parallelism buys nothing there anyway.
     """
-    from climbmix.core.embedding_cache import ShardedEmbeddingCache
-    if isinstance(embeddings, ShardedEmbeddingCache):
+    from climbmix.core.embedding_cache import (
+        ShardedEmbeddingCache, StreamingShardedEmbeddingCache)
+    if (isinstance(embeddings, ShardedEmbeddingCache)
+            and not isinstance(embeddings, StreamingShardedEmbeddingCache)):
         try:
             return _scan_sharded_parallel(embeddings, chunk_rows, tag)
         except Exception as e:

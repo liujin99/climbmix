@@ -255,6 +255,76 @@ def _verify_sharded_cache(cache, tag: str) -> bool:
     return True
 
 
+def _try_streaming_cache(cache_path, expected_n, tag: str):
+    """StreamingShardedEmbeddingCache for a blocks-absent pool dir, or
+    None when streaming is off / the manifest predates the streaming
+    fields / the recorded remote config is gone. A stale-row manifest
+    raises the same SystemExit as the local path (never silently
+    misaligned rows)."""
+    if (os.environ.get("CLIMBMIX_EMB_STREAM", "1").strip().lower()
+            in ("0", "false", "no")):
+        print(f"{tag} streaming disabled (CLIMBMIX_EMB_STREAM=0)")
+        return None
+    from climbmix.core.embedding_cache import (
+        StreamingShardedEmbeddingCache, load_manifest, streaming_fields)
+    try:
+        man = load_manifest(cache_path)
+    except (OSError, ValueError) as e:
+        print(f"{tag} manifest unreadable ({e}) — streaming unavailable")
+        return None
+    if not streaming_fields(man):
+        print(f"{tag} manifest predates streaming fields — re-run "
+              "scripts/embed_merge.py (full or --manifest-only) to "
+              "record units_obs_prefix/remote_config")
+        return None
+    rc_path = str(man["remote_config"])
+    if not os.path.isfile(rc_path):
+        print(f"{tag} remote config recorded in the manifest is gone: "
+              f"{rc_path} — re-run runs/preprocess_pool.sh")
+        return None
+    from climbmix.remote.remote_executor import RemoteConfig
+    from climbmix.remote.backends import resolve_backend
+    rc = RemoteConfig.from_json_file(rc_path)
+    storage = resolve_backend(rc).make_obs_storage(rc)
+    cache = StreamingShardedEmbeddingCache(cache_path, storage)
+    if expected_n is not None and cache.shape[0] != expected_n:
+        raise SystemExit(
+            f"{tag} FATAL: streaming manifest at {cache_path} holds "
+            f"{cache.shape[0]:,} rows but {expected_n:,} expected — "
+            "stale cache at this key; delete the directory to re-embed")
+    print(f"{tag} STREAMING pool from {man['units_obs_prefix']} "
+          f"({cache.block_count} units; local blocks absent — each pass "
+          f"sweeps the network once, disk footprint stays zero)")
+    return cache
+
+
+def _verify_streaming_cache(cache, tag: str) -> None:
+    """Integrity gate for the streaming tier: every unit object must
+    exist (cheap stats), and the first staged unit must validate clean.
+    The byte-level guarantee lives in the merge's per-unit validation at
+    bank time; anomalies here mean the OBS object changed under us —
+    FATAL with the fix, never silently bad rows into kmeans."""
+    n = cache.block_count
+    for i in range(n):
+        uri = cache.unit_uri(i)
+        if not cache.storage.stat(uri):
+            raise SystemExit(
+                f"{tag} FATAL: unit object missing on OBS: {uri} — "
+                "re-run scripts/embed_dispatch.py (completed units are "
+                "resume-skipped)")
+    counts = _validate_embeddings(cache._map(0),
+                                   f"{tag} Verify(stream unit[0])",
+                                   fail_on_nan=False)
+    n_anom = (counts["nan"] + counts["inf"] + counts["zero"]
+              + counts["off_norm"])
+    if n_anom:
+        raise SystemExit(
+            f"{tag} FATAL: {n_anom} anomalous rows in streamed "
+            f"{cache._blocks[0]['unit_id']} — foreign corruption on "
+            "OBS; re-run scripts/embed_merge.py (unit partials kept)")
+    print(f"{tag} Verify: {n} unit objects present, unit[0] clean")
+
+
 def _load_cached_embeddings(
     cache_path: Optional[str],
     expected_n: Optional[int],
@@ -281,24 +351,38 @@ def _load_cached_embeddings(
     overwrites the cache.
     """
     from climbmix.core.embedding_cache import (
-        ShardedEmbeddingCache, is_sharded_cache)
+        ShardedEmbeddingCache, is_sharded_cache, blocks_present)
 
     if not (cache_path and os.path.exists(cache_path)):
         return None
     if os.path.isdir(cache_path) and is_sharded_cache(cache_path):
-        cache = ShardedEmbeddingCache(cache_path)
-        if expected_n is not None and cache.shape[0] != expected_n:
-            raise SystemExit(
-                f"{tag} FATAL: sharded cache {cache_path} holds "
-                f"{cache.shape[0]:,} rows but {expected_n:,} expected — "
-                "stale cache at this key; delete the directory to "
-                "re-embed")
-        print(f"{tag} Loading cached embeddings from: {cache_path} "
-              f"(sharded, {cache.block_count} blocks)")
-        print(f"{tag} Loaded {cache.shape[0]:,} embeddings, dim={cache.shape[1]}")
-        if not _verify_sharded_cache(cache, tag):
-            _validate_embeddings(cache, tag, fail_on_nan=False)
-        return cache
+        if blocks_present(cache_path):
+            cache = ShardedEmbeddingCache(cache_path)
+            if expected_n is not None and cache.shape[0] != expected_n:
+                raise SystemExit(
+                    f"{tag} FATAL: sharded cache {cache_path} holds "
+                    f"{cache.shape[0]:,} rows but {expected_n:,} expected — "
+                    "stale cache at this key; delete the directory to "
+                    "re-embed")
+            print(f"{tag} Loading cached embeddings from: {cache_path} "
+                  f"(sharded, {cache.block_count} blocks)")
+            print(f"{tag} Loaded {cache.shape[0]:,} embeddings, dim={cache.shape[1]}")
+            if not _verify_sharded_cache(cache, tag):
+                _validate_embeddings(cache, tag, fail_on_nan=False)
+            return cache
+        # blocks absent (auto-cleaned / manifest-only preprocess): the
+        # streaming tier, never a silent re-embed — the fresh-embed
+        # writer cannot write through a manifest-holding dir
+        stream = _try_streaming_cache(cache_path, expected_n, tag)
+        if stream is not None:
+            _verify_streaming_cache(stream, tag)
+            return stream
+        raise SystemExit(
+            f"{tag} FATAL: {cache_path} holds a manifest but no local "
+            "blocks, and streaming is unavailable — re-run "
+            "runs/preprocess_pool.sh to re-merge (~40min), or re-merge "
+            "with --manifest-only / provide the remote config the "
+            "manifest records, to enable OBS streaming")
     if cache_path.endswith(".npy"):
         embeddings = np.load(cache_path, mmap_mode="r")
     else:  # legacy npz — fully materialized on load, as before
@@ -1097,8 +1181,10 @@ def embed_texts_streaming(
             f"✗ [Embed-Stream] pool cache miss on a full-scale pool "
             f"({_n_docs:,} docs > {_INLINE_EMBED_MAX_DOCS:,}) — inline "
             f"embedding is a ~40h grind on the local NPUs. Run "
-            f"`bash runs/preprocess_pool.sh` first (merges the OBS "
-            f"durable tier into the local cache, ~1-2h), or set "
+            f"`bash runs/preprocess_pool.sh` first: full mode merges "
+            f"the OBS durable tier into local blocks (~40min), "
+            f"PREPROCESS_MODE=manifest-only just publishes the row map "
+            f"(minutes; Stage 1 then streams units from OBS). Or set "
             f"EMBED_INLINE_FULL_POOL=1 to embed inline anyway.")
 
     actual_device = device

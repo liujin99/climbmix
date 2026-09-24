@@ -37,7 +37,9 @@ from climbmix.core.quality_filter import get_filter
 from climbmix.core.iterative_bootstrapper import IterativeBootstrapper
 from climbmix.sampling.data_selector import select_data_by_mixture, compute_mixture_dataset_stats
 from climbmix.utils.token_estimate import estimate_tokens_from_text
-from climbmix.utils.io_utils import atomic_savez, atomic_write_json, atomic_write_parquet
+from climbmix.utils.io_utils import (
+    atomic_savez, atomic_write_json, atomic_write_parquet,
+    stage1_pair, supersede_legacy_stage1, STAGE1_NPZ, STAGE1_JSON)
 from climbmix.utils.embed_cache import pool_embedding_cache_key
 
 
@@ -104,8 +106,10 @@ class CLIMBPipeline:
         stage_times["stage0_load"] = time.time() - _t
 
         # Stage 1: Cluster discovery (cacheable)
-        cluster_cache_npz = os.path.join(cluster_cache_dir, "cluster_cache.npz")
-        cluster_cache_json = os.path.join(cluster_cache_dir, "cluster_info_cache.json")
+        # ⑬r content naming: the pair loads as macro_labels.npz +
+        # macro_info.json, falling back to the legacy cluster_cache/
+        # cluster_info_cache names (existing run dirs and seeds).
+        cluster_cache_npz, cluster_cache_json = stage1_pair(cluster_cache_dir)
         embedding_cache_dir = self._pool_embedding_cache_dir(data_dir)
         if embedding_cache_dir:
             print(f"[Stage 1] Pool-level embedding/kmeans cache: {embedding_cache_dir}")
@@ -159,6 +163,9 @@ class CLIMBPipeline:
             print(f"[Stage 1] {num_clusters} clusters (from cache), {len(final_labels):,} documents")
             self._print_cluster_sizes(cluster_info)
             stage_times["stage1_discovery"] = time.time() - _t
+            # ⑬r: a cache hit used no blocks either — steady state is
+            # derived-caches-only regardless of which tier served Stage 1
+            self._autoclean_pool_blocks(embedding_cache_dir)
         else:
             _t = time.time()
             discovery = get_discovery(self.config.discovery.method, self.config.discovery)
@@ -191,8 +198,13 @@ class CLIMBPipeline:
             print(f"[Stage 1] {num_clusters} clusters, {len(final_labels):,} documents")
             self._print_cluster_sizes(cluster_info)
             stage_times["stage1_discovery"] = time.time() - _t
-            self._save_cluster_cache(cluster_cache_npz, cluster_cache_json, final_labels, cluster_info)
-            print(f"[Stage 1] Cached → {cluster_cache_npz}")
+            # save ALWAYS to content-named paths (a legacy-named load
+            # pair from resume gets superseded, not re-written)
+            new_npz = os.path.join(cluster_cache_dir, STAGE1_NPZ)
+            new_json = os.path.join(cluster_cache_dir, STAGE1_JSON)
+            self._save_cluster_cache(new_npz, new_json, final_labels, cluster_info)
+            supersede_legacy_stage1(cluster_cache_dir)
+            print(f"[Stage 1] Cached → {new_npz}")
             # Promote ONLY freshly-computed current-code results to the
             # pool-level cache — a run-level seed hit (older code lineage)
             # is deliberately NOT promoted: its clusters predate this code
@@ -200,10 +212,12 @@ class CLIMBPipeline:
             if pool_stage1_dir:
                 os.makedirs(pool_stage1_dir, exist_ok=True)
                 self._save_cluster_cache(
-                    os.path.join(pool_stage1_dir, "cluster_cache.npz"),
-                    os.path.join(pool_stage1_dir, "cluster_info_cache.json"),
+                    os.path.join(pool_stage1_dir, STAGE1_NPZ),
+                    os.path.join(pool_stage1_dir, STAGE1_JSON),
                     final_labels, cluster_info)
                 print(f"[Stage 1] Pool-level stage1 cache → {pool_stage1_dir}")
+            # ⑬r steady state: local disk keeps only derived caches.
+            self._autoclean_pool_blocks(embedding_cache_dir)
 
         # Structure gate (prod1 lesson): a pool dominated by one cluster
         # makes the mixture search degenerate (prod1: C0 = 99.05% of
@@ -440,7 +454,7 @@ class CLIMBPipeline:
         h.update(CLIMBPipeline._hash_py_tree(
             os.path.dirname(os.path.abspath(climbmix.__file__))).encode())
         return os.path.join(
-            embedding_cache_dir, f"stage1_{h.hexdigest()[:16]}")
+            embedding_cache_dir, f"stage1_key_{h.hexdigest()[:16]}")
 
     @staticmethod
     def _expected_n_docs(quality_scores, token_counts, mm, texts) -> Optional[int]:
@@ -487,8 +501,8 @@ class CLIMBPipeline:
         """(labels, cluster_info) from the pool-level Stage-1 cache, or
         None. Row-count guard: a stale cache from a different pool shape
         is ignored loudly, never silently misaligned."""
-        npz = os.path.join(pool_dir, "cluster_cache.npz")
-        jsn = os.path.join(pool_dir, "cluster_info_cache.json")
+        from climbmix.utils.io_utils import stage1_pair
+        npz, jsn = stage1_pair(pool_dir)
         if not (os.path.exists(npz) and os.path.exists(jsn)):
             return None
         try:
@@ -505,6 +519,68 @@ class CLIMBPipeline:
                   f"({len(labels):,} != {expected_n:,}), recomputing")
             return None
         return labels, info
+
+    @staticmethod
+    def _autoclean_pool_blocks(embedding_cache_dir, tag="[Stage 1]"):
+        """⑬r steady state: after Stage 1 resolves (any tier), delete the
+        local block files. What stays: manifest.json (it IS the streaming
+        row map), kmeans_K*.npz (the durable basis), stage1_key_*/
+        (the whole-segment cache) — local footprint drops from pool-size
+        to ~2.4GB.
+
+        Gates, in order:
+          - CLIMBMIX_EMB_AUTOCLEAN=0 kills it (escape hatch);
+          - a manifest without streaming fields (units_obs_prefix +
+            remote_config) SKIPS loudly — deleting blocks under a
+            legacy manifest would strand the pool dir with neither local
+            blocks nor a streaming path (re-run preprocess to upgrade);
+          - serialized under the pool .embed.lock so a concurrent
+            discovery pass never loses a block file it has not mmap'd
+            yet (mmap'd-then-deleted is safe on Linux; not-yet-mmap'd
+            is not).
+        """
+        if not embedding_cache_dir:
+            return
+        if (os.environ.get("CLIMBMIX_EMB_AUTOCLEAN", "1").strip().lower()
+                in ("0", "false", "no")):
+            print(f"{tag} block autoclean disabled "
+                  "(CLIMBMIX_EMB_AUTOCLEAN=0)")
+            return
+        man_p = os.path.join(embedding_cache_dir, "manifest.json")
+        if not os.path.isfile(man_p):
+            return
+        try:
+            with open(man_p) as f:
+                man = json.load(f)
+        except (OSError, ValueError):
+            return
+        if not (man.get("units_obs_prefix") and man.get("remote_config")):
+            print(f"{tag} block autoclean SKIPPED — manifest predates "
+                  "streaming fields (re-run runs/preprocess_pool.sh to "
+                  "upgrade it); local blocks kept")
+            return
+        import glob as _glob
+        targets = [os.path.join(embedding_cache_dir, b["file"])
+                   for b in man.get("blocks", [])]
+        targets += _glob.glob(os.path.join(embedding_cache_dir,
+                                           "block_*.json"))
+        targets = [p for p in targets if os.path.isfile(p)]
+        if not targets:
+            return
+        from climbmix.utils.io_utils import file_lock
+        with file_lock(os.path.join(embedding_cache_dir, ".embed.lock")):
+            freed = 0
+            removed = 0
+            for p in targets:
+                try:
+                    freed += os.path.getsize(p)
+                    os.remove(p)
+                    removed += 1
+                except OSError:
+                    pass
+        print(f"{tag} block autoclean: removed {removed} block file(s), "
+              f"freed {freed / (1024 ** 3):.1f} GB — kept manifest "
+              f"(streaming map), kmeans npz, stage1_key_*")
 
     @staticmethod
     def _print_cluster_sizes(cluster_info, top_n=20):

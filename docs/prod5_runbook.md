@@ -238,19 +238,36 @@ bash runs/run_experiment.sh             # 干跑门（LAUNCH 默认 1, 加 LAUNC
   `python3 scripts/backfill_block_hashes.py cache/embeddings/<key>`
   （纯本地 ~3-5min，幂等）即启用快路径。**本地 443GB = 可再生暂存**
   （用户设计指令：本地盘只放可再生数据，跑完即清；OBS units 耐久层
-  40min 重 merge 再生）——收官清理**只删块文件与清单**：
-  `rm -f cache/embeddings/<key>/block_*.npy cache/embeddings/<key>/manifest.json`
-  （**kmeans_K*.npz 与 stage1_*/ 存在 key 目录内**——prod5 实测
+  40min 重 merge 再生）——⑬r 起**收官清理自动化**：Stage 1 完成
+  （①②③ 任何路径）后引擎自动删块文件（`CLIMBMIX_EMB_AUTOCLEAN=0` 关闸），
+  **manifest.json 保留**（它是流式行图）。旧 manifest（无流式字段）下
+  自动清会跳过并提示——手动配方仅限旧缓存：
+  `rm -f cache/embeddings/<key>/block_*.npy`
+  （**kmeans_K*.npz 与 stage1_key_*/ 存在 key 目录内**——prod5 实测
   `f8dcb9d7c29b/kmeans_K1000.npz`，整目录 rm 会连带删掉，下轮白付
   39min kmeans；保留 = 重 merge 后 kmeans/stage1 直接命中）
+- **OBS 流式直读 + manifest-only 供给（⑬r，上量爆盘的结构性解）**：
+  ① preprocess 上量模式 `PREPROCESS_MODE=manifest-only bash
+  runs/preprocess_pool.sh` ——只对账 units 并发布 manifest（记录
+  units_obs_prefix + remote_config），**零块落盘**；② 引擎 ③a 在块缺失
+  时走 `StreamingShardedEmbeddingCache`：unit partials 按需 LRU 暂存
+  （默认 2 单元 ≈ 15GB RAM，`CLIMBMIX_EMB_STREAM_LRU`），磁盘占用与池
+  大小解耦；每趟全池扫描 = 一遍网络（prescan/训练采样/指派 ~3 趟）。
+  `CLIMBMIX_EMB_STREAM=0` 关流式（回退 fail-loud 指路 preprocess）。
+  kmeans-first：③ 先查 kmeans npz，命中则嵌入矩阵整个不载——代码变更
+  重发 = 纯 merge 段 ~2min，块在不在都无所谓
 - **池级 Stage-1 整段缓存（⑬p）**：merge 段产物（大簇标签 +
-  cluster_info）内容键控存 `key 目录/stage1_<hash>/`，键 = 全量
+  cluster_info）内容键控存 `key 目录/stage1_key_<hash>/`（⑬r 改名，
+  消除"哈希校验文件"误读；无存量目录，免迁移），键 = 全量
   discovery 配置（K_init/K_enhanced/K_max/prune 阈值/merge 策略…）+
   **全仓 climbmix 源码哈希**——代码漂移自动重键（重算，绝不把旧代码
-  算的簇当新代码产物）。优先级 = run 级 cluster_cache（种子/resume
-  路径，保持最高）> 池级 stage1 > 现算；**仅现算结果晋升池级**（run
+  算的簇当新代码产物）。优先级 = run 级 macro_labels（种子/resume
+  路径，保持最高）> 池级 stage1_key_ > 现算；**仅现算结果晋升池级**（run
   级种子命中不晋升——其簇可能出自旧代码谱系）。旋钮+代码不变时重发 =
-  Stage 1 整段秒过（~23min merge 免付）
+  Stage 1 整段秒过（~23min merge 免付）。**⑬r 内容命名**：产物文件改叫
+  `macro_labels.npz` + `macro_info.json`（旧名 cluster_cache.npz /
+  cluster_info_cache.json 仍可读——旧 run 目录与旧种子免迁移；新写入用
+  新名并清掉旧名副本）。
 - **重发射注意**：`_current` 已有指纹且其间代码/参数变过 → 引擎归档整个
   目录后空目录重来 → 先 `rm -rf result/prod5_current` 再发
 
@@ -284,7 +301,8 @@ pkill -f run_experiment.sh
 python3 scripts/wipe_obs_exps.py result/prod5_current --exp-name prod5
 python3 scripts/wipe_obs_exps.py result/prod5_current --exp-name prod5 --apply
 # 2) 清本地（发射姿态见 §4 要点：池缓存已复热 → no-seed 直接发；
-#    未复热 → 下面两行种子重拷 = fallback 快路径）
+#    未复热 → 下面两行种子重拷 = fallback 快路径；旧名直接拷——⑬r
+#    双读兼容 cluster_cache.npz / cluster_info_cache.json 旧名）
 rm -rf result/prod5_current
 mkdir -p result/prod5_current
 cp result/prod4_current/cluster_cache.npz result/prod4_current/cluster_info_cache.json result/prod4_current/balanced_profile.json result/prod5_current/

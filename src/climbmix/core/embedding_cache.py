@@ -30,6 +30,7 @@ embed path still writes .npy.
 import json
 import os
 import threading
+from collections import OrderedDict
 
 MANIFEST_NAME = "manifest.json"
 FORMAT = "sharded-v1"
@@ -42,6 +43,27 @@ def manifest_path(cache_dir: str) -> str:
 def is_sharded_cache(cache_dir: str) -> bool:
     """True when cache_dir holds a published sharded manifest."""
     return os.path.isfile(manifest_path(cache_dir))
+
+
+def blocks_present(cache_dir: str) -> bool:
+    """True when every manifest-declared block file exists locally.
+
+    The streaming tier's gate: a manifest whose blocks were auto-cleaned
+    (or never materialized) is a streaming pool dir, not a local hit and
+    not a silent miss."""
+    try:
+        man = load_manifest(cache_dir)
+    except (OSError, ValueError):
+        return False
+    return all(os.path.isfile(os.path.join(cache_dir, b["file"]))
+               for b in man["blocks"])
+
+
+def streaming_fields(man: dict) -> bool:
+    """True when a manifest carries what the streaming tier needs: the
+    OBS prefix of the unit partials and a remote-config path to build a
+    client from. Manifests written before ⑬r lack both."""
+    return bool(man.get("units_obs_prefix") and man.get("remote_config"))
 
 
 def load_manifest(cache_dir: str) -> dict:
@@ -221,3 +243,87 @@ class ShardedEmbeddingCache:
             parts.append(np.asarray(view[idx]))
         return np.ascontiguousarray(np.concatenate(parts, axis=0),
                                     dtype=np.float32)
+
+
+class StreamingShardedEmbeddingCache(ShardedEmbeddingCache):
+    """OBS-fallback read view over the SAME manifest, zero local blocks.
+
+    For pools whose local blocks were auto-cleaned after Stage 1 (⑬r
+    steady state) or never materialized (manifest-only preprocess):
+    manifest.json survives as the row map, and each block is fetched on
+    demand from its OBS unit partial
+    ({units_obs_prefix}/embed_units/<unit_id>/result/partial_block.npz),
+    staged through a RAM-backed tmp file and kept in a small LRU of
+    decompressed blocks (CLIMBMIX_EMB_STREAM_LRU, default 2 ≈ 15 GB at
+    prod5 geometry — the 1.6T disk stays at zero pool footprint).
+
+    Only _map is overridden, so every consumer keeps sharded-cache read
+    semantics (contiguous slicing, iter_blocks, the deterministic
+    gather). Two deliberate differences, both downstream of the class:
+    full-scan parallelism stays off (cluster_assign keeps the serial
+    chunk loop — forked workers would share a dead OBS client; the merge
+    builds one client per process for exactly this reason), and
+    verification is stat+one-unit-sample (the byte-level guarantee is
+    the merge's per-unit validation; an OBS object is not a local file
+    that rots behind the manifest's back).
+
+    Cost model: prescan/gather/assign each walk rows sequentially, so
+    each unit is fetched once per pass — a fresh Stage 1 sweeps the
+    network ~3x pool size (vs one sweep + full disk for the local
+    merge). The ranged-GET optimization (npz members are ZIP_STORED, so
+    row slices are byte slices) is the documented next lever if that
+    constant ever hurts at scale.
+    """
+
+    def __init__(self, cache_dir: str, storage, lru_max=None):
+        super().__init__(cache_dir)
+        self.storage = storage
+        try:
+            self._lru_max = max(1, int(lru_max if lru_max is not None
+                else os.environ.get("CLIMBMIX_EMB_STREAM_LRU", "2")))
+        except (TypeError, ValueError):
+            self._lru_max = 2
+        self._lru = OrderedDict()
+        self.fetch_count = 0
+
+    def unit_uri(self, i: int) -> str:
+        prefix = str(self.manifest["units_obs_prefix"]).rstrip("/")
+        uid = self._blocks[i]["unit_id"]
+        return f"{prefix}/embed_units/{uid}/result/partial_block.npz"
+
+    def _map(self, i: int):
+        """LRU of fetched blocks; on miss, download the unit npz through
+        a RAM-backed tmp file (deleted before return — the decompressed
+        ndarray is the only resident copy) and shape-check it against
+        the manifest exactly like the local path."""
+        import tempfile
+        import time
+        import numpy as np
+        cached = self._lru.get(i)
+        if cached is not None:
+            self._lru.move_to_end(i)
+            return cached
+        uri = self.unit_uri(i)
+        want = (self._rows[i], self.dim)
+        t0 = time.time()
+        base = ("/dev/shm" if os.path.isdir("/dev/shm")
+                and os.access("/dev/shm", os.W_OK) else None)
+        with tempfile.TemporaryDirectory(prefix="climbmix_stream_",
+                                          dir=base) as td:
+            p = os.path.join(td, "unit.npz")
+            self.storage.download_file(uri, p)
+            arr = np.load(p)["embeddings"]
+        if tuple(arr.shape) != want:
+            raise ValueError(f"{uri}: shape {tuple(arr.shape)} != "
+                             f"manifest {want}")
+        if arr.dtype != np.float32:
+            raise ValueError(f"{uri}: dtype {arr.dtype} != float32")
+        arr = np.ascontiguousarray(arr)
+        self._lru[i] = arr
+        self.fetch_count += 1
+        while len(self._lru) > self._lru_max:
+            self._lru.popitem(last=False)
+        print(f"[Stream] staged block {i + 1}/{len(self._blocks)} "
+              f"({want[0]:,} rows, {time.time() - t0:.0f}s) from "
+              f"{self._blocks[i]['unit_id']}")
+        return arr

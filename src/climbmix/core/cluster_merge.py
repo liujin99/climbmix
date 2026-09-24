@@ -1281,34 +1281,51 @@ def preprocess_pipeline(
     Returns:
         Tuple of (cluster_info_list, final_cluster_labels).
     """
-    from climbmix.core.embedding_cluster import embed_documents, embed_texts_streaming, cluster_embeddings
+    from climbmix.core.embedding_cluster import (
+        embed_documents, embed_texts_streaming, cluster_embeddings,
+        _load_cached_clustering)
 
     print("\n" + "=" * 70)
     print("  CLIMB Preprocessing Pipeline")
     print("=" * 70)
 
+    # ── kmeans-first (⑬r): the basis npz depends ONLY on pool content,
+    # and the merge segment consumes labels+quality+tokens — never the
+    # embedding matrix. So a basis hit makes the embeddings unnecessary
+    # entirely: a code-change relaunch runs merge 段 only (~2min), with
+    # no local blocks and no streaming sweep. The cache check must
+    # precede embedding acquisition, not live inside cluster_embeddings.
+    n_docs = len(texts) if texts is not None else (
+        metadata_manager.num_docs if metadata_manager is not None else None)
+    cached_basis = (_load_cached_clustering(kmeans_cache, n_docs, "[Preprocess]")
+                    if kmeans_cache else None)
+
     t0 = time.time()
 
-    if texts is not None:
-        # Multi-NPU fan-out happens inside embed_documents (>= _MULTI_NPU_MIN_DOCS
-        # docs, falls back to single device on failure) — see embedding_cluster.
-        embeddings = embed_documents(
-            texts, model_name=embedding_model,
-            cache_path=embedding_cache, device=device,
-        )
-    elif metadata_manager is not None:
-        print("[Preprocess] Streaming mode: embedding shard-by-shard (no full text load)")
-        embeddings = embed_texts_streaming(
-            metadata_manager, model_name=embedding_model,
-            cache_path=embedding_cache, device=device,
-            truncate_len=embedding_truncate_len,
-        )
+    if cached_basis is not None:
+        cluster_labels, centroids = cached_basis
     else:
-        raise ValueError("Either texts or metadata_manager must be provided")
+        if texts is not None:
+            # Multi-NPU fan-out happens inside embed_documents (>= _MULTI_NPU_MIN_DOCS
+            # docs, falls back to single device on failure) — see embedding_cluster.
+            embeddings = embed_documents(
+                texts, model_name=embedding_model,
+                cache_path=embedding_cache, device=device,
+            )
+        elif metadata_manager is not None:
+            print("[Preprocess] Streaming mode: embedding shard-by-shard (no full text load)")
+            embeddings = embed_texts_streaming(
+                metadata_manager, model_name=embedding_model,
+                cache_path=embedding_cache, device=device,
+                truncate_len=embedding_truncate_len,
+            )
+        else:
+            raise ValueError("Either texts or metadata_manager must be provided")
 
-    cluster_labels, centroids = cluster_embeddings(
-        embeddings, K_init=K_init, cache_path=kmeans_cache,
-    )
+        cluster_labels, centroids = cluster_embeddings(
+            embeddings, K_init=K_init, cache_path=kmeans_cache,
+        )
+        del embeddings
 
     cluster_quality = compute_cluster_quality(cluster_labels, quality_scores, prune_threshold=prune_threshold)
 
