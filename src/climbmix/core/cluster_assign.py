@@ -118,6 +118,97 @@ def choose_chunk_rows(
     return max(1, budget // row_bytes)
 
 
+def _scan_thread_count() -> int:
+    """Worker count for the block-parallel prescan. Mirrors
+    embedding_cluster._cluster_thread_count (24 = measured sweet spot on
+    the 192-vCPU fleet host; more collapses on NUMA traffic) — duplicated
+    here to keep cluster_assign import-free of embedding_cluster (which
+    imports THIS module). CLIMBMIX_CLUSTER_THREADS overrides both."""
+    env = os.environ.get("CLIMBMIX_CLUSTER_THREADS", "").strip()
+    if env:
+        try:
+            return max(1, int(env))
+        except ValueError:
+            pass
+    return min(os.cpu_count() or 1, 24)
+
+
+def _scan_block_worker(task):
+    """One block of the anomaly prescan, in a worker process.
+
+    Opens its own read-only memmap (memmaps never cross processes) and
+    runs the exact per-chunk logic of the serial scan_row_anomalies —
+    row-independent, so block-parallel results are bit-identical.
+    task = (path, rows, dim, chunk_rows, global_start). Returns
+    (global_start, n_nan, n_inf, zero_mask_for_this_block).
+    """
+    path, rows, dim, chunk_rows, gstart = task
+    block = np.load(path, mmap_mode="r")
+    if tuple(block.shape) != (rows, dim):
+        raise ValueError(f"{path}: shape {tuple(block.shape)} != "
+                         f"({rows}, {dim})")
+    zero_mask = np.zeros(rows, dtype=bool)
+    n_nan = 0
+    n_inf = 0
+    for lo in range(0, rows, chunk_rows):
+        c = np.asarray(block[lo:lo + chunk_rows])
+        nan_rows = np.isnan(c).any(axis=1)
+        inf_rows = np.isinf(c).any(axis=1)
+        n_nan += int(nan_rows.sum())
+        n_inf += int(inf_rows.sum())
+        bad = nan_rows | inf_rows
+        if bad.any():
+            # identical to nan_to_num(...)-then-==0-all semantics: a row is
+            # flagged when every element was non-finite OR it is all zeros
+            all_nonfinite = ~(np.isfinite(c).any(axis=1))
+            zero_mask[lo:lo + chunk_rows] = (
+                all_nonfinite | (c == 0).all(axis=1))
+        else:
+            zero_mask[lo:lo + chunk_rows] = (c == 0).all(axis=1)
+    return gstart, n_nan, n_inf, zero_mask
+
+
+def _scan_sharded_parallel(cache, chunk_rows: int, tag: str):
+    """Block-parallel scan_row_anomalies for a ShardedEmbeddingCache.
+
+    63 independent read-only block memmaps = a natural ProcessPool fan-out
+    (the embed_merge per-block validation uses the same pattern). At
+    prod5 scale the serial single-thread scan costs ~15-20min of pure
+    memory traffic; ~24 workers bring it to ~2-3min. Any pool failure
+    falls back to the serial loop (identical results, just slower)."""
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    blocks = cache.manifest["blocks"]
+    n_docs = cache.shape[0]
+    dim = cache.dim
+    tasks = [(os.path.join(cache.cache_dir, b["file"]),
+              int(b["rows"]), dim, chunk_rows, int(b["global_start"]))
+             for b in blocks]
+    workers = max(1, min(_scan_thread_count(), len(tasks) or 1))
+    # The caller sized chunk_rows for ONE process (cgroup-aware); N worker
+    # processes each materializing that chunk would multiply the footprint.
+    # Chunking is value-irrelevant (row-independent scan) — shrink per
+    # worker so the TOTAL stays within the caller's budget.
+    tasks = [(p, r, d, max(1, cr // workers), g) for p, r, d, cr, g in tasks]
+    zero_mask = np.zeros(n_docs, dtype=bool)
+    n_nan = n_inf = 0
+    done_rows = 0
+    mark = max(1, len(tasks) // 4)
+    with ProcessPoolExecutor(max_workers=workers) as ex:
+        futs = {ex.submit(_scan_block_worker, t): t for t in tasks}
+        for done, fut in enumerate(as_completed(futs), start=1):
+            gstart, b_nan, b_inf, mask = fut.result()
+            n_nan += b_nan
+            n_inf += b_inf
+            zero_mask[gstart:gstart + len(mask)] = mask
+            done_rows += len(mask)
+            if len(tasks) > 4 and (done % mark == 0 or done == len(tasks)):
+                print(f"{tag} prescan {done_rows:,}/{n_docs:,} rows "
+                      f"({100.0 * done / len(tasks):.0f}%, parallel "
+                      f"x{workers})", flush=True)
+    return n_nan, n_inf, zero_mask
+
+
 def scan_row_anomalies(
     embeddings: np.memmap,
     chunk_rows: int,
@@ -131,7 +222,19 @@ def scan_row_anomalies(
     under np.nan_to_num). A mixed row like [1.0, NaN] is NOT flagged —
     identical to the in-memory ``nan_to_num``-then-``== 0``-all behavior.
     Memory: one chunk + the (n_docs,) bool mask (~1 bit/8 per row).
+
+    Sharded caches take the block-parallel path (see
+    _scan_sharded_parallel); anything else runs the serial chunk loop.
     """
+    from climbmix.core.embedding_cache import ShardedEmbeddingCache
+    if isinstance(embeddings, ShardedEmbeddingCache):
+        try:
+            return _scan_sharded_parallel(embeddings, chunk_rows, tag)
+        except Exception as e:
+            # a pool failure is never a correctness problem — the serial
+            # loop computes the identical mask, just slower
+            print(f"{tag} prescan parallel path failed ({e!r}) — "
+                  "falling back to the serial scan", flush=True)
     n_docs = embeddings.shape[0]
     zero_mask = np.zeros(n_docs, dtype=bool)
     n_nan = 0

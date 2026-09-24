@@ -517,6 +517,38 @@ def auto_refresh_report(output_dir: str, arm: str) -> None:
         print(f"  [{arm}] (report 刷新失败: {e})")
 
 
+def autoclean_arm_data(output_dir: str, arm: str) -> None:
+    """⑬q C: 臂成功落地后自动释放本地暂存 ({arm}_shards + {arm}_mixed,
+    ~31GB/臂 @3B)。此前 proxy 路径上传后即清、臂路径不清 (战后清单 #8 的
+    手动工具) — 自动化掉手动步骤。清理脚本自带守卫双保险 (臂未成功/无
+    .done 拒清), OBS 有内容键化完整副本; CLIMBMIX_ARM_AUTOCLEAN=0 关闸。
+    best-effort — 失败只注记, 不影响臂落地。"""
+    flag = os.environ.get("CLIMBMIX_ARM_AUTOCLEAN", "1").strip().lower()
+    if flag in ("0", "false", "no", "off"):
+        print(f"  [{arm}] auto-clean 关闸 (CLIMBMIX_ARM_AUTOCLEAN=0)")
+        return
+    try:
+        diag = os.path.dirname(os.path.abspath(__file__))
+        cleaner = os.path.join(diag, "clean_derived_data.py")
+        if not os.path.isfile(cleaner):
+            return
+        r = subprocess.run(
+            [sys.executable, cleaner, "--run-dir", output_dir,
+             "--arms", arm, "--apply"],
+            capture_output=True, text=True, timeout=600)
+        tail = [ln for ln in (r.stdout or r.stderr or "").strip().splitlines()
+                if ln.strip()]
+        msg = " | ".join(tail[-2:]) if tail else f"rc={r.returncode}"
+        if r.returncode == 0:
+            print(f"  [{arm}] auto-clean: {msg}")
+        else:
+            print(f"  [{arm}] auto-clean 未执行 ({msg}) — 需要时手动: "
+                  f"python3 {cleaner} --run-dir {output_dir} "
+                  f"--arms {arm} --apply")
+    except Exception as e:
+        print(f"  [{arm}] (auto-clean 失败: {e})")
+
+
 def land_checkpoint(obs, result_uri: str, nanochat_base_dir: str, tag: str) -> bool:
     ckpt_uri = f"{result_uri.rstrip('/')}/mid_checkpoint"
     objs = obs.list_objects(ckpt_uri)
@@ -1219,6 +1251,8 @@ def main() -> int:
             print(f"  [{arm}] landed .done_mid_train_{arm} + .done_eval_{arm}")
         if csv_landed:
             auto_refresh_report(output_dir, arm)
+            if not base_check:
+                autoclean_arm_data(output_dir, arm)
     elif (not base_check) and mid_rc == 0:
         # Salvage: training succeeded remotely (eval failed / job failed
         # later) — land the checkpoint + train marker; the main script

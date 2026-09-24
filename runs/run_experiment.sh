@@ -354,7 +354,7 @@ REMOTE_FLAVOR="${REMOTE_FLAVOR:-}"                 # 规格名 (可留空=用平
 REMOTE_POOL_NAME="${REMOTE_POOL_NAME:-}"          # 专属池 (可空=用配置文件 pool_id)
 REMOTE_NPU_PER_JOB="${REMOTE_NPU_PER_JOB:-$NPU_PER_EXP}"  # 每作业卡数 (单 exp 不跨节点)
 REMOTE_SUBMIT_RETRY_H="${REMOTE_SUBMIT_RETRY_H:-24}" # 提交被拒重试时限 (小时)
-REMOTE_MAX_PREP="${REMOTE_MAX_PREP:-8}"           # 本地混料/上传并发 (2026-09-22 用户定 8; 防 1.5G/exp 的 prep 洪峰)
+REMOTE_MAX_PREP="${REMOTE_MAX_PREP:-$REMOTE_MAX_SEARCH_NODES}"  # 本地混料/上传并发: 耦合搜索节点数 (⑬q A — 动态提交语义下同时在飞备料数 ≤ 在飞槽位, = 恰好永不短板且零浪费; 显式 env 可覆盖)
 REMOTE_STORAGE_KIND="${REMOTE_STORAGE_KIND:-moxing}"  # 容器内存储后端
 REMOTE_STORAGE_ROOT="${REMOTE_STORAGE_ROOT:-}"    # mock 后端专用: 假 OBS 根目录
 REMOTE_JOB_TIMEOUT_H="${REMOTE_JOB_TIMEOUT_H:-0}" # 搜索作业运行时天花板: **0 = 不限制**（2026-09-22 用户裁决——隐藏的运行时天花板是雷: d24 级模型/预训练化搜索会让它静默误杀+重试循环; 楔死但不报错的作业交监控检测——log 流 30s 上传, 停滞可见）。opt-in: 正值 (小时) = 防楔死天花板 (排队不计, 首个 RUNNING 起算)。d28 臂作业独立: dispatch_target_arm 缺省 9h(多节点)/13h(单节点), --job-timeout-h 0 可显式去掉

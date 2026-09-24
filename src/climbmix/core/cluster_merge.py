@@ -59,24 +59,36 @@ def compute_cluster_quality(
     cluster_quality: Dict[int, float] = {}
 
     if quality_scores is None or np.all(quality_scores == 0):
-        unique_clusters = np.unique(cluster_labels)
-        for c in unique_clusters:
-            if c < 0:
-                continue
-            cluster_quality[int(c)] = 5.0
+        cluster_quality = {int(c): 5.0
+                           for c in np.unique(cluster_labels) if c >= 0}
         if quality_scores is not None and np.all(quality_scores == 0):
             print("[ClusterQuality] All-zero scores detected, skipping pruning")
         return cluster_quality
 
-    unique_clusters = np.unique(cluster_labels)
-    for c in unique_clusters:
-        if c < 0:
-            continue
-        mask = cluster_labels == c
-        avg_quality = float(quality_scores[mask].mean())
-        cluster_quality[int(c)] = avg_quality
-
-    return cluster_quality
+    # Vectorized aggregation (one bincount pass per column) instead of a
+    # boolean-mask pass PER CLUSTER: at prod5 scale the loop was K_init
+    # =1000 full-pool mask scans ≈ 1TB of memory traffic, ~10-15min single
+    # thread — the dominant cost of the merge stage. Exactness: production
+    # quality scores are discrete half-steps, so every column sum (and the
+    # sum of sums) is exact in fp64, and the SINGLE final division
+    # sum/(docs*cols) is the same correctly-rounded mean the loop's
+    # np.mean produced — bit-identical for discrete scores. Do NOT switch
+    # to mean-of-column-means: that divides per column first and picks up
+    # ~1 ULP of rounding, enough to flip a cluster whose true mean sits
+    # exactly ON the prune threshold. Continuous random scores differ at
+    # ~1 ULP (tests: discrete == exact, continuous == allclose).
+    q = (quality_scores if quality_scores.ndim > 1
+         else quality_scores.reshape(-1, 1))
+    valid = cluster_labels >= 0
+    ids = cluster_labels[valid]
+    K = int(ids.max()) + 1 if len(ids) else 0
+    counts = np.bincount(ids, minlength=K)
+    sums = np.zeros((K, q.shape[1]), dtype=np.float64)
+    for j in range(q.shape[1]):
+        sums[:, j] = np.bincount(ids, weights=q[valid, j], minlength=K)
+    denom = counts * q.shape[1]
+    return {int(c): float(sums[c].sum() / denom[c])
+            for c in np.nonzero(denom > 0)[0]}
 
 
 def compute_cluster_column_mins(
@@ -162,10 +174,21 @@ def prune_clusters(
     for new_id, old_id in enumerate(sorted(kept_clusters)):
         old_to_new[old_id] = new_id
 
-    pruned_labels = np.full(len(cluster_labels), -1, dtype=np.int64)
-    for old_id, new_id in old_to_new.items():
-        mask = cluster_labels == old_id
-        pruned_labels[mask] = new_id
+    # Lookup-table remap instead of a boolean-mask assignment per kept
+    # cluster (~926 full-pool mask scans at prod5 scale ≈ another ~1TB of
+    # traffic). Integer remap — bit-identical to the loop by construction;
+    # -1 rows (excluded docs) and pruned clusters both fall through to the
+    # table's -1 default.
+    if old_to_new:
+        top = int(cluster_labels.max()) if cluster_labels.size else -1
+        top = max(top, max(old_to_new))
+        lut = np.full(top + 1, -1, dtype=np.int64)
+        lut[np.fromiter(old_to_new.keys(), dtype=np.int64)] = \
+            np.fromiter(old_to_new.values(), dtype=np.int64)
+        pruned_labels = np.where(cluster_labels >= 0,
+                                 lut[np.maximum(cluster_labels, 0)], -1)
+    else:
+        pruned_labels = np.full(len(cluster_labels), -1, dtype=np.int64)
 
     kept_indices = sorted(old_to_new.keys())
     pruned_centroids = centroids[kept_indices].copy()
@@ -1171,18 +1194,23 @@ def build_cluster_info(
     if token_counts is None:
         token_counts = np.ones(len(merged_labels), dtype=np.int64)
 
-    unique_ids = np.unique(merged_labels[merged_labels >= 0])
-    clusters: List[ClusterInfo] = []
+    # Two bincounts instead of a mask pass per cluster (K_final is small —
+    # 15 at prod5 — but each mask scan is still a full 930MB read).
+    # Integer token sums accumulate exactly in fp64 → bit-identical.
+    valid = merged_labels >= 0
+    ids = merged_labels[valid]
+    top = int(ids.max()) + 1 if ids.size else 0
+    counts = np.bincount(ids, minlength=top)
+    token_sums = np.bincount(
+        ids, weights=token_counts[valid].astype(np.float64), minlength=top)
 
-    for cid in sorted(unique_ids):
-        mask = merged_labels == cid
-        n_docs = int(mask.sum())
-        n_tokens = int(token_counts[mask].sum())
+    clusters: List[ClusterInfo] = []
+    for cid in np.nonzero(counts > 0)[0]:
         clusters.append(ClusterInfo(
             cluster_id=int(cid),
             centroid=merged_centroids[int(cid)].astype(np.float64),
-            num_docs=n_docs,
-            num_tokens=n_tokens,
+            num_docs=int(counts[cid]),
+            num_tokens=int(token_sums[cid]),
             label=f"C{int(cid)}",
         ))
 

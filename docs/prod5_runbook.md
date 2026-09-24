@@ -171,7 +171,9 @@ launch_prod5.sh 已删；其机器对照价值降级为只读工具
 引擎默认值定稿（2026-09-22 用户裁决系列）：CONFIGS_PER_ITER=64,32,16
 （论文 §2.2 值）/ PROXY_TARGET_TOKENS=640M（原生默认，**prod5 按默认跑**
 ——E1 修订，prod4 实跑 400M）/ TARGET_TOKENS=3B / TARGET_ARM_NODES=8 /
-REMOTE_MAX_PREP=8 / REMOTE_JOB_TIMEOUT_H=**0（不限制**——隐藏运行时天花板
+REMOTE_MAX_PREP=**耦合 `$REMOTE_MAX_SEARCH_NODES`**（⑬q A：动态提交语义下
+同时在飞备料数 ≤ 在飞槽位 → 相等恰好永不短板且零浪费；显式 env 可覆盖）/
+REMOTE_JOB_TIMEOUT_H=**0（不限制**——隐藏运行时天花板
 是雷，楔死交监控检测；DISPATCH_RANDOM_ARM 旋钮已删）。**本轮显式 5 个键**
 （4 个环境身份键故意保持本地安全默认——裸跑引擎不会误发真集群；
 REMOTE_OBS_PREFIX 留空自动拼 `{obs_prod_base}/prod5`；REMOTE_MAX_SEARCH_NODES
@@ -323,7 +325,12 @@ eval-only）入册可见但**免计**（1 与 8 节点不同类不可比）。�
 `TARGET_ARM_NODES`（每臂形状）的区分：后者 = 单臂长什么样（8 节点/臂），
 前者 = 全族在飞总和。注册表 `.validation_fleet/` 随派发进程存活（atexit
 注销 + 死 pid 清扫——dispatch 被杀 = 该臂脱离记账）；report.md 刷新已
-flock 串行化（`.report_refresh.lock`），并发臂落地无写入竞争。**大报告自更新（2026-09-22 用户裁决：最终要看整个实验跑完的
+flock 串行化（`.report_refresh.lock`），并发臂落地无写入竞争。**臂成功
+即自动清本地暂存（⑬q C）**：eval CSV + report 刷新落地后，dispatch 自动
+调 `clean_derived_data.py --arms <arm> --apply` 释放 `{arm}_shards` +
+`{arm}_mixed`（~31GB/臂 @3B；OBS 有内容键化完整副本，守卫双保险拒清未
+成功臂）；`CLIMBMIX_ARM_AUTOCLEAN=0` 关闸，手动路径照旧可用。
+**大报告自更新（2026-09-22 用户裁决：最终要看整个实验跑完的
 大报告）**：report.md = 搜索子报告 + **CP4 判定节** + **赢家配方节**，每个臂
 （含 base 锚点）的 eval CSV 落地时 dispatch_target_arm 自动幂等刷新两节
 （走 cp4_report，自带配方链；--ref 默认已改 uniform，锚点预期值缺省不做

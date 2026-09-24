@@ -116,6 +116,21 @@ class CLIMBPipeline:
                 final_labels = cache["final_labels"]
                 cluster_info = self._load_cluster_cache(cluster_cache_json)
                 cluster_cache_ok = len(cluster_info) > 0
+                if cluster_cache_ok:
+                    # Seed-path guards (⑬q F): a seed copied from a
+                    # DIFFERENT pool parses fine (npz zip CRC covers bit
+                    # rot) but would silently misalign labels vs the
+                    # quality/token arrays — row count + internal
+                    # consistency cover the wrong-source and half-copied
+                    # cases. Mismatch → recompute (the pool tier backs the
+                    # recovery, so recompute is always safe).
+                    bad = self._seed_cache_mismatch(
+                        final_labels, cluster_info,
+                        quality_scores, token_counts, mm, texts_loaded)
+                    if bad:
+                        print(f"[Stage 1] Cluster cache {bad} — "
+                              "seed suspect, recomputing")
+                        cluster_cache_ok = False
             except Exception as e:
                 print(f"[Stage 1] Cluster cache unreadable ({e}), recomputing")
         # Pool-level Stage-1 cache (⑬p): the run-level pair above is the
@@ -129,15 +144,8 @@ class CLIMBPipeline:
         if not cluster_cache_ok and embedding_cache_dir:
             pool_stage1_dir = CLIMBPipeline._stage1_pool_cache_dir(
                 self.config.discovery, embedding_cache_dir)
-            expected_n = None
-            if quality_scores is not None:
-                expected_n = len(quality_scores)
-            elif token_counts is not None:
-                expected_n = len(token_counts)
-            elif mm is not None:
-                expected_n = getattr(mm, "num_docs", None)
-            elif texts_loaded is not None:
-                expected_n = len(texts_loaded)
+            expected_n = self._expected_n_docs(
+                quality_scores, token_counts, mm, texts_loaded)
             pool_hit = self._try_load_stage1_pool(pool_stage1_dir, expected_n)
             if pool_hit is not None:
                 final_labels, cluster_info = pool_hit
@@ -433,6 +441,47 @@ class CLIMBPipeline:
             os.path.dirname(os.path.abspath(climbmix.__file__))).encode())
         return os.path.join(
             embedding_cache_dir, f"stage1_{h.hexdigest()[:16]}")
+
+    @staticmethod
+    def _expected_n_docs(quality_scores, token_counts, mm, texts) -> Optional[int]:
+        """Doc count from whatever Stage 0 produced, for cache row guards."""
+        if quality_scores is not None:
+            return len(quality_scores)
+        if token_counts is not None:
+            return len(token_counts)
+        if mm is not None:
+            return getattr(mm, "num_docs", None)
+        if texts is not None:
+            return len(texts)
+        return None
+
+    @staticmethod
+    def _seed_cache_mismatch(labels, cluster_info, quality_scores,
+                             token_counts, mm, texts) -> Optional[str]:
+        """None when the run-level cluster cache is self-consistent with
+        the current pool, else a one-line reason. Checks:
+          - row count vs the pool (wrong-pool seed)
+          - sum(cluster num_docs) vs the count of non-negative labels
+            (labels/info from different runs — note -1 rows are LEGAL in
+            final_labels, pruned docs stay -1, so the sum matches the
+            non-negative count, not len(labels))
+          - max label id within cluster_info's ids (half-copied pair)
+        """
+        expected_n = CLIMBPipeline._expected_n_docs(
+            quality_scores, token_counts, mm, texts)
+        if expected_n is not None and len(labels) != expected_n:
+            return (f"row mismatch ({len(labels):,} labels vs "
+                    f"{expected_n:,} docs — seed from a different pool?)")
+        n_nonneg = int((labels >= 0).sum())
+        n_sum = sum(c.num_docs for c in cluster_info)
+        if n_sum != n_nonneg:
+            return (f"doc-sum mismatch (cluster_info {n_sum:,} vs labels "
+                    f"{n_nonneg:,} non-negative — labels/info disagree?)")
+        max_id = max((c.cluster_id for c in cluster_info), default=-1)
+        if labels.size and int(labels.max()) > max_id:
+            return (f"label id {int(labels.max())} beyond cluster_info "
+                    f"(max {max_id}) — half-copied seed?")
+        return None
 
     def _try_load_stage1_pool(self, pool_dir, expected_n):
         """(labels, cluster_info) from the pool-level Stage-1 cache, or
