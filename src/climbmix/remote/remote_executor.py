@@ -295,7 +295,10 @@ class RemoteConfig:
     pool_name: str = ""
 
     # ── scheduling ──
-    max_concurrent_jobs: int = 8
+    # 10/8 = the engine (run_experiment.sh REMOTE_MAX_SEARCH_NODES /
+    # REMOTE_MAX_PREP) defaults, mirrored here so library-only callers get
+    # the same shape the production launches use (⑬d debt: was 8/4).
+    max_concurrent_jobs: int = 10
     # Dynamic submission (shared pool fluctuates 10-200 cards): a submit
     # rejected for capacity/quota is RETRIED with exponential backoff until
     # submit_retry_timeout_s — the config is never burned by transient
@@ -308,7 +311,7 @@ class RemoteConfig:
     # Kept small so a high max_concurrent_jobs cannot make 1.5GB/exp
     # prep+upload runs stampede the master node; submit threads pull from
     # the prepped specs. (Local-slice prep is bounded by its own NPU slots.)
-    max_prep_parallel: int = 4
+    max_prep_parallel: int = 8
     # Hybrid fleet: also run experiments on the LOCAL NPUs via the parent
     # ProxyRunner parallel path (npu_per_exp in [1, npu_devices], a divisor;
     # npu_per_exp == npu_devices = ONE whole-node slot, the parent's serial

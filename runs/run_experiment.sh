@@ -506,6 +506,8 @@ source "$CLIMBMIX_DIR/runs/lib/target_arm.sh"
 export TARGET_BASE_CKPT="$NANOCHAT_BASE_DIR/base_checkpoints/d${TARGET_DEPTH}"
 # launch_env.json: 独立发射的 dispatch 进程 (nohup ... --arm random) 读它
 # 获得全部所需变量 — 不依赖启动 shell 的环境传递。每次发射刷新。
+# CONFIGS_PER_ITER / PROXY_TARGET_TOKENS 两个形状键必须入册 (⑬j 教训:
+# recall 残留错形时对账工具对这两键零可见, 错形跑了 8h 才被坐实)。
 export EXP_NAME DATA_DIR CLIMBMIX_DIR NANOCHAT_DIR NANOCHAT_BASE_DIR \
        GENERAL_DATA_DIR PROXY_DEPTH TARGET_DEPTH TARGET_STEPS TARGET_TOKENS \
        TARGET_LR_SCALE TARGET_WARMUP TARGET_WARMDOWN CORE_METRIC_EVERY \
@@ -513,7 +515,8 @@ export EXP_NAME DATA_DIR CLIMBMIX_DIR NANOCHAT_DIR NANOCHAT_BASE_DIR \
        EVAL_MAX_PER_TASK EVAL_DEVICE_BATCH_SIZE EVAL_CORE_BATCH_SIZE \
        STEM_RATIO NUM_NPU NPU_PER_EXP K_ENHANCED HF_ENDPOINT \
        REMOTE_D28_ASSET_URI NANOCHAT_DTYPE OUTPUT_DIR \
-       TARGET_ARM_NODES TARGET_LOAD_OPTIMIZER
+       TARGET_ARM_NODES TARGET_LOAD_OPTIMIZER \
+       CONFIGS_PER_ITER PROXY_TARGET_TOKENS
 python3 - "$OUTPUT_DIR/launch_env.json" "$TARGET_BASE_CKPT" <<'PYEOF'
 import json, os, sys
 out, target_base_ckpt = sys.argv[1], sys.argv[2]
@@ -525,7 +528,8 @@ keys = ["EXP_NAME", "DATA_DIR", "CLIMBMIX_DIR", "NANOCHAT_DIR",
         "EVAL_DEVICE_BATCH_SIZE", "EVAL_CORE_BATCH_SIZE", "STEM_RATIO",
         "NUM_NPU", "NPU_PER_EXP", "K_ENHANCED", "HF_ENDPOINT",
         "REMOTE_D28_ASSET_URI", "NANOCHAT_DTYPE", "OUTPUT_DIR",
-        "TARGET_ARM_NODES", "TARGET_LOAD_OPTIMIZER"]
+        "TARGET_ARM_NODES", "TARGET_LOAD_OPTIMIZER",
+        "CONFIGS_PER_ITER", "PROXY_TARGET_TOKENS"]
 env = {k: os.environ.get(k, "") for k in keys}
 env["TARGET_BASE_CKPT"] = target_base_ckpt
 with open(out, "w") as f:
