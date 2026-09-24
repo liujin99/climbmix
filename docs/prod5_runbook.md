@@ -235,9 +235,17 @@ bash runs/run_experiment.sh             # 干跑门（LAUNCH 默认 1, 加 LAUNC
   （用户设计指令：本地盘只放可再生数据，跑完即清；OBS units 耐久层
   40min 重 merge 再生）——收官清理**只删块文件与清单**：
   `rm -f cache/embeddings/<key>/block_*.npy cache/embeddings/<key>/manifest.json`
-  （**kmeans_K*.npz 存在 key 目录内**——prod5 实测
-  `f8dcb9d7c29b/kmeans_K1000.npz`，整目录 rm 会连带删掉它，下轮白付
-  39min kmeans；保留 = 重 merge 后 kmeans 直接命中）
+  （**kmeans_K*.npz 与 stage1_*/ 存在 key 目录内**——prod5 实测
+  `f8dcb9d7c29b/kmeans_K1000.npz`，整目录 rm 会连带删掉，下轮白付
+  39min kmeans；保留 = 重 merge 后 kmeans/stage1 直接命中）
+- **池级 Stage-1 整段缓存（⑬p）**：merge 段产物（大簇标签 +
+  cluster_info）内容键控存 `key 目录/stage1_<hash>/`，键 = 全量
+  discovery 配置（K_init/K_enhanced/K_max/prune 阈值/merge 策略…）+
+  **全仓 climbmix 源码哈希**——代码漂移自动重键（重算，绝不把旧代码
+  算的簇当新代码产物）。优先级 = run 级 cluster_cache（种子/resume
+  路径，保持最高）> 池级 stage1 > 现算；**仅现算结果晋升池级**（run
+  级种子命中不晋升——其簇可能出自旧代码谱系）。旋钮+代码不变时重发 =
+  Stage 1 整段秒过（~23min merge 免付）
 - **重发射注意**：`_current` 已有指纹且其间代码/参数变过 → 引擎归档整个
   目录后空目录重来 → 先 `rm -rf result/prod5_current` 再发
 

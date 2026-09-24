@@ -14,6 +14,8 @@ Pipeline stages:
   4. Save outputs and generate report
 """
 
+import dataclasses
+import hashlib
 import json
 import os
 import time
@@ -116,6 +118,32 @@ class CLIMBPipeline:
                 cluster_cache_ok = len(cluster_info) > 0
             except Exception as e:
                 print(f"[Stage 1] Cluster cache unreadable ({e}), recomputing")
+        # Pool-level Stage-1 cache (⑬p): the run-level pair above is the
+        # seed/resume path and keeps PRECEDENCE; when absent, a content-
+        # keyed copy inside the pool key dir (full discovery config + all
+        # climbmix sources hashed — code drift re-keys, never serves
+        # clusters computed by older code) skips embeddings+kmeans+merge
+        # entirely on knob-stable relaunches (~23min merge rerun at prod5
+        # scale → seconds).
+        pool_stage1_dir = None
+        if not cluster_cache_ok and embedding_cache_dir:
+            pool_stage1_dir = CLIMBPipeline._stage1_pool_cache_dir(
+                self.config.discovery, embedding_cache_dir)
+            expected_n = None
+            if quality_scores is not None:
+                expected_n = len(quality_scores)
+            elif token_counts is not None:
+                expected_n = len(token_counts)
+            elif mm is not None:
+                expected_n = getattr(mm, "num_docs", None)
+            elif texts_loaded is not None:
+                expected_n = len(texts_loaded)
+            pool_hit = self._try_load_stage1_pool(pool_stage1_dir, expected_n)
+            if pool_hit is not None:
+                final_labels, cluster_info = pool_hit
+                cluster_cache_ok = True
+                print(f"[Stage 1] Pool-level stage1 cache hit → "
+                      f"{pool_stage1_dir} (embeddings+kmeans+merge skipped)")
         if cluster_cache_ok:
             _t = time.time()
             print("[Stage 1] Loading cached clusters...")
@@ -157,6 +185,17 @@ class CLIMBPipeline:
             stage_times["stage1_discovery"] = time.time() - _t
             self._save_cluster_cache(cluster_cache_npz, cluster_cache_json, final_labels, cluster_info)
             print(f"[Stage 1] Cached → {cluster_cache_npz}")
+            # Promote ONLY freshly-computed current-code results to the
+            # pool-level cache — a run-level seed hit (older code lineage)
+            # is deliberately NOT promoted: its clusters predate this code
+            # state and would be served as if current.
+            if pool_stage1_dir:
+                os.makedirs(pool_stage1_dir, exist_ok=True)
+                self._save_cluster_cache(
+                    os.path.join(pool_stage1_dir, "cluster_cache.npz"),
+                    os.path.join(pool_stage1_dir, "cluster_info_cache.json"),
+                    final_labels, cluster_info)
+                print(f"[Stage 1] Pool-level stage1 cache → {pool_stage1_dir}")
 
         # Structure gate (prod1 lesson): a pool dominated by one cluster
         # makes the mixture search degenerate (prod1: C0 = 99.05% of
@@ -357,6 +396,66 @@ class CLIMBPipeline:
             disc.embedding_sample_size,
         )
         return os.path.join(self.config.embedding_cache_dir, key)
+
+    @staticmethod
+    def _hash_py_tree(root: str) -> str:
+        """sha256 over every .py under root (sorted relpaths + bytes,
+        __pycache__ excluded) — deterministic and content-addressed."""
+        h = hashlib.sha256()
+        for dirpath, dirnames, filenames in sorted(os.walk(root)):
+            dirnames[:] = sorted(d for d in dirnames if d != "__pycache__")
+            for fn in sorted(filenames):
+                if not fn.endswith(".py"):
+                    continue
+                p = os.path.join(dirpath, fn)
+                h.update(os.path.relpath(p, root).encode())
+                with open(p, "rb") as f:
+                    for buf in iter(lambda: f.read(1 << 20), b""):
+                        h.update(buf)
+        return h.hexdigest()
+
+    @staticmethod
+    def _stage1_pool_cache_dir(discovery_cfg, embedding_cache_dir: str) -> str:
+        """Content-keyed dir for the ENTIRE Stage-1 product (macro labels
+        + cluster_info) inside the pool key dir. Key = the full discovery
+        config (K_init/K_enhanced/K_max/prune thresholds/merge strategy/
+        sample size/...) + a hash of ALL climbmix sources — any code drift
+        re-keys the cache (recompute, never serve clusters computed by
+        older code). The run-level cluster_cache keeps precedence (the
+        seed/resume path); the cleanup recipe (block_*.npy +
+        manifest.json only) preserves this dir, so knob-stable relaunches
+        skip embeddings+kmeans+merge altogether."""
+        import climbmix
+        payload = json.dumps(
+            dataclasses.asdict(discovery_cfg), sort_keys=True, default=str)
+        h = hashlib.sha256(payload.encode())
+        h.update(CLIMBPipeline._hash_py_tree(
+            os.path.dirname(os.path.abspath(climbmix.__file__))).encode())
+        return os.path.join(
+            embedding_cache_dir, f"stage1_{h.hexdigest()[:16]}")
+
+    def _try_load_stage1_pool(self, pool_dir, expected_n):
+        """(labels, cluster_info) from the pool-level Stage-1 cache, or
+        None. Row-count guard: a stale cache from a different pool shape
+        is ignored loudly, never silently misaligned."""
+        npz = os.path.join(pool_dir, "cluster_cache.npz")
+        jsn = os.path.join(pool_dir, "cluster_info_cache.json")
+        if not (os.path.exists(npz) and os.path.exists(jsn)):
+            return None
+        try:
+            labels = np.load(npz, allow_pickle=False)["final_labels"]
+            info = self._load_cluster_cache(jsn)
+        except Exception as e:
+            print(f"[Stage 1] Pool stage1 cache unreadable ({e}), "
+                  "recomputing")
+            return None
+        if not info:
+            return None
+        if expected_n is not None and len(labels) != expected_n:
+            print(f"[Stage 1] Pool stage1 cache row mismatch "
+                  f"({len(labels):,} != {expected_n:,}), recomputing")
+            return None
+        return labels, info
 
     @staticmethod
     def _print_cluster_sizes(cluster_info, top_n=20):
