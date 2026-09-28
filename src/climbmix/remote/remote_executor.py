@@ -96,7 +96,7 @@ class AdmissionController:
         iterations queue best-predicted first, so the floor holds the
         best): the per-iteration sample guarantee. Never truncated, never
         evicted; when the pool is tight these configs queue patiently
-        (queue_timeout_s bounds the wait).
+        (queue_timeout_s bounds the wait; 0 = unbounded).
       - overshoot tier — everything beyond the floor: the dynamic fill for
         idle slots. probe-truncate drops the never-submitted tail so the
         admitted count lands at w_i * C_eff + admit_buffer (the buffer
@@ -331,13 +331,18 @@ class RemoteConfig:
     # does NOT burn job_timeout_s: shared pools can hold a job PENDING for
     # hours before cards free up (2026-09-04 prod pool: 0 idle at launch),
     # and cancelling a still-queued job because its runtime budget was
-    # eaten by the queue is pure waste. This knob bounds the PENDING phase
-    # alone (lost/zombie queue entries).
-    queue_timeout_s: float = 24 * 3600.0
+    # eaten by the queue is pure waste. **0 = 不限制** (2026-09-28 用户
+    # 裁决, 与 job_timeout_s<=0 的 09-22 裁决同哲学): 假期拥堵实测烧满
+    # 72h 排队耐心 (24h x 3 attempts) 仍无卡——排队是平台的事, 自设上限
+    # 只会自伤; 楔死/僵尸队列交监控 (驱动日志 queued 心跳可见)。opt-in
+    # 正值 = 排队阶段上限 (防僵尸占位)。
+    queue_timeout_s: float = 0.0
     # After a queue timeout: resubmit (fresh queue clock, job name -rN
     # suffix) up to this many times before giving up and burning the
     # config as a failed experiment. Total queue patience =
     # queue_timeout_s × (1 + attempts). 0 = old burn-immediately behavior.
+    # Only consulted when queue_timeout_s > 0 (the default 0 = unlimited
+    # never fires a QueueTimeoutError, so resubmission is inert).
     queue_resubmit_attempts: int = 2
     # Adaptive admission (ADAPTIVE_CONFIGS=1, prod2 B++): a SUBMITTED job
     # still PENDING after this many minutes while sibling jobs of the same
@@ -948,7 +953,10 @@ class RemoteExecutor(ProxyRunner):
         legitimate long runs as workloads grow — wedge detection belongs
         to monitoring, not a guess baked far from the workload).
         queue_timeout_s bounds the PENDING phase alone
-        (lost/zombie queue entries).
+        (lost/zombie queue entries); <= 0 DISABLES the queue ceiling
+        entirely (2026-09-28 ruling, same philosophy: holiday congestion
+        starved a shared pool past the full 72h patience window —
+        queueing is the platform's business).
 
         Adaptive mode adds: (a) fleet RUNNING accounting — first RUNNING
         increments the shared counter (and feeds the admission probe's
@@ -991,8 +999,11 @@ class RemoteExecutor(ProxyRunner):
                     if len(self._run_samples) > 2400:
                         del self._run_samples[:1200]
             if first_running_at is None:
-                # queue phase (PENDING/UNKNOWN): submission → start clock
-                if now - submitted_at > queue_timeout:
+                # queue phase (PENDING/UNKNOWN): submission → start clock.
+                # queue_timeout <= 0 = 不限制 (2026-09-28 裁决): never
+                # self-cancel a queued job — wait for the platform.
+                if (queue_timeout > 0
+                        and now - submitted_at > queue_timeout):
                     self.job_api.cancel(job_id)
                     raise QueueTimeoutError(
                         f"remote job {job_id} (exp {experiment_id}) never "

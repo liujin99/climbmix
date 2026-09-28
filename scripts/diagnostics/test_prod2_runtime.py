@@ -372,6 +372,24 @@ except Exception as e:
 check("eviction: no sibling RUNNING -> stays queued (QueueTimeout, not evicted)",
       q_err == "QueueTimeoutError" and api_q.cancelled == ["job-1"])
 
+# queue ceiling DISABLED (2026-09-28 ruling): queue_timeout_s <= 0 must
+# NEVER self-cancel — a queued job waits for the platform however long it
+# takes (regression guard: the old unguarded comparison treated 0 as an
+# instant timeout, burning every PENDING job at the first poll)
+api_z = FakeAPI([JobStatus.PENDING, JobStatus.PENDING,
+                 JobStatus.RUNNING, JobStatus.SUCCEEDED])
+st_z = bare_wait_job(api_z, None, running_now=0, active=1,
+                     queue_timeout=0.0)
+check("queue unlimited: timeout=0 -> queued job never cancelled, runs out",
+      st_z == JobStatus.SUCCEEDED and api_z.cancelled == [])
+
+api_n = FakeAPI([JobStatus.PENDING, JobStatus.PENDING,
+                 JobStatus.RUNNING, JobStatus.SUCCEEDED])
+st_n = bare_wait_job(api_n, None, running_now=0, active=1,
+                     queue_timeout=-1.0)
+check("queue unlimited: negative timeout treated as disabled too",
+      st_n == JobStatus.SUCCEEDED and api_n.cancelled == [])
+
 # running accounting: PENDING -> RUNNING -> SUCCEEDED counts +1 then -1
 run_adm = AdmissionController(wave_budget=1, expected_slots=2)
 api_run = FakeAPI([JobStatus.PENDING, JobStatus.RUNNING,

@@ -364,8 +364,10 @@ def wait_job(job_api, obs, job_id: str, label: str, result_uri: str,
              poll_s: float, runtime_timeout_s: float,
              queue_timeout_s: float, heartbeat_s: float = 300.0):
     """Poll to terminal state. Two clocks (runtime from first RUNNING;
-    queue patience from submission). Heartbeat prefers the WORKER's
-    streamed log from OBS (real training progress) over the job console."""
+    queue patience from submission; queue_timeout_s <= 0 = 不限制
+    2026-09-28 裁决 — arm jobs are must-deliver, queueing is the
+    platform's business). Heartbeat prefers the WORKER's streamed log
+    from OBS (real training progress) over the job console."""
     submitted_at = time.time()
     first_running: Optional[float] = None
     last_print = 0.0
@@ -377,7 +379,10 @@ def wait_job(job_api, obs, job_id: str, label: str, result_uri: str,
         if first_running is None and st == JobStatus.RUNNING:
             first_running = now
         if first_running is None:
-            if now - submitted_at > queue_timeout_s:
+            # queue phase: queue_timeout_s <= 0 = unlimited patience
+            # (never self-cancel a must-deliver arm waiting for cards)
+            if (queue_timeout_s > 0
+                    and now - submitted_at > queue_timeout_s):
                 job_api.cancel(job_id)
                 raise QueueTimedOut(
                     f"[{label}] job {job_id} never started — queued "
@@ -423,7 +428,9 @@ def submit_and_wait(job_api, obs, base_name: str, command: List[str],
                     label: str, result_uri: str, runtime_timeout_s: float,
                     node_count: int = 1):
     """Submit + wait with queue-timeout resubmission (arm jobs are
-    must-deliver: queue patience = queue_timeout_s x (1 + attempts), no
+    must-deliver: queue patience = queue_timeout_s x (1 + attempts) when
+    queue_timeout_s > 0, or UNLIMITED when it is 0 (2026-09-28 ruling —
+    the default; no QueueTimedOut ever fires, resubmission is inert); no
     adaptive eviction)."""
     attempts = max(0, int(remote.queue_resubmit_attempts))
     for attempt in range(attempts + 1):
