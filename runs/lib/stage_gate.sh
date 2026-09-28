@@ -294,24 +294,28 @@ run_stage_gate() {
             echo "  Warm-start seed detected (history_seed in search_state) — keeping seed, writing fresh fingerprints"
         elif python3 - "$OUTPUT_DIR" <<'PYEOF'
             # Cache-seed dir: run-level cluster caches pre-populated by a
-            # launcher/inheritance script (cluster_cache.npz +
-            # cluster_info_cache.json + balanced_profile.json), no
-            # fingerprints yet. The prod3 rescue pattern minus the manual
-            # fingerprint pre-write (TODO #124-ii) — pre-populating and
-            # launching used to orphan-archive the caches away and silently
-            # fall into a full pool re-embed (caught 2026-09-22: the first
-            # live smoke run ground in Step-1 embedding for exactly this
-            # reason). Only KNOWN seed artifacts qualify; anything else is
-            # still an orphan.
+            # launcher/inheritance script, no fingerprints yet. The prod3
+            # rescue pattern minus the manual fingerprint pre-write (TODO
+            # #124-ii) — pre-populating and launching used to orphan-archive
+            # the caches away and silently fall into a full pool re-embed
+            # (caught 2026-09-22: the first live smoke run ground in Step-1
+            # embedding for exactly this reason). Only KNOWN seed artifacts
+            # qualify; anything else is still an orphan. ⑬r naming debt:
+            # stage-1 pair 存两代名 (macro_labels.npz/macro_info.json 新,
+            # cluster_cache.npz/cluster_info_cache.json 旧) — 任一完整成对
+            # 即可 (拷旧名种子照旧, 拷新名种子不再被误判孤儿)。
 import os, sys
 d = sys.argv[1]
-seed = {"cluster_cache.npz", "cluster_info_cache.json",
-        "balanced_profile.json"}
+base = {"balanced_profile.json"}
+legacy = {"cluster_cache.npz", "cluster_info_cache.json"}
+new = {"macro_labels.npz", "macro_info.json"}
 try:
     entries = set(os.listdir(d))
 except OSError:
     sys.exit(1)
-sys.exit(0 if entries and entries <= seed else 1)
+ok = (entries and entries <= (base | legacy | new)
+      and (legacy <= entries or new <= entries))
+sys.exit(0 if ok else 1)
 PYEOF
         then
             echo "  Cache-seed dir detected (run-level cluster caches, no fingerprints) —"
