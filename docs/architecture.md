@@ -125,9 +125,9 @@ OBS 是唯一的数据中转（远程作业之间互不通信）；本地 8 NPU 
       ▼
   收官      最优混合权重 → optimal_mixture_weights.json + 终选采样集
       │
-      ▼  验证阶段 ★见图 5
-  d28 臂族   top-3 赢家配方 + uniform/natural/domainfix 基线 + base 锚点
-      │      （8 节点/臂 × 3B tokens，在飞 ≤16 节点自动排队）
+      ▼  验证阶段 ★见图 5（⑬t：引擎 Step 4 一次调用全自动发射）
+   d28 臂族   终选臂 climb + top-3 赢家配方 + uniform/natural/domainfix 基线 + base 锚点
+       │      （8 节点/臂 × 3B tokens，在飞 ≤16 节点自动排队；排队不设限）
       ▼
   终报      最后一臂落地 → report.md 自动盖 FINAL 章（零人工组装）
 ```
@@ -300,10 +300,17 @@ Stage 1 的全部产物只有两样：**final_labels**（116M 文档 → 15 大�
   domainfix          基线：领域固定
   base 锚点          1 节点 eval-only（不训练，校准读数用）
 
-发射: scripts/dispatch_target_arm.py —— 全部臂命令可连发（无需人工排队）
+发射（⑬t 全自动）: 引擎 Step 4 = scripts/dispatch_fleet.py 一次调用
+  终选臂 climb + 上述全部臂 —— 逐臂幂等备料（.done 门控）→ 并发后台
+  dispatch（scripts/dispatch_target_arm.py，独立 session）→ wait +
+  salvage 扫尾 + .done_fleet；也可对任意已收官 run 目录独立运行
+  （prod5 桥接）。remote-only fail-loud：失败臂重跑即幂等重试
+  （已落地臂秒过），本地 torchrun 退出自动流 = 手动应急路径
   └─ 臂族注册表 .validation_fleet/：在飞训练臂节点总和 ≤ 16
      （REMOTE_MAX_VALIDATION_NODES，默认 16 = 2 臂 × 8 节点）
      超限的派发自动排队轮询；1 节点锚点入册可见但免计（1 与 8 不可比）
+     排队不设限（2026-09-28 裁决 REMOTE_QUEUE_TIMEOUT_H=0 ——
+     排队是平台的事，楔死交监控；臂运行时天花板独立 9h/13h）
 
 臂落地（eval CSV + ckpt 回传）时自动:
   ├─ report.md 幂等刷新（CP4 判定节 + 赢家配方节，flock 串行化）
@@ -332,15 +339,21 @@ Stage 1 的全部产物只有两样：**final_labels**（116M 文档 → 15 大�
 ```
 bash runs/preprocess_pool.sh                  # 供给入口（幂等，冷才跑）
 PREPROCESS_MODE=manifest-only bash runs/preprocess_pool.sh
-                                              # 上量: 只发行图，零落盘
+                                               # 上量: 只发行图，零落盘
 EXP_NAME=prodN REMOTE_ENABLED=1 REMOTE_BACKEND=modelarts \
   REMOTE_BACKEND_MODULE=climbmix_ma:create_backend \
   REMOTE_FLAVOR=modelarts.pool.visual.8xlarge \
-  bash runs/run_experiment.sh                 # 实验入口（5 键）
+  bash runs/run_experiment.sh                 # 实验入口（5 键；臂族 Step 4 全自动）
 python3 scripts/check_launch_parity.py <src_run> <dst_run>   # 发射后 1min 对账
 bash scripts/diagnostics/prod2_watch.sh result/<EXP>_current # 监控
 python3 scripts/backfill_block_hashes.py cache/embeddings/<key>  # 存量缓存补哈希
+python3 scripts/dispatch_fleet.py --output-dir <RUN_DIR> --dry-run
+                                               # 臂族计划预览（⑬t；去掉
+                                               # --dry-run = 独立发射/补齐）
 
 ⑬r 旋钮: CLIMBMIX_EMB_AUTOCLEAN=0 关自动清块 · CLIMBMIX_EMB_STREAM=0 关流式
 直读 · CLIMBMIX_EMB_STREAM_LRU=N 流式 LRU 单元数（默认 2 ≈ 15GB RAM）
+⑬t 旋钮: FLEET_ARMS=climb,topk,uniform,natural,domainfix,base（验证臂族，
+空串跳过）· REMOTE_QUEUE_TIMEOUT_H=0 排队不设限（默认；正值 = 上限）
+· REMOTE_MAX_VALIDATION_NODES=16 臂族在飞节点预算
 ```

@@ -194,7 +194,7 @@ bash runs/run_experiment.sh             # 干跑门（LAUNCH 默认 1, 加 LAUNC
 
 真发射 = 同一命令行（引擎默认 LAUNCH=1 即真发；后台化按需 nohup/setsid）。
 
-5 键之外全部吃默认，值得知道的四个：
+ 5 键之外全部吃默认，值得知道的六个：
 - `CONFIGS_PER_ITER=64,32,16`（**默认 = 论文值**（§2.2 共 112 点）——
   忘设得到的是推荐计划；smoke 8,4 / 缩水几何属显式偏离）
 - `PROXY_TARGET_TOKENS=640M`（**默认，prod5 按默认跑**——E1 修订：
@@ -207,6 +207,12 @@ bash runs/run_experiment.sh             # 干跑门（LAUNCH 默认 1, 加 LAUNC
   = 搜索作业无运行时上限（楔死交监控——log 流 30s 上传停滞可见；
   opt-in 正值 = 防楔死天花板）；臂作业超时独立: dispatch 缺省 9h 多节点
   / 13h 单节点，`--job-timeout-h 0` 可显式去掉）
+- `REMOTE_QUEUE_TIMEOUT_H=0`（**默认 = 排队不设限**,2026-09-28 裁决——
+  假期拥堵实测烧满 72h 耐心无卡,排队是平台的事,自设上限只会自伤(见
+  §4.7);opt-in 正值 = 排队上限,`REMOTE_QUEUE_RETRY` 仅在正值下生效。
+  prod5 当次续跑显式用了 8760(≈一年)作零代码保险丝,⑬t pull 后即默认 0）
+- `FLEET_ARMS=climb,topk,uniform,natural,domainfix,base`（⑬t 全自动
+  臂族,Step 4 一次调用发射全部验证臂,见 §4.6;空串 = 跳过臂族段）
 
 要点：
 - **池嵌入的两入口设计（2026-09-23 用户裁决：供给/消费分离 + 40h 陷阱
@@ -307,7 +313,7 @@ rm -rf result/prod5_current
 mkdir -p result/prod5_current
 cp result/prod4_current/cluster_cache.npz result/prod4_current/cluster_info_cache.json result/prod4_current/balanced_profile.json result/prod5_current/
 # 3) 干净 shell 重发——先确认无残留 env 覆盖（输出必须为空，有输出=开新终端）
-env | grep -E "^(CONFIGS_PER_ITER|PROXY_TARGET_TOKENS|TARGET_TOKENS|TARGET_STEPS|TARGET_ARM_NODES|REMOTE_MAX_PREP|REMOTE_JOB_TIMEOUT_H|REMOTE_MAX_SEARCH_NODES|REMOTE_MAX_VALIDATION_NODES|REMOTE_MAX_JOBS|EXP_NAME|OUTPUT_DIR)="
+    env | grep -E "^(CONFIGS_PER_ITER|PROXY_TARGET_TOKENS|TARGET_TOKENS|TARGET_STEPS|TARGET_ARM_NODES|REMOTE_MAX_PREP|REMOTE_JOB_TIMEOUT_H|REMOTE_QUEUE_TIMEOUT_H|REMOTE_QUEUE_RETRY|REMOTE_MAX_SEARCH_NODES|REMOTE_MAX_VALIDATION_NODES|REMOTE_MAX_JOBS|EXP_NAME|OUTPUT_DIR|FLEET_ARMS)="
 # ↑ 必须零输出（含旧名 REMOTE_MAX_JOBS 双查）——有输出 = shell 脏，开新终端
 # 4) §4 发射线重发（新开或已确认干净的终端）+ §4.4 对账复核
 ```
@@ -329,29 +335,51 @@ CP0 聚类结构 / CP1 SNR / CP2 online ρ / CP3 Selection mode / CP4 臂+锚点
 `Selection mode`（D19：`best_measured_no_claim` / `…claimed`）、
 `Top-k arm candidates`（预期 3 个 climb-cfgXX）。
 
-**4.6 搜索收官 → 臂族（验证阶段）**：`topk_mixture_candidates.json` top-3
-晋臂（`ARM_NAME=climb-cfgXX`，权重文件直接 `--weights` 可用）；
-**uniform**（簇等权基线，2026-09-21 更名裁决；prod1-4 臂名 random3b）/
-natural / domainfix 同批单种子；base 锚点先行；no-claim 若放行外推 →
-额外 +1 臂。**臂预算零覆盖**：引擎默认 TARGET_TOKENS=3B、launch_env 实录
-3B/2861 → 臂派发**无需任何 env 覆盖**（prod4 时代"成对覆盖
-TARGET_TOKENS=3B TARGET_STEPS=2861"已成历史——引擎默认吸收了 prod4 终态）。
-臂发射沿用 prod4 流程（dispatch_target_arm / arm_engine，含单遍守卫与
-磁盘 preflight）。**臂族并发 = 自动排队（2026-09-23 裁决）**：全部臂命令
-可连发（各开终端或顺序执行），机器侧 `REMOTE_MAX_VALIDATION_NODES`
-（默认 **16** = 2 臂 × 8 节点；dispatch CLI `--max-validation-nodes`）管
-在飞**训练臂节点总和**——超限的派发自动排队（`--queue-poll-s` 默认 60s
-轮询，先到先得无 FIFO，Ctrl+C 干净退出）；1 节点作业（base 锚点等
-eval-only）入册可见但**免计**（1 与 8 节点不同类不可比）。与
-`TARGET_ARM_NODES`（每臂形状）的区分：后者 = 单臂长什么样（8 节点/臂），
-前者 = 全族在飞总和。注册表 `.validation_fleet/` 随派发进程存活（atexit
-注销 + 死 pid 清扫——dispatch 被杀 = 该臂脱离记账）；report.md 刷新已
-flock 串行化（`.report_refresh.lock`），并发臂落地无写入竞争。**臂成功
-即自动清本地暂存（⑬q C）**：eval CSV + report 刷新落地后，dispatch 自动
-调 `clean_derived_data.py --arms <arm> --apply` 释放 `{arm}_shards` +
-`{arm}_mixed`（~31GB/臂 @3B；OBS 有内容键化完整副本，守卫双保险拒清未
-成功臂）；`CLIMBMIX_ARM_AUTOCLEAN=0` 关闸，手动路径照旧可用。
-**大报告自更新（2026-09-22 用户裁决：最终要看整个实验跑完的
+**4.6 搜索收官 → 臂族（验证阶段，⑬t 起全自动）**：臂族 =
+`FLEET_ARMS`（默认 `climb,topk,uniform,natural,domainfix,base`）——
+终选臂 climb + `topk_mixture_candidates.json` top-3 晋臂（自动展开
+`climb-cfgN`，权重键控同 optimal_mixture_weights.json 约定）+
+**uniform**（簇等权基线，2026-09-21 更名裁决；引擎自动流 ⑬t 起以
+`--arm uniform` 发射，旧 random 名退役）+ natural / domainfix 同批单种子
++ base 锚点。**引擎 Step 4 = 一次调用**（`scripts/dispatch_fleet.py`）：
+逐臂幂等备料（.done 门控）→ 并发后台 dispatch → 节点预算自动排队 →
+落地/report 刷新/暂存清理全自动 → 全齐写 `.done_fleet`（完成标记）+
+`final_report --auto` 兜底。**remote-only fail-loud**：自动流无本地
+torchrun 兜底（7 臂全 fallback 到主节点 8 卡 = ~70h 串行灾难）；失败臂
+重跑同一发射命令即幂等重试，已落地臂零成本秒过；本地路径 =
+手动应急（`runs/lib/target_arm.sh`）。**臂预算零覆盖**：引擎默认
+TARGET_TOKENS=3B、launch_env 实录 3B/2861 → 臂派发无需任何 env 覆盖
+（prod4 时代"成对覆盖"已成历史）。**排队不设限**（2026-09-28 裁决，
+REMOTE_QUEUE_TIMEOUT_H=0；臂运行时天花板独立 = dispatch 缺省 9h 多节点
+/13h 单节点，`--job-timeout-h 0` 可显式去掉）。
+
+**prod5 桥接（本稿特例）**：prod5 搜索跑在 ⑬t 之前的代码上——老驱动
+收官段自动跑的只有经典两臂（climb 终选 + random；random 已用抑制标记
+跳过，见 §4.7 事故记录）。收官 pull 新代码后，剩余臂族对**已收官目录**
+一条命令补齐（dispatch_fleet 独立可用，stage1/launch_env/remote_config
+全在目录内相对解析）：
+
+```
+# 老驱动跑完（目录改名 result/prod5_<ts>）后：
+python3 scripts/dispatch_fleet.py --output-dir result/prod5_<ts> \
+    --arms "topk,uniform,natural,domainfix,base"
+# （climb 老驱动已落地, 不在清单; idempotent——已落地臂自动跳过）
+```
+
+**臂族并发 = 自动排队（2026-09-23 裁决，机制不变）**：机器侧
+`REMOTE_MAX_VALIDATION_NODES`（默认 **16** = 2 臂 × 8 节点；dispatch CLI
+`--max-validation-nodes`）管在飞**训练臂节点总和**——超限的派发自动排队
+（`--queue-poll-s` 默认 60s 轮询，先到先得无 FIFO，Ctrl+C 干净退出）；
+1 节点作业（base 锚点等 eval-only）入册可见但**免计**（1 与 8 节点不同类
+不可比）。与 `TARGET_ARM_NODES`（每臂形状）的区分：后者 = 单臂长什么样
+（8 节点/臂），前者 = 全族在飞总和。注册表 `.validation_fleet/` 随派发
+进程存活（atexit 注销 + 死 pid 清扫——dispatch 被杀 = 该臂脱离记账）；
+report.md 刷新已 flock 串行化（`.report_refresh.lock`），并发臂落地无写入
+竞争。**臂成功即自动清本地暂存（⑬q C）**：eval CSV + report 刷新落地后，
+dispatch 自动调 `clean_derived_data.py --arms <arm> --apply` 释放
+`{arm}_shards` + `{arm}_mixed`（~31GB/臂 @3B；OBS 有内容键化完整副本，
+守卫双保险拒清未成功臂）；`CLIMBMIX_ARM_AUTOCLEAN=0` 关闸，手动路径照旧
+可用。**大报告自更新（2026-09-22 用户裁决：最终要看整个实验跑完的
 大报告）**：report.md = 搜索子报告 + **CP4 判定节** + **赢家配方节**，每个臂
 （含 base 锚点）的 eval CSV 落地时 dispatch_target_arm 自动幂等刷新两节
 （走 cp4_report，自带配方链；--ref 默认已改 uniform，锚点预期值缺省不做
@@ -368,6 +396,19 @@ report.md（判定节 + 配方节），并自查预期臂清单（topk 的 3 个
 RUN_DIR [--arms …] [--base-expected …]` 仅用于：强制盖章 / DRAFT 预览 /
 锚点正式判定（`--base-expected` 校准值，自动模式锚点只报数不判定）。
 report.md 最终结构：搜索子报告 → CP4 判定 → 赢家配方 → 终报印章。
+
+**4.7 事故记录（2026-09-28,iter 3 排队饥饿）**：假期平台拥堵,末轮
+16 个子任务 11 个跑完、exp 110–114 五个在平台队列 72h（24h × 3 次重提）
+无卡 → 驱动排队上限自伤取消 → floor 守卫拒收 11/16 → 干净崩溃（state
+已存,meta.json 复用,resume 精确重跑缺的 5 个,零科学损失）。**三连裁决**：
+① 排队时钟 0=不限制（同轮搜索+臂,`ed34fd8`——旧代码直接设 0 会秒烧,
+须 pull 后生效;当次续跑用 `REMOTE_QUEUE_TIMEOUT_H=8760` 环境保险丝零
+代码续命）；② 臂族全自动发射（⑬t,`0f94058`）；③ 老驱动自动 random 臂
+旧名缺陷——**收官前已贴抑制标记**（`.done_mid_train_random` +
+`.done_eval_random`,touch 于搜索收官前,数据备料不受影响）,uniform 基线
+臂走 4.6 桥接命令补发。教训：引擎自动流的臂名曾与 P-0 预注册命名脱节
+（random vs uniform）,smoke 只验到 Step 3 从未彩排 Step 4-7——⑬t 重写
+后该段首次进入自动验证面。
 
 ## 5. 发射窗顺手卫生（非阻塞批处理，F2）
 
