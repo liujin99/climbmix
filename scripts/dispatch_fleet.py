@@ -555,8 +555,12 @@ def main() -> int:
             if plan["prep"]:
                 run_prep(plan, output_dir, launch_env,
                          launch_env["NANOCHAT_DIR"])
-            running.append(launch(plan, output_dir, climbmix_dir,
-                                  args.retry_failed))
+            # launch() 返回 (proc, log) 二元组; wait_fleet 的契约是
+            # (plan, proc, log) 三元组 — 直接 append 会把二元组塞进去,
+            # 首次解包即 ValueError (prod5 首飞实炸, 2026-09-28)
+            proc, log = launch(plan, output_dir, climbmix_dir,
+                               args.retry_failed)
+            running.append((plan, proc, log))
         wait_fleet(running)
 
     ok = all(salvage_local_eval(p, output_dir, launch_env, exp_name)
