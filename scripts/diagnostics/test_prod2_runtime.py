@@ -1330,8 +1330,8 @@ check("shell: adaptive_compact in FP_SEARCH_PARAMS",
 check("shell: ADAPTIVE_COMPACT default 0 + forwarded",
       'ADAPTIVE_COMPACT="${ADAPTIVE_COMPACT:-0}"' in src
       and 'ADAPTIVE_ARGS+=(--adaptive-compact)' in src)
-check("shell: TARGET_ARM_MODE not fingerprinted (execution shape)",
-      re.search(r'"target_arm_mode=', src) is None)
+check("shell: TARGET_ARM_MODE knob deleted (⑬t remote-only fleet)",
+      "TARGET_ARM_MODE=" not in src)
 check("shell: TARGET_ARM_NODES default 1",
       'TARGET_ARM_NODES="${TARGET_ARM_NODES:-1}"' in src)
 check("shell: TARGET_ARM_NODES not fingerprinted (execution shape)",
@@ -1353,9 +1353,14 @@ check("shell: K_CLUSTER_MAX follows K_ENHANCED",
 check("shell: hybrid guard allows == (whole-node slot)",
       '"$NPU_PER_EXP" -gt "$NUM_NPU"' in src
       and '"$NPU_PER_EXP" -ge "$NUM_NPU"' not in src)
-check("shell: dispatch three-layer in run_arm",
-      "dispatch_target_arm.py" in src and "target_arm_train" in src
-      and "TARGET_ARM_MODE" in src)
+# ⑬t: 臂族 = Step 4 dispatch_fleet 全自动 (remote-only fail-loud; 本地
+# torchrun 兜底退出自动流 — 重跑幂等重试), 本地路径只剩应急/评测兜底
+check("shell: Step 4 fires the fleet orchestrator",
+      'scripts/dispatch_fleet.py' in src and "FLEET_ARMS" in src
+      and 'FLEET_ARMS:-climb,topk,uniform,natural,domainfix,base' in src
+      and "target_arm_train" not in src)
+check("shell: completion marker = .done_fleet (fleet-aware lifecycle)",
+      'COMPLETION_MARKERS=(".done_fleet")' in src)
 check("shell: launch_env.json snapshot written",
       "launch_env.json" in src)
 # target_arm.sh fallback shares the optimizer semantics (fair verdict:

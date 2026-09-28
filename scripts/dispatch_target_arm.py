@@ -28,7 +28,11 @@ Execution shapes (all marker-idempotent, safe to re-run):
                  prepare the random-baseline data (flock'd against the
                  main script's Step 4/5 — both sides .done-double-check),
                  upload the mixture, submit, wait, land artifacts.
-  --arm climb    data is already prepared by the main script's Steps 4-5
+                 LEGACY name: since ⑬t (2026-09-28) the engine flow fires
+                 the cluster-equal baseline as `--arm uniform` via
+                 dispatch_fleet.py (the 2026-09-21 rename ruling); this
+                 random path remains for standalone/back-compat use only.
+  --arm climb    data is already prepared by the fleet orchestrator
                  (verify + upload), then submit/wait/land.
   --arm base_eval_check
                  eval-only anchor job: evaluate the raw d28 base
@@ -38,12 +42,15 @@ Execution shapes (all marker-idempotent, safe to re-run):
                  touches NO arm markers (an anchor, not an arm). Always
                  single-node.
 
-Three-layer fallback contract with runs/run_experiment.sh run_arm(): a
-non-zero exit without .done_mid_train_<arm> makes the main script fall
-back to the local torchrun path. A salvage path exists: a job whose
-training succeeded but eval failed (result.json mid_train_rc == 0) lands
-its checkpoint + logs + .done_mid_train_<arm> and exits non-zero — the
-main script then skips retraining and evals locally.
+Fleet contract (⑬t): the engine's arm family is fired by
+scripts/dispatch_fleet.py as concurrent remote-only dispatches —
+fail-loud, NO local-torchrun fallback in the auto flow (a 7-arm fleet
+falling back onto the master's 8 cards would serialize ~70h; re-running
+the orchestrator retries exactly the missing arms). A salvage path
+remains INSIDE this script: a job whose training succeeded but eval
+failed (result.json mid_train_rc == 0) lands its checkpoint + logs +
+.done_mid_train_<arm> and exits non-zero — dispatch_fleet's salvage
+sweep then runs the local eval (runs/lib/target_arm.sh).
 
 Mutex: the per-arm lock ($OUTPUT_DIR/.dispatch_<arm>.lock) serializes
 concurrent dispatches for the SAME arm (the early random dispatch and the

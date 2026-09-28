@@ -234,15 +234,23 @@ run_stage_gate() {
                 echo "  (search products kept: search_state.json, exp_*/, sampled_dataset.parquet):"
                 echo "    -> $stale"
                 local moved=""
-                for item in climb_shards random_shards climb_mixed random_mixed \
-                            mid_train_climb.log mid_train_random.log \
-                            eval_climb.log eval_random.log \
-                            .done_mid_train_climb .done_mid_train_random \
-                            .done_eval_climb .done_eval_random; do
-                    if [ -e "$OUTPUT_DIR/$item" ]; then
+                # ⑬t: 臂族产物按家族归档 (glob 覆盖 top-k/natural/domainfix
+                # 扩展臂 + uniform 更名 + legacy random) — 旧预算的 .done
+                # 标记若留在新目录会谎报"已备/已评", 静默复用错配数据。
+                for item in "$OUTPUT_DIR"/.done_fleet \
+                            "$OUTPUT_DIR"/.dispatch_*.lock \
+                            "$OUTPUT_DIR"/*_shards "$OUTPUT_DIR"/*_mixed \
+                            "$OUTPUT_DIR"/mid_train_*.log \
+                            "$OUTPUT_DIR"/eval_*.log "$OUTPUT_DIR"/eval_*.csv \
+                            "$OUTPUT_DIR"/target_arm_*.json \
+                            "$OUTPUT_DIR"/dispatch_*.log \
+                            "$OUTPUT_DIR"/.done_mid_train_* \
+                            "$OUTPUT_DIR"/.done_eval_* \
+                            "$OUTPUT_DIR"/.validation_fleet; do
+                    if [ -e "$item" ]; then
                         mkdir -p "$stale"
-                        mv "$OUTPUT_DIR/$item" "$stale/"
-                        moved="$moved$item "
+                        mv "$item" "$stale/"
+                        moved="$moved$(basename "$item") "
                     fi
                 done
                 if [ -n "$moved" ]; then

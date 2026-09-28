@@ -64,6 +64,7 @@ REMOTE_MAX_SEARCH_NODES="${REMOTE_MAX_SEARCH_NODES:-10}"  # 搜索阶段节点�
 REMOTE_LOCAL_PARALLEL="${REMOTE_LOCAL_PARALLEL:-1}"  # 本地卡加入舰队 (k=8 整槽)
 REMOTE_OBS_PREFIX="${REMOTE_OBS_PREFIX:-}"         # 留空则自动读 climbmix-ma 配置 (见下)
 TARGET_ARM_NODES="${TARGET_ARM_NODES:-8}"          # 8=prod4 战后形态 (8 节点 ws=64, ~3.4h/臂; 1=单节点 ~10h/臂)
+FLEET_ARMS="${FLEET_ARMS:-climb,topk,uniform,natural,domainfix,base}"  # 验证臂族 (⑬t 全自动发射): climb=终选臂 / topk=搜索收官的 top-k 实测候选(自动展开 climb-cfgN) / uniform=簇等权基线(09-21 更名,原 random) / natural / domainfix / base 锚点。执行形态旋钮不进指纹; 空串 = 跳过臂族段(空计划也写 .done_fleet, run 可收官)
 LAUNCH="${LAUNCH:-1}"                   # 0=干跑
 # ─── 平台身份 (不确定就保持默认/留空, 由后端配置文件解析) ───────────
 # REMOTE_BACKEND_MODULE="climbmix_ma:create_backend"
@@ -119,7 +120,7 @@ fi
 # 子进程 (dispatch / 臂引擎) 只见已 export 的变量:
 export EXP_NAME CONFIGS_PER_ITER K_ENHANCED ADAPTIVE_CONFIGS ADAPTIVE_COMPACT \
        NPU_PER_EXP REMOTE_MAX_SEARCH_NODES REMOTE_LOCAL_PARALLEL REMOTE_OBS_PREFIX \
-       TARGET_ARM_NODES \
+       TARGET_ARM_NODES FLEET_ARMS \
        REMOTE_BACKEND_MODULE REMOTE_PLATFORM_CONFIG REMOTE_IMAGE \
        REMOTE_FLAVOR REMOTE_POOL_NAME
 # ───────────────────────────────────────────────────────────────────
@@ -317,8 +318,10 @@ NUM_NPU="${NUM_NPU:-8}"
 NPU_PER_EXP="${NPU_PER_EXP:-1}"
 OUTPUT_DIR="${OUTPUT_DIR:-$CLIMBMIX_DIR/result/${EXP_NAME}_current}"
 # 终态标记: 全部存在 => run 完整跑完, 末尾 mark_completed 把活跃目录
-# 改名为已完成形态 result/${EXP_NAME}_<ts> (stage_gate.sh 生命周期)
-COMPLETION_MARKERS=(".done_eval_climb" ".done_eval_random")
+# 改名为已完成形态 result/${EXP_NAME}_<ts> (stage_gate.sh 生命周期)。
+# ⑬t 起 = .done_fleet (dispatch_fleet.py 全计划臂落地才写; 默认计划含
+# climb+uniform, 故旧对 .done_eval_climb/.done_eval_random 的依赖被包含)
+COMPLETION_MARKERS=(".done_fleet")
 
 # ── Remote execution fleet (remote jobs + OBS data plane) ──
 # 生产混合舰队: 本地 8 卡 + 远端作业并行跑 proxy 实验。
@@ -370,19 +373,15 @@ REMOTE_CODE_WHEELS="${REMOTE_CODE_WHEELS:-}"  # 离线 wheel 本地路径 (逗�
 # 专属的 stella/pool/d28。空 = 继承全局 (兼容旧行为)。
 REMOTE_ASSET_MOUNTS="${REMOTE_ASSET_MOUNTS:-}"
 
-# ── Target-arm execution (Step 6+7 的执行形态, 刻意不进指纹) ──
-# remote (默认): scripts/dispatch_target_arm.py 把臂作为远端 8 卡作业提交
-#   (与搜索舰队同池/同镜像/同 argv 构建器, 与本地唯一差异 = 在哪跑);
-#   random 臂可由该脚本单独提前发射(搜索期间并行), climb 臂在搜索结束后
-#   由 Step 6 发出。远端失败 → 自动回退本地 torchrun (三层兜底)。
-# local: 永远本地跑 (prod1 行为)。
-TARGET_ARM_MODE="${TARGET_ARM_MODE:-remote}"
+# ── Target-arm execution (⑬t: 臂族 = Step 4 dispatch_fleet 全自动发射,
+#    remote-only fail-loud — 执行形态, 刻意不进指纹) ──
 # 多节点目标臂 (Phase 1): TARGET_ARM_NODES=4 → ws=32, 实测 6.1s/step (单节点
 # 18.2s, 3.0x; Phase-0 job 440f760e)。约束: 2 的幂 (1/2/4) —— d28 优化器
 # reduce_scatter 断言 shape[0] % world_size == 0, 全部维数是 2 的幂, 故
-# ws=8×N 必须是 2 的幂 (ws=24 已实测失败, run 601cdb67)。与 TARGET_ARM_MODE
-# 一样是执行形态, 刻意不进指纹 —— 但它派生的 target_load_optimizer 是训练
+# ws=8×N 必须是 2 的幂 (ws=24 已实测失败, run 601cdb67)。执行形态,
+# 刻意不进指纹 —— 但它派生的 target_load_optimizer 是训练
 # 语义, 进指纹 (见 FP_TARGET_PARAMS)。
+# (TARGET_ARM_MODE 旋钮已删 ⑬t: 自动流无本地兜底, 无可选模式)
 TARGET_ARM_NODES="${TARGET_ARM_NODES:-1}"
 # ws≠8 无法加载 8-shard d28 优化器 (形状断言) → 多节点臂冷启动优化器; 单节点
 # 保持 prod1 行为 (加载)。本地兜底 (target_arm.sh) 读同一变量: 两臂无论走
@@ -444,8 +443,8 @@ FP_SEARCH_PARAMS=(
     "proxy_num_iterations=$PROXY_NUM_ITERATIONS"
     "proxy_target_tokens=$PROXY_TARGET_TOKENS"
     "configs_per_iter=$CONFIGS_PER_ITER"
-    # 期望列表语义开关是搜索语义的一部分 (进指纹); TARGET_ARM_MODE /
-    # REMOTE_* 是执行形态, 刻意不进 (num_npu 先例)。
+    # 期望列表语义开关是搜索语义的一部分 (进指纹); REMOTE_* /
+    # TARGET_ARM_NODES 是执行形态, 刻意不进 (num_npu 先例)。
     "adaptive_configs=$ADAPTIVE_CONFIGS"
     "adaptive_compact=$ADAPTIVE_COMPACT"
     "search_num_iterations=$SEARCH_NUM_ITERATIONS"
@@ -483,7 +482,7 @@ FP_TARGET_PARAMS=(
     "mid_train_loader=$MID_TRAIN_LOADER"
     # 优化器加载语义 (TARGET_ARM_NODES>1 派生出 0=冷启动): 改变训练语义,
     # 必须进指纹 —— 否则旧 .done 会跳过重新训练。nodes 本身不进 (执行形态,
-    # num_npu/TARGET_ARM_MODE 先例)。
+    # num_npu 先例)。
     "target_load_optimizer=$TARGET_LOAD_OPTIMIZER"
     "eval_device_batch_size=$EVAL_DEVICE_BATCH_SIZE"
     "eval_core_batch_size=$EVAL_CORE_BATCH_SIZE"
@@ -499,15 +498,15 @@ FP_TARGET_PARAMS=(
 source "$CLIMBMIX_DIR/runs/lib/stage_gate.sh"
 run_stage_gate
 
-# ── Target-arm shared lib + launch env snapshot ──
-# target_arm.sh 是本地臂路径 (Step 6+7 / 远端兜底) 的唯一 argv 来源,
-# 与 dispatch_target_arm.py 的 python 构建器逐 token 对齐 (测试保证)。
-source "$CLIMBMIX_DIR/runs/lib/target_arm.sh"
+# ── launch env snapshot ──
 export TARGET_BASE_CKPT="$NANOCHAT_BASE_DIR/base_checkpoints/d${TARGET_DEPTH}"
-# launch_env.json: 独立发射的 dispatch 进程 (nohup ... --arm random) 读它
-# 获得全部所需变量 — 不依赖启动 shell 的环境传递。每次发射刷新。
+# launch_env.json: 独立发射的 dispatch / dispatch_fleet 进程读它获得全部
+# 所需变量 — 不依赖启动 shell 的环境传递。每次发射刷新。
 # CONFIGS_PER_ITER / PROXY_TARGET_TOKENS 两个形状键必须入册 (⑬j 教训:
 # recall 残留错形时对账工具对这两键零可见, 错形跑了 8h 才被坐实)。
+# 本地臂路径 (runs/lib/target_arm.sh) 不再在主脚本 source — ⑬t 起臂族
+# = dispatch_fleet.py 全自动 (remote-only fail-loud), 本地 torchrun 仅
+# 剩应急/评测兜底 (dispatch_fleet salvage 子进程内 source)。
 export EXP_NAME DATA_DIR CLIMBMIX_DIR NANOCHAT_DIR NANOCHAT_BASE_DIR \
        GENERAL_DATA_DIR PROXY_DEPTH TARGET_DEPTH TARGET_STEPS TARGET_TOKENS \
        TARGET_LR_SCALE TARGET_WARMUP TARGET_WARMDOWN CORE_METRIC_EVERY \
@@ -515,7 +514,7 @@ export EXP_NAME DATA_DIR CLIMBMIX_DIR NANOCHAT_DIR NANOCHAT_BASE_DIR \
        EVAL_MAX_PER_TASK EVAL_DEVICE_BATCH_SIZE EVAL_CORE_BATCH_SIZE \
        STEM_RATIO NUM_NPU NPU_PER_EXP K_ENHANCED HF_ENDPOINT \
        REMOTE_D28_ASSET_URI NANOCHAT_DTYPE OUTPUT_DIR \
-       TARGET_ARM_NODES TARGET_LOAD_OPTIMIZER \
+       TARGET_ARM_NODES TARGET_LOAD_OPTIMIZER FLEET_ARMS \
        CONFIGS_PER_ITER PROXY_TARGET_TOKENS
 python3 - "$OUTPUT_DIR/launch_env.json" "$TARGET_BASE_CKPT" <<'PYEOF'
 import json, os, sys
@@ -528,7 +527,7 @@ keys = ["EXP_NAME", "DATA_DIR", "CLIMBMIX_DIR", "NANOCHAT_DIR",
         "EVAL_DEVICE_BATCH_SIZE", "EVAL_CORE_BATCH_SIZE", "STEM_RATIO",
         "NUM_NPU", "NPU_PER_EXP", "K_ENHANCED", "HF_ENDPOINT",
         "REMOTE_D28_ASSET_URI", "NANOCHAT_DTYPE", "OUTPUT_DIR",
-        "TARGET_ARM_NODES", "TARGET_LOAD_OPTIMIZER",
+        "TARGET_ARM_NODES", "TARGET_LOAD_OPTIMIZER", "FLEET_ARMS",
         "CONFIGS_PER_ITER", "PROXY_TARGET_TOKENS"]
 env = {k: os.environ.get(k, "") for k in keys}
 env["TARGET_BASE_CKPT"] = target_base_ckpt
@@ -697,127 +696,27 @@ fi
 [ ! -f "$OUTPUT_DIR/sampled_dataset.parquet" ] && { echo "✗ No sampled_dataset.parquet"; exit 1; }
 
 # ═══════════════════════════════════════════════════════════════════════
-#  Step 4: Prepare Target Data (shards + random baseline)
-# ═══════════════════════════════════════════════════════════════════════
-echo -e "\n===== Step 4: Prepare Target Data =====\n"
-
-CLIMB_SHARDS="$OUTPUT_DIR/climb_shards"
-RANDOM_SHARDS="$OUTPUT_DIR/random_shards"
-
-# Random 臂的数据准备 (random baseline + mix) 与独立发射的 dispatch 进程
-# (scripts/dispatch_target_arm.py --arm random, 搜索期间提前并行) 共享同一
-# 组 .done 产物 — flock 串行化, 双方都做 .done 双检, 后到者秒过。
-random_arm_lock() {
-    if command -v flock >/dev/null 2>&1; then
-        ( flock -x 9; "$@" ) 9>"$OUTPUT_DIR/.random_arm.lock"
-    else
-        echo "  (flock unavailable — random-arm prep not serialized with dispatch)"
-        "$@"
-    fi
-}
-
-prep_random_baseline() {
-    if [ -f "$RANDOM_SHARDS/.done" ]; then
-        echo "  Random baseline: already complete (.done), skip"
-        return
-    fi
-    # Paper App. C.1: equal uniform cluster weights (1/K), same token cap as
-    # the CLIMB arm — NOT a doc-uniform draw (that would weight clusters by
-    # their natural size). Shortfall policy mirrors the CLIMB arm's selector.
-    python3 "$CLIMBMIX_DIR/scripts/prepare_random_baseline.py" \
-        --data-dir "$DATA_DIR" --output-dir "$RANDOM_SHARDS" \
-        --cluster-cache "$OUTPUT_DIR/cluster_cache.npz" \
-        --schema "$CLIMBMIX_DIR/config/schema_stem.yaml" \
-        --target-tokens "$TARGET_TOKENS" \
-        --seed 42 --num-npu "$NUM_NPU"
-}
-
-python3 "$CLIMBMIX_DIR/scripts/prepare_shards.py" \
-    --input "$OUTPUT_DIR/sampled_dataset.parquet" \
-    --output-dir "$CLIMB_SHARDS" --num-npu "$NUM_NPU"
-
-random_arm_lock prep_random_baseline
-
-# ═══════════════════════════════════════════════════════════════════════
-#  Step 5: Mix STEM + General Data (anti-forgetting)
-# ═══════════════════════════════════════════════════════════════════════
-echo -e "\n===== Step 5: Mix STEM + General Data (ratio=$STEM_RATIO) =====\n"
-
-mix_one() {
-    local stem_dir="$1" out_dir="$2" label="$3"
-    [ -d "$stem_dir" ] || return 0
-    [ -f "$out_dir/.done" ] && { echo "  $label: already mixed (.done), skip"; return; }
-    NANOCHAT_REPO="$NANOCHAT_DIR" python3 "$CLIMBMIX_DIR/scripts/mix_general_data.py" \
-        --stem-dir "$stem_dir" --output-dir "$out_dir" \
-        --climbmix-dir "$GENERAL_DATA_DIR" \
-        --stem-ratio "$STEM_RATIO" --num-workers "$NUM_NPU" --num-npu "$NUM_NPU" \
-        || { echo "✗ Mix failed for $label"; exit 1; }
-}
-
-mix_one "$CLIMB_SHARDS" "$OUTPUT_DIR/climb_mixed" "CLIMB"
-random_arm_lock mix_one "$RANDOM_SHARDS" "$OUTPUT_DIR/random_mixed" "Random"
-CLIMB_DATA="$OUTPUT_DIR/climb_mixed"
-RANDOM_DATA="$OUTPUT_DIR/random_mixed"
-
-# ═══════════════════════════════════════════════════════════════════════
-#  Step 6+7: Target Arms — train + eval, per arm, interleaved (S1)
+#  Step 4: Target-Arm Fleet (d${TARGET_DEPTH} — ⑬t 全自动臂族)
 #
-#  每臂三层执行: .done 标记 → 远端 dispatch (TARGET_ARM_MODE=remote 且
-#  REMOTE_ENABLED=1 时, scripts/dispatch_target_arm.py; 远端作业内完成
-#  训练+评测并落标记) → 本地 torchrun 兜底 (runs/lib/target_arm.sh)。
-#  训完立刻评 (S1 交错: eval 结果提前 ~10h 可见); eval 也标记级幂等 —
-#  远端已评过的臂直接跳过。random 在前: 独立发射的 dispatch
-#  (--arm random) 通常已在搜索期间完成它, 双臂均秒过或各走各的路径。
+#  搜索收官后的整个验证臂族 = 一次调用 (scripts/dispatch_fleet.py):
+#  终选臂 climb + top-k 实测候选 + 基线 uniform/natural/domainfix +
+#  base 锚点 (FLEET_ARMS 配置)。数据备料幂等、派发并发 (dispatch 后台
+#  进程, 独立 session — 父进程被杀不牵连落地/报告)、节点预算自动排队
+#  (REMOTE_MAX_VALIDATION_NODES, 默认 16 = 2 臂 × 8 节点)、落地 →
+#  report.md 自动刷新 → 暂存自动清理、全齐自动盖 FINAL 终报章。
+#  排队不设限 (09-28 裁决); 失败臂 fail-loud — 重跑本命令即幂等重试
+#  (已落地臂零成本秒过); 本地 torchrun 兜底退出自动流 (7 臂全 fallback
+#  到主节点 8 卡 = ~70h 串行灾难) — 手动应急路径 runs/lib/target_arm.sh。
 # ═══════════════════════════════════════════════════════════════════════
-echo -e "\n===== Step 6+7: Target Arms (d${TARGET_DEPTH}) =====\n"
-
-CLIMB_TAG="d${TARGET_DEPTH}_climb_${EXP_NAME}"
-RANDOM_TAG="d${TARGET_DEPTH}_random_${EXP_NAME}"
-
-run_arm() {
-    local data_dir="$1" tag="$2" name="$3"
-    if [ -f "$OUTPUT_DIR/.done_mid_train_$name" ]; then
-        echo "  mid_train $name: already done, skip"
-    else
-        # 单遍 (epoch<=1) 守卫: 消耗 (TARGET_STEPS × total_batch_size) 不得
-        # 超过混合池实际 token 量 — nanochat loader 跑完会静默循环重采,
-        # 破坏论文单遍退火语义且两臂不对称。发射/兜底训练前统一拦截
-        # (见 scripts/check_single_pass.py)。
-        if ! python3 "$CLIMBMIX_DIR/scripts/check_single_pass.py" \
-            --data-dir "$data_dir" \
-            --num-iterations "$TARGET_STEPS" \
-            --ckpt-dir "$TARGET_BASE_CKPT" \
-            --stem-ratio "$STEM_RATIO" \
-            --context "$name arm"; then
-            echo "✗ [$name] single-pass guard failed — refusing to train"
-            exit 1
-        fi
-        if [ "$TARGET_ARM_MODE" = "remote" ] && [ "$REMOTE_ENABLED" = "1" ]; then
-            echo "  [$name] remote target-arm dispatch (waits for the job)..."
-            if python3 "$CLIMBMIX_DIR/scripts/dispatch_target_arm.py" \
-                --arm "$name" --data-dir "$data_dir" --tag "$tag"; then
-                touch "$OUTPUT_DIR/.done_mid_train_$name"
-            else
-                echo "  [$name] remote dispatch did not complete -> local fallback"
-            fi
-        fi
-        if [ ! -f "$OUTPUT_DIR/.done_mid_train_$name" ]; then
-            target_arm_train "$data_dir" "$tag" "$name"
-            touch "$OUTPUT_DIR/.done_mid_train_$name"
-        fi
-    fi
-    # S1 interleaved eval: right after THIS arm's train. 远端作业内已完成
-    # 评测的臂 (dispatch 落了 .done_eval_<name>) 直接跳过。
-    if [ -f "$OUTPUT_DIR/.done_eval_$name" ]; then
-        echo "  eval $name: already done, skip"
-    else
-        target_arm_eval "$tag" "$name"
-        touch "$OUTPUT_DIR/.done_eval_$name"
-    fi
-}
-
-run_arm "$RANDOM_DATA" "$RANDOM_TAG" "random"
-run_arm "$CLIMB_DATA" "$CLIMB_TAG" "climb"
+echo -e "\n===== Step 4: Target-Arm Fleet (arms: ${FLEET_ARMS}) =====\n"
+if ! python3 "$CLIMBMIX_DIR/scripts/dispatch_fleet.py" \
+        --output-dir "$OUTPUT_DIR" --arms "$FLEET_ARMS"; then
+    echo "✗ Target-arm fleet incomplete — see the per-arm summary above"
+    echo "  (idempotent: fix the cause and re-run the same launch command;"
+    echo "   landed arms skip; add --retry-failed via FLEET_ARMS dispatch"
+    echo "   only after diagnosing a prior failed attempt)"
+    exit 1
+fi
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Step 8: Report (幂等, 总是重新生成)
@@ -827,12 +726,12 @@ echo -e "\n===== Step 8: Report =====\n"
 python3 "$CLIMBMIX_DIR/src/climbmix/pipeline/report_generator.py" \
     --result-dir "$OUTPUT_DIR" \
     --climb-train-log "$OUTPUT_DIR/mid_train_climb.log" \
-    --random-train-log "$OUTPUT_DIR/mid_train_random.log" \
+    --random-train-log "$OUTPUT_DIR/mid_train_uniform.log" \
     --climb-eval-log "$OUTPUT_DIR/eval_climb.log" \
-    --random-eval-log "$OUTPUT_DIR/eval_random.log" \
+    --random-eval-log "$OUTPUT_DIR/eval_uniform.log" \
     --base-model-tag "d${TARGET_DEPTH}" \
-    --climb-model-tag "$CLIMB_TAG" \
-    --random-model-tag "$RANDOM_TAG"
+    --climb-model-tag "d${TARGET_DEPTH}_climb_${EXP_NAME}" \
+    --random-model-tag "d${TARGET_DEPTH}_uniform_${EXP_NAME}"
 
 echo -e "\n════════════════════════════════════════════════════════════"
 echo "  Done! → $OUTPUT_DIR"
