@@ -180,14 +180,20 @@ check("fingerprint: target_runner still target-only",
       _stages_for("src/climbmix/pipeline/target_runner.py") == {"target"})
 check("fingerprint: classifier self-excluded",
       _stages_for("src/climbmix/utils/fingerprint.py") == set())
+check("fingerprint: arm dispatchers target-only (⑬u — fleet edits must not reset search state)",
+      _stages_for("scripts/dispatch_target_arm.py") == {"target"}
+      and _stages_for("scripts/dispatch_fleet.py") == {"target"})
 
 # ── 6. wiring: run_experiment.sh / dispatch / target_runner ─────────────────
 sh = os.path.join(REPO, "runs", "run_experiment.sh")
 r = subprocess.run(["bash", "-n", sh], capture_output=True, text=True)
 src = open(sh).read()
 check("shell: run_experiment.sh bash -n", r.returncode == 0, r.stderr[:120])
-check("shell: run_arm guards before dispatch AND fallback",
-      "check_single_pass.py" in src and "single-pass guard failed" in src)
+check("shell: fleet Step 4 wired (⑬t; arm single-pass guard lives in dispatch)",
+      "dispatch_fleet.py" in src
+      and "check_single_pass(" in open(os.path.join(
+          REPO, "scripts", "dispatch_target_arm.py")).read()
+      and "single-pass guard failed" not in src)
 
 for py in ("scripts/dispatch_target_arm.py",
            "src/climbmix/pipeline/target_runner.py",
@@ -268,7 +274,7 @@ check("shell: TARGET_STEPS derivation block present",
       "no longer a knob" in src and
       "invalid for target arms" in src)
 check("shell: TARGET_TOKENS defined before derivation",
-      src.index('TARGET_TOKENS="${TARGET_TOKENS:-2B}"')
+      src.index('TARGET_TOKENS="${TARGET_TOKENS:-3B}"')
       < src.index("derive_target_steps.py"))
 
 # real invocations of the two launch-time abort branches (the config block
@@ -460,7 +466,7 @@ with tempfile.TemporaryDirectory() as td:
     write_shard(os.path.join(stem_dir, "shard_00001.parquet"), ["VAL"])
     climb_dir = os.path.join(td, "climb")
     os.makedirs(climb_dir)
-    c0 = os.path.join(climb_dir, "c0.parquet")
+    c0 = os.path.join(climb_dir, "shard_c0.parquet")  # shard_* naming: content-keying glob requires it
     write_shard(c0, [f"g{i}" for i in range(4)])        # 4 docs — short supply
 
     def out_texts(out):
@@ -488,7 +494,7 @@ with tempfile.TemporaryDirectory() as td:
     check("mix: .done records ratio",
           json.load(open(os.path.join(out2, ".done")))["stem_ratio"] == 0.5)
 
-    c1 = os.path.join(climb_dir, "c1.parquet")
+    c1 = os.path.join(climb_dir, "shard_c1.parquet")
     write_shard(c1, [f"h{i}" for i in range(40)])       # ample supply
     out3 = os.path.join(td, "out3")
     mix.mix_data(stem_dir, [c1], out3, 2, 20, num_npu=1, stem_ratio=0.5)

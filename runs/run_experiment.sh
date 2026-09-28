@@ -733,6 +733,12 @@ python3 "$CLIMBMIX_DIR/src/climbmix/pipeline/report_generator.py" \
     --climb-model-tag "d${TARGET_DEPTH}_climb_${EXP_NAME}" \
     --random-model-tag "d${TARGET_DEPTH}_uniform_${EXP_NAME}"
 
+# ⑬u: report_generator 整文件重写 report.md — 舰族在 Step 4 落地时写入的
+# cp4 判定/配方/终报节会被冲掉 (⑬t 把臂族挪进 Step 4 后的顺序反转; 旧序
+# = 先 Step 8 后人工臂落地, 无此问题)。终报链幂等 — 重挂一次恢复三节。
+python3 "$CLIMBMIX_DIR/scripts/diagnostics/final_report.py" "$OUTPUT_DIR" --auto \
+    || echo "  (final_report --auto 未完成 — 见上方输出; 手动: final_report.py <RUN_DIR> --auto)"
+
 echo -e "\n════════════════════════════════════════════════════════════"
 echo "  Done! → $OUTPUT_DIR"
 echo "════════════════════════════════════════════════════════════"

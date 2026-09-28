@@ -58,6 +58,11 @@ TARGET_ONLY = {
     "scripts/prepare_shards.py",
     "scripts/prepare_random_baseline.py",
     "scripts/mix_general_data.py",
+    # ⑬u classification: the arm dispatchers only shape Steps 4-8 products.
+    # Previously unclassified -> BOTH, so every fleet-orchestration edit
+    # (⑬t) needlessly reset the SEARCH fingerprint (multi-day state).
+    "scripts/dispatch_target_arm.py",
+    "scripts/dispatch_fleet.py",
 }
 
 # Dev tools: never hashed by any stage.

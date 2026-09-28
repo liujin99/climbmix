@@ -313,7 +313,7 @@ rm -rf result/prod5_current
 mkdir -p result/prod5_current
 cp result/prod4_current/cluster_cache.npz result/prod4_current/cluster_info_cache.json result/prod4_current/balanced_profile.json result/prod5_current/
 # 3) 干净 shell 重发——先确认无残留 env 覆盖（输出必须为空，有输出=开新终端）
-    env | grep -E "^(CONFIGS_PER_ITER|PROXY_TARGET_TOKENS|TARGET_TOKENS|TARGET_STEPS|TARGET_ARM_NODES|REMOTE_MAX_PREP|REMOTE_JOB_TIMEOUT_H|REMOTE_QUEUE_TIMEOUT_H|REMOTE_QUEUE_RETRY|REMOTE_MAX_SEARCH_NODES|REMOTE_MAX_VALIDATION_NODES|REMOTE_MAX_JOBS|EXP_NAME|OUTPUT_DIR|FLEET_ARMS)="
+    env | grep -E "^(CONFIGS_PER_ITER|PROXY_TARGET_TOKENS|TARGET_TOKENS|TARGET_STEPS|TARGET_ARM_NODES|REMOTE_MAX_PREP|REMOTE_JOB_TIMEOUT_H|REMOTE_QUEUE_TIMEOUT_H|REMOTE_QUEUE_RETRY|REMOTE_MAX_SEARCH_NODES|REMOTE_MAX_VALIDATION_NODES|REMOTE_MAX_JOBS|EXP_NAME|OUTPUT_DIR|FLEET_ARMS|RESUME_ON_CODE_DRIFT)="
 # ↑ 必须零输出（含旧名 REMOTE_MAX_JOBS 双查）——有输出 = shell 脏，开新终端
 # 4) §4 发射线重发（新开或已确认干净的终端）+ §4.4 对账复核
 ```
@@ -353,43 +353,38 @@ TARGET_TOKENS=3B、launch_env 实录 3B/2861 → 臂派发无需任何 env 覆�
 REMOTE_QUEUE_TIMEOUT_H=0；臂运行时天花板独立 = dispatch 缺省 9h 多节点
 /13h 单节点，`--job-timeout-h 0` 可显式去掉）。
 
-**prod5 桥接（本稿特例）**：prod5 搜索跑在 ⑬t 之前的代码上——老驱动
-收官段自动跑的只有经典两臂（climb 终选 + random；random 已用抑制标记
-跳过，见 §4.7）。**首个 climb 远程派发因 asset-mount 缺失失败**（run 的
-remote_config 不记录 asset_mounts，臂派发的 per-launch 替换语义拿不到
-tokenizer/eval_stem → 老代码误落本地兜底，已击杀、零损失——修复 =
-新代码的三级回退链 `abbd3f6` + 一次性给 run 的 remote_config 补录全局
-挂载）。收官序列：
+**prod5 桥接（本稿特例，⑬u 后 = 一条命令走默认路径）**：prod5 搜索跑在
+⑬t 之前的代码上，其收官段 climb 远程派发因 asset-mount 缺失失败并误落
+本地兜底（已击杀、零损失；根因 = run 的 remote_config 不记录
+asset_mounts，新代码已带三级回退链）。**首选序列 = kill → pull → 代码
+漂移续跑**（新代码的默认路径全程实战验证 = ⑬t/⑬u 的真实彩排）：
 
 ```
 # 0) 击杀本地兜底训练 + 老驱动（无标记落盘, 零损失）
 pkill -f "run_experiment.sh"; pkill -f "torchrun --standalone"
-# 1) 一次性补录 asset mounts（从后端全局配置拷入 run 的 remote_config）
-cd /home/ma-user/work/climbmix
-PYTHONPATH=src:climbmix-ma python3 - <<'EOF'
-import json
-from climbmix_ma.modelarts_job_api import load_ma_config
-ma = load_ma_config()
-am = dict((ma.get("obs") or {}).get("asset_mounts") or {})
-need = {k: am[k] for k in ("tokenizer", "eval_stem", "eval_bundle") if k in am}
-assert "tokenizer" in need and "eval_stem" in need, f"global lacks: {sorted(am)}"
-p = "result/prod5_current/remote_config.json"
-rc = json.load(open(p)); rc["asset_mounts"] = {**(rc.get("asset_mounts") or {}), **need}
-json.dump(rc, open(p, "w"), indent=2); print("patched:", json.dumps(need, indent=2))
-EOF
-# 2) 老代码独立重派 climb（8 节点, 等作业跑完 ~3.4h, 落标记+自动刷报告）
-python3 scripts/dispatch_target_arm.py --arm climb \
-    --output-dir result/prod5_current --data-dir result/prod5_current/climb_mixed
-# 3) pull 新代码, 一条命令补齐剩余臂族（cfg101 = 终选重复臂自动去重）
+# 1) 拉新代码（工作树干净, 快进）
 git pull
-python3 scripts/dispatch_fleet.py --output-dir result/prod5_current \
-    --arms "topk,uniform,natural,domainfix,base"
+# 2) 代码漂移续跑 —— RESUME_ON_CODE_DRIFT=1 断言"本次 delta 仅执行形态"
+RESUME_ON_CODE_DRIFT=1 EXP_NAME=prod5 REMOTE_ENABLED=1 \
+  REMOTE_BACKEND=modelarts REMOTE_BACKEND_MODULE=climbmix_ma:create_backend \
+  REMOTE_FLAVOR=modelarts.pool.visual.8xlarge bash runs/run_experiment.sh
 ```
 
-（目录保持 prod5_current 不改名也可——老驱动重跑拿官方 mark_completed 必须
-pull 前做且与步骤 2-3 互斥,跳过即跳过;dispatch_fleet 对任意路径独立可用,
-stage1/launch_env/remote_config 全在目录内相对解析;已落地臂自动跳过,
-no-claim 下 topk#1 ≡ 终选臂自动剔除并落 expected_arms.txt 实际计划。）
+预期：stage_gate 打 `⚠ CODE DRIFT acknowledged`（search+target 各一条,
+落账 .code_drift.json）→ RESUME → Steps 1-3 跳过（sampled_dataset 在）→
+Step 4 = dispatch_fleet 全自动臂族（climb 数据已备秒过、uniform 重备
+~6min、cfg101=no-claim 终选重复臂自动剔除、base 先行；节点预算 16 自动
+排队、排队不设限、挂载三级回退）→ 全齐 .done_fleet → Step 8 报告 +
+final_report --auto 重挂三节 → mark_completed → 目录改名 prod5_<ts>。
+老 random_shards/random_mixed 残料（~30GB）收官后手动清。
+
+**4.6b 代码漂移续跑窗（⑬u, 通用机制）**：指纹 = sha256(代码子集 + 语义
+参数)。默认代码漂移 = 归档重来（fail-loud——⑬p "绝不把旧代码算的簇当
+新代码产物"）。`RESUME_ON_CODE_DRIFT=1` = 操作者显式断言"本次 delta 仅
+执行形态（排队/编排/挂载类），零实验语义"→ 不归档续跑，.done 标记决定
+重跑范围；**参数漂移不吃这套**（.fingerprint_*_params 逐项对账, 实验形
+状变了覆盖也硬归档）；每次使用落账 .code_drift.json（旧/新指纹 + git
+SHA + 参数核验状态）。用前先 diff 确认 delta 真的是 infra-only。
 
 **臂族并发 = 自动排队（2026-09-23 裁决，机制不变）**：机器侧
 `REMOTE_MAX_VALIDATION_NODES`（默认 **16** = 2 臂 × 8 节点；dispatch CLI

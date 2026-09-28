@@ -190,8 +190,121 @@ _restore_completed() {
     fi
 }
 
+# ── ⑬u: code-drift resume helpers ──────────────────────────────────────
+# 指纹 = sha256(代码子集 + 语义参数)。代码漂移默认归档(fail-loud, ⑬p
+# "绝不把旧代码算的簇当新代码产物"), 但**基础设施改动**(排队时钟/派发
+# 编排/挂载解析——⑬s/⑬t 类)不应作废多日科学状态。RESUME_ON_CODE_DRIFT=1
+# = 操作者显式断言"本次 delta 仅执行形态、零实验语义", 换来不归档续跑;
+# **参数漂移不吃这套**(实验形状变了, 覆盖也硬归档); 每次使用落账
+# .code_drift.json (旧/新指纹 + git SHA + 参数核验状态)。
+
+_params_drifted() {
+    # $1 = recorded params file, $2 = this launch's sorted param text.
+    # true ONLY when the file exists and differs — a missing file (legacy
+    # dir, pre-⑬u) cannot verify: callers treat it as code drift and the
+    # operator's override assertion covers params equality too (ledger
+    # records it as legacy-unverified).
+    [ -f "$1" ] || return 1
+    [ "$(cat "$1")" != "$2" ]
+}
+
+_record_code_drift() {
+    # $1 = stage, $2 = new fingerprint, $3 = verified|legacy
+    local stage="$1" new_fp="$2" verified="$3" old_fp git_sha
+    old_fp="$(cat "$OUTPUT_DIR/.fingerprint_$stage" 2>/dev/null || echo unknown)"
+    git_sha="$(git -C "$CLIMBMIX_DIR" rev-parse HEAD 2>/dev/null || echo non-git)"
+    python3 - "$OUTPUT_DIR/.code_drift.json" "$stage" "$old_fp" "$new_fp" \
+        "$git_sha" "$verified" <<'PYEOF'
+import json, sys, time
+path, stage, old_fp, new_fp, git_sha, verified = sys.argv[1:7]
+events = []
+try:
+    data = json.load(open(path))
+    if isinstance(data, list):
+        events = data
+except (OSError, ValueError):
+    pass
+events.append({
+    "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+    "stage": stage,
+    "old_fingerprint": old_fp,
+    "new_fingerprint": new_fp,
+    "params_equality": ("verified-identical" if verified == "verified"
+                        else "legacy-unverified"),
+    "git": git_sha,
+    "note": ("RESUME_ON_CODE_DRIFT=1: operator asserts the code delta is "
+             "infra-only (execution shape, not experiment semantics); "
+             ".done markers decide what re-runs. Params drift hard-"
+             "archives regardless of this override."),
+})
+with open(path, "w") as f:
+    json.dump(events, f, indent=2)
+PYEOF
+    echo "  ⚠ CODE DRIFT acknowledged (stage=$stage): $old_fp -> $new_fp"
+    echo "    RESUME_ON_CODE_DRIFT=1 — you assert the delta is infra-only;"
+    echo "    .done markers decide what re-runs. Ledger: .code_drift.json"
+}
+
+_archive_search_products() {
+    # $1 = reason (search_fingerprint_changed | search_params_changed)
+    local reason="$1" was_complete=false stale
+    _is_complete "$OUTPUT_DIR" && was_complete=true
+    stale="$(_archive_name search "$was_complete")"
+    echo "  SEARCH fingerprint changed ($reason) — archiving everything:"
+    echo "    $OUTPUT_DIR -> $stale"
+    mv "$OUTPUT_DIR" "$stale"
+    _write_archive_meta "$stale" \
+        "experiment=$EXP_NAME" \
+        "reason=$reason" \
+        "was_complete=$was_complete" \
+        "old_fingerprint_search=$(cat "$stale/.fingerprint_search")" \
+        "new_fingerprint_search=$fp_search" \
+        "old_fingerprint_target=$(cat "$stale/.fingerprint_target")" \
+        "new_fingerprint_target=$fp_target"
+}
+
+_archive_target_products() {
+    # $1 = reason (target_fingerprint_changed | target_params_changed)
+    #     $2 = new target fingerprint
+    local reason="$1" new_fp="$2" was_complete=false stale moved item
+    _is_complete "$OUTPUT_DIR" && was_complete=true
+    stale="$(_archive_name target "$was_complete")"
+    echo "  TARGET fingerprint changed ($reason) — archiving target products only"
+    echo "  (search products kept: search_state.json, exp_*/, sampled_dataset.parquet):"
+    echo "    -> $stale"
+    moved=""
+    # ⑬t: 臂族产物按家族归档 (glob 覆盖 top-k/natural/domainfix 扩展臂 +
+    # uniform 更名 + legacy random) — 旧预算的 .done 标记若留在新目录会
+    # 谎报"已备/已评", 静默复用错配数据。
+    for item in "$OUTPUT_DIR"/.done_fleet \
+                "$OUTPUT_DIR"/.dispatch_*.lock \
+                "$OUTPUT_DIR"/*_shards "$OUTPUT_DIR"/*_mixed \
+                "$OUTPUT_DIR"/mid_train_*.log \
+                "$OUTPUT_DIR"/eval_*.log "$OUTPUT_DIR"/eval_*.csv \
+                "$OUTPUT_DIR"/target_arm_*.json \
+                "$OUTPUT_DIR"/dispatch_*.log \
+                "$OUTPUT_DIR"/.done_mid_train_* \
+                "$OUTPUT_DIR"/.done_eval_* \
+                "$OUTPUT_DIR"/.validation_fleet; do
+        if [ -e "$item" ]; then
+            mkdir -p "$stale"
+            mv "$item" "$stale/"
+            moved="$moved$(basename "$item") "
+        fi
+    done
+    if [ -n "$moved" ]; then
+        _write_archive_meta "$stale" \
+            "experiment=$EXP_NAME" \
+            "reason=$reason" \
+            "was_complete=$was_complete" \
+            "old_fingerprint_target=$(cat "$OUTPUT_DIR/.fingerprint_target")" \
+            "new_fingerprint_target=$new_fp" \
+            "moved_items=${moved% }"
+    fi
+}
+
 run_stage_gate() {
-    local args_search=() args_target=() kv fp_search fp_target stale item was_complete
+    local args_search=() args_target=() kv fp_search fp_target txt_search_params txt_target_params
     for kv in "${FP_SEARCH_PARAMS[@]}"; do args_search+=(--param "$kv"); done
     for kv in "${FP_TARGET_PARAMS[@]}"; do args_target+=(--param "$kv"); done
 
@@ -199,6 +312,11 @@ run_stage_gate() {
         --stage search "${args_search[@]}")
     fp_target=$(python3 -m climbmix.utils.fingerprint --base-dir "$CLIMBMIX_DIR" \
         --stage target "${args_target[@]}")
+    # ⑬u: 参数文本单独落册 (.fingerprint_<stage>_params) — 指纹失配时
+    # 用它区分"参数漂移"(实验形状, 硬归档)与"纯代码漂移"(override 可
+    # 续跑)。
+    txt_search_params="$(printf '%s\n' "${FP_SEARCH_PARAMS[@]}" | sort)"
+    txt_target_params="$(printf '%s\n' "${FP_TARGET_PARAMS[@]}" | sort)"
 
     mkdir -p "$CLIMBMIX_DIR/result"
 
@@ -211,59 +329,37 @@ run_stage_gate() {
 
     if [ -d "$OUTPUT_DIR" ] && [ -n "$(ls -A "$OUTPUT_DIR" 2>/dev/null)" ]; then
         if [ -f "$OUTPUT_DIR/.fingerprint_search" ] && [ -f "$OUTPUT_DIR/.fingerprint_target" ]; then
+            local keep_dir=true
             if [ "$(cat "$OUTPUT_DIR/.fingerprint_search")" != "$fp_search" ]; then
-                was_complete=false
-                _is_complete "$OUTPUT_DIR" && was_complete=true
-                stale="$(_archive_name search "$was_complete")"
-                echo "  SEARCH fingerprint changed (code or params) — archiving everything:"
-                echo "    $OUTPUT_DIR -> $stale"
-                mv "$OUTPUT_DIR" "$stale"
-                _write_archive_meta "$stale" \
-                    "experiment=$EXP_NAME" \
-                    "reason=search_fingerprint_changed" \
-                    "was_complete=$was_complete" \
-                    "old_fingerprint_search=$(cat "$stale/.fingerprint_search")" \
-                    "new_fingerprint_search=$fp_search" \
-                    "old_fingerprint_target=$(cat "$stale/.fingerprint_target")" \
-                    "new_fingerprint_target=$fp_target"
-            elif [ "$(cat "$OUTPUT_DIR/.fingerprint_target")" != "$fp_target" ]; then
-                was_complete=false
-                _is_complete "$OUTPUT_DIR" && was_complete=true
-                stale="$(_archive_name target "$was_complete")"
-                echo "  TARGET fingerprint changed — archiving target products only"
-                echo "  (search products kept: search_state.json, exp_*/, sampled_dataset.parquet):"
-                echo "    -> $stale"
-                local moved=""
-                # ⑬t: 臂族产物按家族归档 (glob 覆盖 top-k/natural/domainfix
-                # 扩展臂 + uniform 更名 + legacy random) — 旧预算的 .done
-                # 标记若留在新目录会谎报"已备/已评", 静默复用错配数据。
-                for item in "$OUTPUT_DIR"/.done_fleet \
-                            "$OUTPUT_DIR"/.dispatch_*.lock \
-                            "$OUTPUT_DIR"/*_shards "$OUTPUT_DIR"/*_mixed \
-                            "$OUTPUT_DIR"/mid_train_*.log \
-                            "$OUTPUT_DIR"/eval_*.log "$OUTPUT_DIR"/eval_*.csv \
-                            "$OUTPUT_DIR"/target_arm_*.json \
-                            "$OUTPUT_DIR"/dispatch_*.log \
-                            "$OUTPUT_DIR"/.done_mid_train_* \
-                            "$OUTPUT_DIR"/.done_eval_* \
-                            "$OUTPUT_DIR"/.validation_fleet; do
-                    if [ -e "$item" ]; then
-                        mkdir -p "$stale"
-                        mv "$item" "$stale/"
-                        moved="$moved$(basename "$item") "
+                if _params_drifted "$OUTPUT_DIR/.fingerprint_search_params" "$txt_search_params"; then
+                    keep_dir=false
+                    _archive_search_products "search_params_changed"
+                elif [ "${RESUME_ON_CODE_DRIFT:-0}" = "1" ]; then
+                    if [ -f "$OUTPUT_DIR/.fingerprint_search_params" ]; then
+                        _record_code_drift search "$fp_search" verified
+                    else
+                        _record_code_drift search "$fp_search" legacy
                     fi
-                done
-                if [ -n "$moved" ]; then
-                    _write_archive_meta "$stale" \
-                        "experiment=$EXP_NAME" \
-                        "reason=target_fingerprint_changed" \
-                        "was_complete=$was_complete" \
-                        "old_fingerprint_target=$(cat "$OUTPUT_DIR/.fingerprint_target")" \
-                        "new_fingerprint_target=$fp_target" \
-                        "moved_items=${moved% }"
+                else
+                    keep_dir=false
+                    _archive_search_products "search_fingerprint_changed"
                 fi
-            else
-                echo "  RESUME: $OUTPUT_DIR (search+target fingerprints match)"
+            fi
+            if [ "$keep_dir" = true ] && [ "$(cat "$OUTPUT_DIR/.fingerprint_target")" != "$fp_target" ]; then
+                if _params_drifted "$OUTPUT_DIR/.fingerprint_target_params" "$txt_target_params"; then
+                    _archive_target_products "target_params_changed" "$fp_target"
+                elif [ "${RESUME_ON_CODE_DRIFT:-0}" = "1" ]; then
+                    if [ -f "$OUTPUT_DIR/.fingerprint_target_params" ]; then
+                        _record_code_drift target "$fp_target" verified
+                    else
+                        _record_code_drift target "$fp_target" legacy
+                    fi
+                else
+                    _archive_target_products "target_fingerprint_changed" "$fp_target"
+                fi
+            fi
+            if [ "$keep_dir" = true ]; then
+                echo "  RESUME: $OUTPUT_DIR (fingerprints match or code drift acknowledged)"
             fi
         elif [ -f "$OUTPUT_DIR/.fingerprint" ]; then
             if [ "${MIGRATE_LEGACY_FINGERPRINT:-0}" = "1" ]; then
@@ -337,6 +433,8 @@ PYEOF
     mkdir -p "$OUTPUT_DIR"
     echo "$fp_search" > "$OUTPUT_DIR/.fingerprint_search"
     echo "$fp_target" > "$OUTPUT_DIR/.fingerprint_target"
+    printf '%s\n' "${FP_SEARCH_PARAMS[@]}" | sort > "$OUTPUT_DIR/.fingerprint_search_params"
+    printf '%s\n' "${FP_TARGET_PARAMS[@]}" | sort > "$OUTPUT_DIR/.fingerprint_target_params"
     rm -f "$OUTPUT_DIR/.fingerprint"
     echo "  Fingerprints: search=${fp_search} target=${fp_target}"
 }
