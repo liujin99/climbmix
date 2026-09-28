@@ -819,12 +819,16 @@ def main() -> int:
     base_check = arm == "base_eval_check"
 
     # ── multi-node resolution (CLI > env > launch_env) ──
-    node_count = (args.node_count if args.node_count is not None
-                  else int(os.environ.get("TARGET_ARM_NODES") or 0)
-                  or int(launch_env.get("TARGET_ARM_NODES") or 1))
+    # base_eval_check 定义即单节点 (eval-only 锚点): 形状绝不从训练臂旋钮
+    # TARGET_ARM_NODES 推导 — prod5 首飞实炸 (launch_env 记 8 节点 → 守卫
+    # 即拒, 锚点从未提交)。显式 --node-count >1 仍被上方守卫拦下。
+    if base_check:
+        node_count = 1
+    else:
+        node_count = (args.node_count if args.node_count is not None
+                      else int(os.environ.get("TARGET_ARM_NODES") or 0)
+                      or int(launch_env.get("TARGET_ARM_NODES") or 1))
     _validate_node_count(node_count, "resolved node_count")
-    if base_check and node_count > 1:
-        raise SystemExit("✗ base_eval_check is single-node (eval-only anchor)")
     # The optimizer-loading semantics DERIVE from node_count (ws!=8 cannot
     # load the 8-shard d28 optimizer). run_experiment.sh fingerprints
     # TARGET_LOAD_OPTIMIZER — a disagreement means this dispatch would run

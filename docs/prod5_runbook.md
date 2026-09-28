@@ -432,6 +432,27 @@ report.md 最终结构：搜索子报告 → CP4 判定 → 赢家配方 → 终
 （random vs uniform）,smoke 只验到 Step 3 从未彩排 Step 4-7——⑬t 重写
 后该段首次进入自动验证面。
 
+**4.7b 事故记录（2026-09-28 晚,⑬u 桥接首飞双 P-0）**：`RESUME_ON_CODE_DRIFT=1`
+续跑发射后,Step 4 舰队首次实飞连炸两个编排层 bug（35 项 fleet 测试全纯
+函数,编排路径零覆盖——两 bug 均无科学损失,远端作业由幸存 dispatcher
+独立管理）：
+- **wait_fleet 三元组解包崩溃（`fba8348`）**：`running.append(launch(...))`
+  落了 `(proc, log)` 二元组,`wait_fleet` 按 `(plan, proc, log)` 解包——
+  最后一个臂派发完、刚进等待循环即 `ValueError`。7 个 dispatch 子进程
+  `start_new_session=True` 全部幸存（PPID 1）,远端 climb/cfg100 已提交、
+  其余 4 dispatcher 在节点预算队列等位。**恢复 = 幂等重发**：每臂
+  `.dispatch_<arm>.lock` flock 把新 dispatcher 串行阻塞在幸存者锁上,
+  老的落地退出后新的拿锁见 `.done` 即 no-op——零重复作业、零墙钟损失。
+- **base 锚点形状从训练臂旋钮推导（anchor 恒单节点被守卫即拒）**：
+  launch_env 记 `TARGET_ARM_NODES=8`（训练臂形状）→ base dispatcher 解析
+  node_count=8 → "single-node (eval-only anchor)" 立即退出,锚点从未提交。
+  根修 = base 恒 1 节点（不从 TARGET_ARM_NODES 推导）+ 舰队层显式
+  `--node-count 1`；早退发生在拿锁前,无失败审计记录,重跑不被短路。
+- 顺带对齐：臂作业 `--job-timeout-h` 缺省实为 0=不限制（9h/13h auto 分支
+  自 f600701 起因 argparse default=0.0 不可达,文档一直写错,`48a3ee9`）。
+验证：fleet 测试 36→39（新增 main() 全流程回归——不修则复现线上原样
+ValueError；dispatch_cmd 锚点形状；锚点守卫放行到远端初始化）。
+
 ## 5. 发射窗顺手卫生（非阻塞批处理，F2）
 
 - **mid optim 存量回收（2026-09-22 裁决：全砍）**——写入端已过滤（worker

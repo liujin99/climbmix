@@ -367,6 +367,8 @@ def dispatch_cmd(arm: str, output_dir: str, climbmix_dir: str,
            "--arm", arm, "--output-dir", output_dir]
     if data_dir:
         cmd += ["--data-dir", data_dir]
+    if arm == "base_eval_check":
+        cmd += ["--node-count", "1"]  # 锚点恒单节点 — 不随训练臂 TARGET_ARM_NODES
     if retry_failed:
         cmd += ["--retry-failed"]
     return cmd
