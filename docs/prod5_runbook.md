@@ -355,16 +355,41 @@ REMOTE_QUEUE_TIMEOUT_H=0；臂运行时天花板独立 = dispatch 缺省 9h 多�
 
 **prod5 桥接（本稿特例）**：prod5 搜索跑在 ⑬t 之前的代码上——老驱动
 收官段自动跑的只有经典两臂（climb 终选 + random；random 已用抑制标记
-跳过，见 §4.7 事故记录）。收官 pull 新代码后，剩余臂族对**已收官目录**
-一条命令补齐（dispatch_fleet 独立可用，stage1/launch_env/remote_config
-全在目录内相对解析）：
+跳过，见 §4.7）。**首个 climb 远程派发因 asset-mount 缺失失败**（run 的
+remote_config 不记录 asset_mounts，臂派发的 per-launch 替换语义拿不到
+tokenizer/eval_stem → 老代码误落本地兜底，已击杀、零损失——修复 =
+新代码的三级回退链 `abbd3f6` + 一次性给 run 的 remote_config 补录全局
+挂载）。收官序列：
 
 ```
-# 老驱动跑完（目录改名 result/prod5_<ts>）后：
-python3 scripts/dispatch_fleet.py --output-dir result/prod5_<ts> \
+# 0) 击杀本地兜底训练 + 老驱动（无标记落盘, 零损失）
+pkill -f "run_experiment.sh"; pkill -f "torchrun --standalone"
+# 1) 一次性补录 asset mounts（从后端全局配置拷入 run 的 remote_config）
+cd /home/ma-user/work/climbmix
+PYTHONPATH=src:climbmix-ma python3 - <<'EOF'
+import json
+from climbmix_ma.modelarts_job_api import load_ma_config
+ma = load_ma_config()
+am = dict((ma.get("obs") or {}).get("asset_mounts") or {})
+need = {k: am[k] for k in ("tokenizer", "eval_stem", "eval_bundle") if k in am}
+assert "tokenizer" in need and "eval_stem" in need, f"global lacks: {sorted(am)}"
+p = "result/prod5_current/remote_config.json"
+rc = json.load(open(p)); rc["asset_mounts"] = {**(rc.get("asset_mounts") or {}), **need}
+json.dump(rc, open(p, "w"), indent=2); print("patched:", json.dumps(need, indent=2))
+EOF
+# 2) 老代码独立重派 climb（8 节点, 等作业跑完 ~3.4h, 落标记+自动刷报告）
+python3 scripts/dispatch_target_arm.py --arm climb \
+    --output-dir result/prod5_current --data-dir result/prod5_current/climb_mixed
+# 3) pull 新代码, 一条命令补齐剩余臂族（cfg101 = 终选重复臂自动去重）
+git pull
+python3 scripts/dispatch_fleet.py --output-dir result/prod5_current \
     --arms "topk,uniform,natural,domainfix,base"
-# （climb 老驱动已落地, 不在清单; idempotent——已落地臂自动跳过）
 ```
+
+（目录保持 prod5_current 不改名也可——老驱动重跑拿官方 mark_completed 必须
+pull 前做且与步骤 2-3 互斥,跳过即跳过;dispatch_fleet 对任意路径独立可用,
+stage1/launch_env/remote_config 全在目录内相对解析;已落地臂自动跳过,
+no-claim 下 topk#1 ≡ 终选臂自动剔除并落 expected_arms.txt 实际计划。）
 
 **臂族并发 = 自动排队（2026-09-23 裁决，机制不变）**：机器侧
 `REMOTE_MAX_VALIDATION_NODES`（默认 **16** = 2 臂 × 8 节点；dispatch CLI
