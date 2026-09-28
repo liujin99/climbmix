@@ -395,7 +395,11 @@ def wait_job(job_api, obs, job_id: str, label: str, result_uri: str,
                     f"[{label}] job {job_id} never started — queued "
                     f"{(now - submitted_at)/60:.0f}m (limit "
                     f"{queue_timeout_s/60:.0f}m); cancelled")
-        elif now - first_running > runtime_timeout_s:
+        elif (runtime_timeout_s > 0
+              and now - first_running > runtime_timeout_s):
+            # runtime 0 = 不限制 (与 queue 0 同哲学, 09-22 裁决; 楔死交监控
+            # — worker log 流心跳可见)。P-0 #3 (prod5 首飞): 此处曾无 >0
+            # 守卫, 0 被当零上限 — 作业起跑 1 分钟即被自己的 dispatcher 杀。
             job_api.cancel(job_id)
             raise SystemExit(
                 f"✗ [{label}] job {job_id} timed out after "
