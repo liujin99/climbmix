@@ -1049,21 +1049,37 @@ def main() -> int:
 
     # ── per-launch asset mounts: d28 + tokenizer + eval_stem (REPLACES the
     # backend's global set — arm jobs must not stage the pool/stella) ──
+    # 回退链 (2026-09-28 prod5 实证修复): 显式 --arm-asset-mounts > run 的
+    # remote_config.asset_mounts > 后端全局 obs.asset_mounts。第二级常为空
+    # (⑬j 当时把 asset_mounts 记录缺失判为"记录性黄旗"——搜索作业吃后端
+    # 全局挂载无感, 臂派发的 per-launch 替换语义却拿不到 tokenizer/
+    # eval_stem → 误判失败 → 老代码落本地兜底)。第三级 = 与搜索作业实际
+    # 使用的同一来源, 补齐后臂派发与搜索同源。
     mounts: Dict[str, str] = {f"d{target_depth}": d28_uri}
     arm_mounts: Dict[str, str] = {}
     if args.arm_asset_mounts:
         arm_mounts = json.loads(args.arm_asset_mounts)
     search_mounts = remote.asset_mounts or {}
+    global_mounts: Dict[str, str] = {}
+    try:
+        from climbmix.remote.backends import resolve_backend as _rb
+        _am = getattr(_rb(remote), "asset_mounts", None)
+        if callable(_am):
+            global_mounts = dict(_am(remote) or {})
+    except Exception:
+        global_mounts = {}
     for name in ("tokenizer", "eval_stem", "eval_bundle"):
-        uri = (arm_mounts.get(name) or search_mounts.get(name))
+        uri = (arm_mounts.get(name) or search_mounts.get(name)
+               or global_mounts.get(name))
         if uri:
             mounts[name] = uri
     for name in ("tokenizer", "eval_stem"):
         if name not in mounts:
             raise SystemExit(
                 f"✗ asset mount '{name}' unresolvable — pass "
-                f"--arm-asset-mounts or add it to the search fleet's "
-                f"REMOTE_ASSET_MOUNTS")
+                f"--arm-asset-mounts, add it to the search fleet's "
+                f"REMOTE_ASSET_MOUNTS, or declare obs.asset_mounts in the "
+                f"backend config")
     print(f"  [{arm}] asset mounts: {sorted(mounts)}")
 
     # ── upload mixture + build spec ──

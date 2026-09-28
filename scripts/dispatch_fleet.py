@@ -101,26 +101,94 @@ def load_topk_candidates(output_dir: str):
 
 
 def expand_arms(spec: str, output_dir: str):
-    """FLEET_ARMS tokens → 具体 臂名列表 (保序去重; topk → climb-cfgN)。"""
+    """FLEET_ARMS tokens → 具体 臂名列表 (保序去重; topk → climb-cfgN)。
+    显式 `climb-cfgN` 也合法 (单臂补发 / 排除某候选时直接点名) — 须存在于
+    topk json, 否则 fail-loud。"""
+    _cands = None
+
+    def cands():
+        nonlocal _cands
+        if _cands is None:
+            _cands = load_topk_candidates(output_dir)
+        return _cands
+
     arms: list = []
     seen = set()
     for tok in (t.strip() for t in spec.split(",")):
         if not tok:
             continue
         if tok == "topk":
-            new = [c["arm"] for c in load_topk_candidates(output_dir)]
+            new = [c["arm"] for c in cands()]
+        elif TOPK_ARM_RE.match(tok):
+            if tok not in {c["arm"] for c in cands()}:
+                raise SystemExit(
+                    f"✗ explicit fleet arm '{tok}' is not in "
+                    f"topk_mixture_candidates.json — point at a real "
+                    f"candidate or use the 'topk' token")
+            new = [tok]
         elif tok in FLEET_TOKENS:
             new = ["base_eval_check" if tok == "base" else tok]
         else:
             raise SystemExit(
                 f"✗ unknown FLEET_ARMS token '{tok}' "
-                f"(valid: {','.join(FLEET_TOKENS)}; comma list, "
-                f"empty string = skip the fleet entirely)")
+                f"(valid: {','.join(FLEET_TOKENS)} or an explicit "
+                f"climb-cfgN; comma list, empty string = skip the fleet "
+                f"entirely)")
         for arm in new:
             if arm not in seen:
                 seen.add(arm)
                 arms.append(arm)
     return arms
+
+
+def _weights_match(a, b) -> bool:
+    """label 键控 dict 权重逐键 allclose (list 形状 = 保守不比)。"""
+    if not isinstance(a, dict) or not isinstance(b, dict):
+        return False
+    keys = set(a) | set(b)
+    if not keys:
+        return False
+    return all(abs(float(a.get(k, 0.0)) - float(b.get(k, 0.0))) <= 1e-9
+               for k in keys)
+
+
+def dedupe_final_duplicate(output_dir: str, plans):
+    """no-claim 结构性去重: no-claim 时终选 = best measured = topk#1
+    (构造性同一 config) → 该候选的 climb-cfgN 臂与终选臂 climb 的数据
+    **逐字节相同** (同一 select_data_by_mixture + 同 seed 42 + 同预算),
+    跑两遍 = 纯重复。climb 在计划内或已落地时, 权重与
+    optimal_mixture_weights.json 相同的 topk 臂被剔除 (大声注明)。
+    要强制跑复本: 手动 dispatch_target_arm --arm <cfg> 并自管
+    expected_arms.txt。"""
+    opt_path = os.path.join(output_dir, "optimal_mixture_weights.json")
+    if not os.path.isfile(opt_path):
+        return plans
+    try:
+        with open(opt_path) as f:
+            opt_w = json.load(f)
+    except (OSError, ValueError):
+        return plans
+    if not isinstance(opt_w, dict) or not opt_w:
+        return plans
+    climb_active = (arm_landed(output_dir, "climb")
+                    or any(p["arm"] == "climb" and not p["landed"]
+                           for p in plans))
+    if not climb_active:
+        return plans
+    out, dropped = [], []
+    for p in plans:
+        if (TOPK_ARM_RE.match(p["arm"]) and not p["landed"]
+                and _weights_match(p.get("weights_payload"), opt_w)):
+            dropped.append(p["arm"])
+            continue
+        out.append(p)
+    for arm in dropped:
+        print(f"  [fleet] {arm}: skipped — weights identical to the "
+              f"final-selection climb arm (no-claim 终选 = topk#1; 同 "
+              f"selector/seed/预算 → 同数据, 跑两遍是纯重复). 要强制复本 = "
+              f"手动 dispatch_target_arm --arm {arm} + 自管 expected_arms.txt",
+              flush=True)
+    return out
 
 
 def arm_landed(output_dir: str, arm: str) -> bool:
@@ -432,6 +500,31 @@ def main() -> int:
     spec = args.arms or os.environ.get("FLEET_ARMS", "") or DEFAULT_ARMS
     arms = expand_arms(spec, output_dir)
     plans = build_plan(arms, output_dir, launch_env)
+    plans = dedupe_final_duplicate(output_dir, plans)
+
+    # expected_arms.txt: 终报印章等的是**本次舰队的实际计划**(no-claim
+    # 去重后), 不是推导清单 — 派发前落册, 落地钩子的 final_report --auto
+    # 读它。已存在 = 操作者手动锁定 (历史命名/条件臂) — 尊重, 内容不同
+    # 时只提醒 (同步 = 删除该文件后重跑)。
+    expected = []
+    if (arm_landed(output_dir, "climb")
+            or any(p["arm"] == "climb" for p in plans)):
+        expected.append("climb")
+    expected += [p["arm"] for p in plans
+                 if p["arm"] not in ("base_eval_check", "climb")]
+    exp_path = os.path.join(output_dir, "expected_arms.txt")
+    if expected and not args.dry_run:
+        if os.path.isfile(exp_path):
+            cur = [ln.strip() for ln in open(exp_path) if ln.strip()]
+            if cur != expected:
+                print(f"  [fleet] expected_arms.txt 已存在且与本次计划不同"
+                      f" (保留现状):\n    现状: {', '.join(cur)}"
+                      f"\n    计划: {', '.join(expected)}", flush=True)
+        else:
+            with open(exp_path, "w") as f:
+                f.write("\n".join(expected) + "\n")
+            print(f"  [fleet] expected_arms.txt <- {', '.join(expected)} "
+                  f"(终报印章按本次舰队计划)", flush=True)
 
     print(f"[Fleet] {len(plans)} arm(s) from '{spec}': "
           f"{', '.join(p['arm'] for p in plans)}")
