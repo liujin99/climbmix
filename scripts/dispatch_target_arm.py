@@ -733,9 +733,11 @@ def main() -> int:
     p.add_argument("--tag", default="",
                    help="model tag (default: d<TARGET_DEPTH>_<arm>_<EXP_NAME>)")
     p.add_argument("--job-timeout-h", type=float, default=0.0,
-                   help="remote RUNTIME timeout for the arm job (h; 0 = auto: "
-                        "13h single-node, 9h multi-node — 2000 steps at "
-                        "6.1s/step + materialization + eval + uploads)")
+                   help="remote RUNTIME timeout for the arm job (h; default "
+                        "0 = unlimited — 2026-09-22 裁决, 楔死交监控, log 流 "
+                        "30s 上传; positive = ceiling from first RUNNING. "
+                        "sizing guide: ws=64 3B arm ≈ 3-4h train + eval + "
+                        "uploads (9h/13h were the pre-ruling defaults)")
     p.add_argument("--node-count", type=int, default=None,
                    help="nodes for the arm job (default: $TARGET_ARM_NODES / "
                         "launch_env, i.e. the run's TARGET_ARM_NODES; power "
@@ -840,10 +842,10 @@ def main() -> int:
             f"stage fingerprint was computed for a different arm shape; "
             f"relaunch the main script with TARGET_ARM_NODES={node_count}")
     load_optimizer = "0" if node_count > 1 else None
-    # 0 = 显式不限制 (falsy-or 会把它吞回缺省 — is not None 区分"没传"与"传了 0")
-    job_timeout_h = (args.job_timeout_h
-                     if args.job_timeout_h is not None
-                     else (9.0 if node_count > 1 else 13.0))
+    # default 0 = 不限制 (2026-09-22 裁决, 与搜索侧 REMOTE_JOB_TIMEOUT_H=0 同
+    # 哲学)。历史上这里是 "0 = auto 9h/13h", 但 argparse default=0.0 使该分支
+    # 不可达 — 实跑一直是不限制; 2026-09-28 对齐文档与代码, 死分支移除。
+    job_timeout_h = args.job_timeout_h
     if node_count > 1:
         print(f"  [{args.arm}] multi-node arm: node_count={node_count} "
               f"(ws={node_count * 8}), load_optimizer={load_optimizer}, "

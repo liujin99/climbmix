@@ -360,7 +360,7 @@ REMOTE_SUBMIT_RETRY_H="${REMOTE_SUBMIT_RETRY_H:-24}" # 提交被拒重试时限 
 REMOTE_MAX_PREP="${REMOTE_MAX_PREP:-$REMOTE_MAX_SEARCH_NODES}"  # 本地混料/上传并发: 耦合搜索节点数 (⑬q A — 动态提交语义下同时在飞备料数 ≤ 在飞槽位, = 恰好永不短板且零浪费; 显式 env 可覆盖)
 REMOTE_STORAGE_KIND="${REMOTE_STORAGE_KIND:-moxing}"  # 容器内存储后端
 REMOTE_STORAGE_ROOT="${REMOTE_STORAGE_ROOT:-}"    # mock 后端专用: 假 OBS 根目录
-REMOTE_JOB_TIMEOUT_H="${REMOTE_JOB_TIMEOUT_H:-0}" # 搜索作业运行时天花板: **0 = 不限制**（2026-09-22 用户裁决——隐藏的运行时天花板是雷: d24 级模型/预训练化搜索会让它静默误杀+重试循环; 楔死但不报错的作业交监控检测——log 流 30s 上传, 停滞可见）。opt-in: 正值 (小时) = 防楔死天花板 (排队不计, 首个 RUNNING 起算)。d28 臂作业独立: dispatch_target_arm 缺省 9h(多节点)/13h(单节点), --job-timeout-h 0 可显式去掉
+REMOTE_JOB_TIMEOUT_H="${REMOTE_JOB_TIMEOUT_H:-0}" # 搜索作业运行时天花板: **0 = 不限制**（2026-09-22 用户裁决——隐藏的运行时天花板是雷: d24 级模型/预训练化搜索会让它静默误杀+重试循环; 楔死但不报错的作业交监控检测——log 流 30s 上传, 停滞可见）。opt-in: 正值 (小时) = 防楔死天花板 (排队不计, 首个 RUNNING 起算)。d28 臂作业独立: dispatch_target_arm --job-timeout-h 缺省 0 = 不限制 (同裁决哲学; 2026-09-28 对齐——原 9h/13h auto 分支因 argparse default=0.0 不可达, 实跑一直是不限制), 正值 = 天花板 (sizing: ws=64 3B 臂 ≈ 3-4h 训练 + eval + 上传)
 REMOTE_QUEUE_TIMEOUT_H="${REMOTE_QUEUE_TIMEOUT_H:-0}" # 排队超时 (提交→起跑, 小时)。**0 = 不限制** (2026-09-28 用户裁决——假期拥堵实测烧满 72h 耐心 (24h×3 重提) 仍无卡: 排队是平台的事, 自设上限只会自伤, 楔死交监控 (驱动日志 queued 心跳可见); 与 REMOTE_JOB_TIMEOUT_H=0 的 09-22 裁决同哲学, 搜索与 d28 臂共用此值)。opt-in: 正值 = 排队上限 (防僵尸占位)
 REMOTE_QUEUE_RETRY="${REMOTE_QUEUE_RETRY:-2}" # 排队超时后重提次数 (新排队时钟; 总耐心 = 超时 × (1+次数))。仅 REMOTE_QUEUE_TIMEOUT_H>0 时生效——默认 0=不限制下永不触发
 # 自适应驱逐的 PENDING 宽限 (分钟, 仅 ADAPTIVE_CONFIGS=1 生效): 已提交作业

@@ -205,8 +205,10 @@ bash runs/run_experiment.sh             # 干跑门（LAUNCH 默认 1, 加 LAUNC
 - `TARGET_ARM_NODES=8`（默认 = prod4 臂形态 8 节点 ws=64；多节点 ws≠8 →
   派生 --load-optimizer=0 冷启 = prod4 2a 表同形。`REMOTE_JOB_TIMEOUT_H=0`
   = 搜索作业无运行时上限（楔死交监控——log 流 30s 上传停滞可见；
-  opt-in 正值 = 防楔死天花板）；臂作业超时独立: dispatch 缺省 9h 多节点
-  / 13h 单节点，`--job-timeout-h 0` 可显式去掉）
+  opt-in 正值 = 防楔死天花板）；臂作业超时独立: dispatch `--job-timeout-h`
+  缺省 **0 = 不限制**（同裁决哲学; 2026-09-28 对齐——原注释写"缺省 9h/13h"
+  但 argparse default=0.0 使该分支不可达, 实跑一直是不限制）, 正值 = 天花板
+  (sizing: ws=64 3B 臂 ≈ 3-4h 训练 + eval + 上传)）
 - `REMOTE_QUEUE_TIMEOUT_H=0`（**默认 = 排队不设限**,2026-09-28 裁决——
   假期拥堵实测烧满 72h 耐心无卡,排队是平台的事,自设上限只会自伤(见
   §4.7);opt-in 正值 = 排队上限,`REMOTE_QUEUE_RETRY` 仅在正值下生效。
@@ -350,8 +352,8 @@ torchrun 兜底（7 臂全 fallback 到主节点 8 卡 = ~70h 串行灾难）；
 手动应急（`runs/lib/target_arm.sh`）。**臂预算零覆盖**：引擎默认
 TARGET_TOKENS=3B、launch_env 实录 3B/2861 → 臂派发无需任何 env 覆盖
 （prod4 时代"成对覆盖"已成历史）。**排队不设限**（2026-09-28 裁决，
-REMOTE_QUEUE_TIMEOUT_H=0；臂运行时天花板独立 = dispatch 缺省 9h 多节点
-/13h 单节点，`--job-timeout-h 0` 可显式去掉）。
+REMOTE_QUEUE_TIMEOUT_H=0；臂运行时天花板独立 = dispatch `--job-timeout-h`
+缺省 0 = 不限制（2026-09-28 对齐: 9h/13h 分支自 f600701 起不可达）, 正值 = 天花板）。
 
 **prod5 桥接（本稿特例，⑬u 后 = 一条命令走默认路径）**：prod5 搜索跑在
 ⑬t 之前的代码上，其收官段 climb 远程派发因 asset-mount 缺失失败并误落
