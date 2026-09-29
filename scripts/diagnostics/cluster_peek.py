@@ -69,7 +69,7 @@ def main():
     K = int(final.max()) + 1
     dom = mm.cluster_labels.astype(np.int64)
     char = mm.doc_char_counts.astype(np.float64)
-    est_tok = char / 4.0  # CHAR_TO_TOKEN_EST, 同 selection 口径
+    est_tok = char / 4.0  # 硬编码 char/4 启发式, 同 selection 口径 (非旋钮)
     dom_names = list(getattr(mm._schema, "domain_names", None) or [])
     qcols = list(getattr(mm._schema, "quality_cols", None) or [])
     qual = np.asarray(mm.quality_scores, dtype=np.float64)

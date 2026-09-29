@@ -60,7 +60,7 @@ K_ENHANCED="${K_ENHANCED:-15}"         # 池聚类数
 ADAPTIVE_CONFIGS="${ADAPTIVE_CONFIGS:-1}"          # 自适应波预算 (生产开)
 ADAPTIVE_COMPACT="${ADAPTIVE_COMPACT:-1}"          # 紧凑画像 (时间盒; 进指纹)
 NPU_PER_EXP="${NPU_PER_EXP:-8}"         # 每 d20 实验卡数 k (全程固定)
-REMOTE_MAX_SEARCH_NODES="${REMOTE_MAX_SEARCH_NODES:-10}"  # 搜索阶段节点上限 (d20; 作业恒 1 节点 → 节点数=作业数)
+REMOTE_MAX_SEARCH_NODES="${REMOTE_MAX_SEARCH_NODES:-10}"  # 搜索阶段节点上限 (d20; 作业恒 1 节点 → 节点数=作业数)。只限远端在飞: REMOTE_LOCAL_PARALLEL=1 时总并发 = 它 + 本地整槽 (TODO:136 语义澄清)
 REMOTE_LOCAL_PARALLEL="${REMOTE_LOCAL_PARALLEL:-1}"  # 本地卡加入舰队 (k=8 整槽)
 REMOTE_OBS_PREFIX="${REMOTE_OBS_PREFIX:-}"         # 留空则自动读 climbmix-ma 配置 (见下)
 TARGET_ARM_NODES="${TARGET_ARM_NODES:-8}"          # 8=prod4 战后形态 (8 节点 ws=64, ~3.4h/臂; 1=单节点 ~10h/臂)

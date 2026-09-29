@@ -20,8 +20,8 @@ a WEIGHTS file lets the natural arm ride the standard custom-arm path:
         nohup bash runs/lib/arm_engine.sh > .../prod4_natural_arm.log 2>&1 &
 
 Also prints the per-cluster est-token pool table — the exact numbers the
-20B feasibility math needs (C10/C5 binding checks; char/4 estimates, see
-the CHAR_TO_TOKEN_EST legacy debt).
+20B feasibility math needs (C10/C5 binding checks; char/4 estimates —
+the chars/4 estimation-bias legacy debt).
 
 Standalone: numpy only.
 """
@@ -59,7 +59,7 @@ def main() -> None:
             f"search stage, or point --pool-dir at the pool the cluster cache "
             f"was built from)")
 
-    tok = char / 4.0  # CHAR_TO_TOKEN_EST: same char/4 heuristic as selection
+    tok = char / 4.0  # hardcoded char/4 heuristic, same as selection (no knob)
     valid = labels >= 0
     pool = np.bincount(labels[valid], weights=tok[valid])
     total = pool.sum()
