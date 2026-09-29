@@ -462,6 +462,70 @@ RUN_DIR="$TMP/nope" bash runs/run_extend_eval.sh > "$TMP/anchor_bad.log" 2>&1
 [ $? -ne 0 ] && grep -q "launch_env.json 不存在" "$TMP/anchor_bad.log"
 check "non-run dir refused" $?
 
+echo "── SEARCH_NUM_ITERATIONS derivation (TODO:117a) ──"
+# 从脚本提取实际派生实现原样求值 (单一真源, 防实现漂移; 两行 = 中间变量 + 赋值)
+_derive() (
+    unset SEARCH_NUM_ITERATIONS _cfg_commas
+    CONFIGS_PER_ITER="$1"
+    eval "$(grep -E '^(_cfg_commas|SEARCH_NUM_ITERATIONS)=' runs/run_experiment.sh)"
+    printf '%s' "$SEARCH_NUM_ITERATIONS"
+)
+[ "$(_derive "8,4")" = "2" ]
+check "derive 8,4 -> 2 (smoke plan needs no explicit env)" $?
+[ "$(_derive "64,32,16")" = "3" ]
+check "derive 64,32,16 -> 3 (byte-identical to old default)" $?
+[ "$(_derive "20,10,5")" = "3" ]
+check "derive 20,10,5 -> 3" $?
+[ "$(_derive "6,4,3,2")" = "4" ]
+check "derive 6,4,3,2 -> 4" $?
+(
+    SEARCH_NUM_ITERATIONS=5
+    CONFIGS_PER_ITER="8,4"
+    eval "$(grep -E '^(_cfg_commas|SEARCH_NUM_ITERATIONS)=' runs/run_experiment.sh)"
+    [ "$SEARCH_NUM_ITERATIONS" = "5" ]
+)
+check "explicit SEARCH_NUM_ITERATIONS still wins" $?
+! grep -q 'export SEARCH_NUM_ITERATIONS' scripts/diagnostics/smoke_round.sh
+check "smoke_round.sh workaround export removed" $?
+_cfg_ln=$(grep -n '^CONFIGS_PER_ITER=' runs/run_experiment.sh | head -1 | cut -d: -f1)
+_sni_ln=$(grep -n '^SEARCH_NUM_ITERATIONS=' runs/run_experiment.sh | head -1 | cut -d: -f1)
+[ -n "$_cfg_ln" ] && [ -n "$_sni_ln" ] && [ "$_cfg_ln" -lt "$_sni_ln" ]
+check "CONFIGS_PER_ITER defined before the derivation" $?
+
+echo "── smoke gate: safe-residue auto-reset (TODO:117b) ──"
+# 安全残留 (引擎早死形态) -> 自动重置 + 干跑通过
+mkdir -p result/ws_smoke_reset_current
+touch result/ws_smoke_reset_current/cluster_cache.npz \
+      result/ws_smoke_reset_current/cluster_info_cache.json \
+      result/ws_smoke_reset_current/balanced_profile.json \
+      result/ws_smoke_reset_current/launch_env.json \
+      result/ws_smoke_reset_current/search.log \
+      result/ws_smoke_reset_current/.fingerprint_search
+SMOKE_LAUNCH=0 SMOKE_NAME=ws_smoke_reset bash scripts/diagnostics/smoke_round.sh \
+    > "$TMP/smoke_reset.log" 2>&1
+check "safe residue: dry-run exit 0" $? "$(tail -2 "$TMP/smoke_reset.log")"
+grep -q "自动重置" "$TMP/smoke_reset.log"
+check "safe residue: auto-reset announced" $?
+[ ! -e result/ws_smoke_reset_current ]
+check "safe residue: dir wiped (cache seeds re-copied from source on launch)" $?
+grep -q "轮次计划: 8,4" "$TMP/smoke_reset.log"
+check "engine dry-run saw the 8,4 plan (env flowed, no explicit iterations)" $?
+rm -rf result/ws_smoke_reset_current   # 双保险清理 (干跑理论上不重建)
+# 非安全残留 (exp_ 目录 = 真实进度) -> 仍拒绝, 文件不动
+mkdir -p result/ws_smoke_unsafe_current/exp_0000
+touch result/ws_smoke_unsafe_current/search.log \
+      result/ws_smoke_unsafe_current/cluster_cache.npz
+SMOKE_LAUNCH=0 SMOKE_NAME=ws_smoke_unsafe bash scripts/diagnostics/smoke_round.sh \
+    > "$TMP/smoke_unsafe.log" 2>&1
+_rc=$?
+[ "$_rc" -ne 0 ]
+check "unsafe residue: exit non-zero" $?
+grep -q "首个非常规项: exp_0000" "$TMP/smoke_unsafe.log"
+check "unsafe residue: refusal names the offending item" $?
+[ -e result/ws_smoke_unsafe_current/exp_0000 ]
+check "unsafe residue: files untouched" $?
+rm -rf result/ws_smoke_unsafe_current
+
 echo
 if [ "$FAILED" -eq 0 ]; then
     echo "✓ all run-launcher checks passed"

@@ -85,8 +85,27 @@ fi
 if [ -f "$OUTPUT_DIR/search_state.json" ]; then
     echo "  → 检测到已有 search_state —— 续跑彩排（同命令同 env = 同指纹）"
 elif [ -d "$OUTPUT_DIR" ] && [ -n "$(ls -A "$OUTPUT_DIR" 2>/dev/null)" ]; then
-    echo "✗ ${OUTPUT_DIR} 非空且无 search_state —— 请移走或换 SMOKE_NAME"
-    exit 1
+    # 安全残留分类 (2026-09-29, TODO:117b): 引擎早死形态 = 只剩缓存种子/指纹/
+    # launch_env/search.log, 无 search_state 无 exp_* —— 缓存种子可从源重拷,
+    # 整目录重置零损失 (旧门一律拒绝, 首跑两次早死各费一次手动 rm 的教训)。
+    # 白名单外的任何条目 (含 exp_* 目录/.done 标记) 仍拒绝 —— 那是真实进度。
+    _bad=""
+    for _e in "$OUTPUT_DIR"/* "$OUTPUT_DIR"/.[!.]* "$OUTPUT_DIR"/..?*; do
+        [ -e "$_e" ] || continue
+        case "$(basename "$_e")" in
+            cluster_cache.npz|cluster_info_cache.json|balanced_profile.json|\
+            launch_env.json|remote_config.json|search.log|\
+            .fingerprint|.fingerprint_search|.fingerprint_target|.code_drift.json)
+                ;;
+            *) _bad="$(basename "$_e")"; break ;;
+        esac
+    done
+    if [ -n "$_bad" ]; then
+        echo "✗ ${OUTPUT_DIR} 非空且无 search_state（首个非常规项: ${_bad}）—— 请移走或换 SMOKE_NAME"
+        exit 1
+    fi
+    echo "  → 检测到安全残留（引擎早死形态: 缓存种子/指纹/launch_env/search.log）—— 自动重置"
+    rm -rf "$OUTPUT_DIR"
 fi
 
 # ── 聚类缓存继承（全新跑 ≠ 重新聚类; 簇与源轮逐位一致）──────────────
@@ -115,11 +134,9 @@ fi
 
 # ── 发射 env（全部 env 覆盖, 引擎 EDIT 块默认值不参与）──────────────
 export EXP_NAME="$SMOKE_NAME"
-export CONFIGS_PER_ITER="8,4"
-export SEARCH_NUM_ITERATIONS="2"     # 必须随轮次数走: run_experiment.sh:244
-                                    # 默认 3, 与 2 条目的 CONFIGS_PER_ITER 组合
-                                    # 会被 run_climb.py 的一致性检查拒绝
-                                    # (2026-09-22 首跑实测)
+export CONFIGS_PER_ITER="8,4"        # 轮次数由引擎从条目数派生 (2026-09-29
+                                    # TODO:117a 根治; 旧显式
+                                    # SEARCH_NUM_ITERATIONS=2 workaround 已移除)
 export PROXY_TARGET_TOKENS="50M"
 export EVAL_MAX_PER_TASK=100
 export NPU_PER_EXP=1

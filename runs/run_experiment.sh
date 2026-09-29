@@ -244,7 +244,14 @@ ADAPTIVE_CONFIGS="${ADAPTIVE_CONFIGS:-0}"
 # 2 波 (池 ≥ S0+4); 紧凑用 overshoot 样本换墙钟: [20,10,10] ≈ 22/11/11
 # 承认 4 波 ~13h vs 贪心 6-7 波 ~19h。默认 0 = 贪心 (闲卡是免费样本)。
 ADAPTIVE_COMPACT="${ADAPTIVE_COMPACT:-0}"
-SEARCH_NUM_ITERATIONS="${SEARCH_NUM_ITERATIONS:-3}"
+# 轮次数默认 = CONFIGS_PER_ITER 条目数 (2026-09-29, TODO:117a 根治):
+# 3 条目配置 (64,32,16 / 20,10,5) 派生值 = 3, 与旧硬编码默认逐字节等价;
+# 非 3 条目计划 (smoke 8,4) 不再需要显式 SEARCH_NUM_ITERATIONS —— 旧默认 3
+# 会被 run_climb.py 一致性检查直接拒绝 (2026-09-22 首跑实测)。
+# (纯 bash 计数: 总长 - 去逗号长 + 1 = 条目数; ${#var//,/} 不合法, 故两行。)
+_cfg_commas="${CONFIGS_PER_ITER//,/}"
+SEARCH_NUM_ITERATIONS="${SEARCH_NUM_ITERATIONS:-$(( ${#CONFIGS_PER_ITER} - ${#_cfg_commas} + 1 ))}"
+unset _cfg_commas
 K_ENHANCED="${K_ENHANCED:-3}"
 # balanced 模式下 K_max 语义等同 K_ENHANCED (容量约束划分恰好到 K);
 # distance 模式仍可显式覆盖。默认跟随 K_ENHANCED。
