@@ -17,6 +17,9 @@
 #                                臂名 climb-cfg<config_id> 由此解析配方
 #    search_state.json           搜索历史 (全部已测配置+分数) → 舰队语境
 #    cluster_info_cache.json     簇标签/规模/token/质量分
+#    cluster_semantics.md        §2b 簇内容速写缓存 (cluster_peek 数据面,
+#                                自动生成; 池目录 = launch_env DATA_DIR 或
+#                                --pool-dir, 缺件优雅跳过)
 #    optimal_mixture_weights.json 设计空间 argmin 权重 (参照线, D19)
 #    --natural-weights           natural 臂权重文件; 缺省按簇 token 占比重算
 #    --arm-weights NAME=PATH     其他自定义臂 (如 domainfix) 的权重, 可多次
@@ -186,6 +189,37 @@ def l1(a, b):
     return float(np.abs(np.asarray(a) - np.asarray(b)).sum())
 
 
+def _cluster_semantics(run_dir, pool_dir):
+    """§2b 簇内容速写: cluster_peek 数据面的紧凑渲染, 一次生成缓存复用。
+
+    返回 (block, note): block = 渲染文本 (None = 跳过), note = 跳过原因。
+    池+簇缓存在运行期不可变 → cluster_semantics.md 生成一次即复用
+    (cluster_cache.npz 更新时按 mtime 重生成)。缺件优雅跳过, 报告其余
+    部分照常 — 手工深挖 (多样本/指定簇) 仍走 cluster_peek.py CLI。"""
+    if not pool_dir or not os.path.isdir(pool_dir):
+        return None, (f"pool dir 不可解析 "
+                      f"({pool_dir or 'launch_env DATA_DIR 缺失'})")
+    cache_npz = os.path.join(run_dir, "cluster_cache.npz")
+    if not os.path.isfile(cache_npz):
+        return None, "cluster_cache.npz 缺失"
+    sem_path = os.path.join(run_dir, "cluster_semantics.md")
+    if (not os.path.isfile(sem_path)
+            or os.path.getmtime(cache_npz) > os.path.getmtime(sem_path)):
+        try:
+            import cluster_peek as cp   # 同目录 (脚本运行时 sys.path[0])
+            _, profs = cp.collect(pool_dir, cache_npz, n_per=1, chars=220,
+                                  seed=7)
+            body = cp.render_brief(profs)
+        except (Exception, SystemExit) as e:
+            return None, f"簇语义生成失败 ({e})"
+        tmp = sem_path + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(body + "\n")
+        os.replace(tmp, sem_path)
+    with open(sem_path) as f:
+        return f.read(), None
+
+
 # ── 主流程 ─────────────────────────────────────────────────────────────
 
 def main():
@@ -203,6 +237,8 @@ def main():
                     help="单次评测 stem SE (噪声带 |Δ|<=√2·SE)")
     ap.add_argument("--top-l1", type=int, default=6,
                     help="差异分解表每对显示的簇数")
+    ap.add_argument("--pool-dir", default="",
+                    help="§2b 簇内容速写的池目录 (缺省取 launch_env DATA_DIR)")
     args = ap.parse_args()
 
     run_dir = args.run_dir
@@ -432,11 +468,20 @@ def main():
     else:
         notes.append("matplotlib 不可用 — 只出表不出图")
 
+    # ── §2b 簇内容速写: cluster_peek 数据面, 一次生成缓存复用 ──
+    # (2026-09-30 用户裁决: 簇语义进报告自动化, 不再依赖手工 CLI)
+    pool_dir = args.pool_dir or str(
+        (load_json(os.path.join(run_dir, "launch_env.json")) or {})
+        .get("DATA_DIR") or "")
+    sem_block, sem_note = _cluster_semantics(run_dir, pool_dir)
+    if sem_note:
+        notes.append(f"簇内容速写跳过 — {sem_note}")
+
     section = build_section(
         run_dir, labels, K, tok_share, quality,
         ranked, scores, winner, noise_band, arm_weights, arm_src,
-        W, argmin_v, fleet, fleet_ctx, figs, notes, args)
-
+        W, argmin_v, fleet, fleet_ctx, figs,
+        notes, args, sem_block=sem_block)
     update_report_section(run_dir, section)
     print("\n".join(section))
     print(f"\n[OK] 赢家 {winner} (stem {scores[winner]['stem']:.4f}) — "
@@ -566,7 +611,7 @@ def make_figs(run_dir, labels, W, winner, arm_weights, ranked, fleet,
 def build_section(run_dir, labels, K, tok_share, quality,
                   ranked, scores, winner, noise_band, arm_weights, arm_src,
                   W, argmin_v, fleet, fleet_ctx, figs,
-                  notes, args):
+                  notes, args, sem_block=None):
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
     R = []
 
@@ -691,6 +736,9 @@ def build_section(run_dir, labels, K, tok_share, quality,
         else:
             R += ["", f"D19 终选参照 (optimal_mixture_weights.json): "
                   f"与赢家 L1 = {l1(W, argmin_v):.3f}", ""]
+    if sem_block:
+        R += ["### 2b. 簇内容速写 (自动生成; 池+簇缓存不可变 → "
+              "cluster_semantics.md 一次生成)", "", sem_block.rstrip(), ""]
     if figs.get("vs_baselines"):
         R += [f"![逐簇配方对比]({figs['vs_baselines']})", ""]
 

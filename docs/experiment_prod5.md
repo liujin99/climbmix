@@ -205,15 +205,33 @@ RUN_DIR/report.md §3）
 - climb α：**C10 = 0.8036（池占比 5.5% 的 14.6×）** / C0 = 0.0814 / 其余
   13 簇 floor 0.0088；cfg90：C10 0.5512 / C0 0.2819；cfg100：C10 0.6374 /
   C6 0.1584。三条 top 配方全 C10-heavy。
-- **C10 画像**：12.97M docs / 5.05B tokens / **389 tok/doc（全池最短文档簇）**
-  / 选中率 48% 全池最高（其余簇 ≤ 4%）。内容语义鉴定 = cluster_peek（prod6
-  前补，零 NPU）。
+- **C10 画像（cluster_peek 鉴定，2026-09-30 补）**：12.97M docs / 5.06B
+  est-tok（占池 5.4% token）/ 中位 1000 ch（389 tok/doc，全池最短文档簇）/
+  选中率 48% 全池最高（其余簇 ≤ 4%）。**内容 = 初等/应用统计向练习题与
+  解答体**（域构成数学 95.7%；样本 = 假设检验例题、z-score/二项概率问答、
+  文字应用题、课堂讲义、论坛解题）——gsm8k 式分步推理的直接教材，赢家
+  配方的机制解释就此闭环。
+- **C0 = C10 的近亲**（数学 99.6%，中位 1109 ch，微积分/代数/分析类解题，
+  质量分更高：stem_relevance 4.33 vs C10 3.88）——climb 与 cfg90 的配方
+  差异 90% 是 C10↔C0 互换而 d28 并列：**同域短文档练习簇互相可替代**，
+  并列的机制解释。
+- **C6 = 讲义/教材/综述长文**（中位 2956 ch ≈ 3× C10；代数几何/概率论/
+  证明写作类长文）——cfg100 的下注（α 0.1584），三臂中 d28 最低且 math
+  减半（0.0260 vs climb 0.0580）：长文综述对生成式推理的边际贡献显著
+  低于练习题。
+- **质量分反转**：赢家 80% 下注的 C10，其 stem_relevance 3.88 /
+  knowledge_value 3.65 为三簇最低（C0 4.33/4.12、C6 4.45/4.07）——
+  **质量分 ≠ 训练效用**（应用练习 > "更高质量"的形式数学/综述），为
+  prod6 簇内质量分提供反面校准：质量加权可能反作用，先零 NPU 离线验证
+  质量-效用异质性（P-3 预注册步骤）。
 - climb vs cfg90 差异分解（L1 0.505）：C10 +0.25（贡献 50%）/ C0 −0.20（40%）/
   C4+C14 −0.05（10%）——90% 的配方差异集中在 C10↔C0 互换，d28 却并列 →
   **热区对簇间微扰稳健**。
-- **质量维度全程缺席**：本 run filter=none（缓存继承），簇质量分全 0，
-  α-vs-质量机制图不可用——质量不进搜索目标 = prod6"簇内质量分"候选项的
-  立项证据（P-3 行预注册在案）。
+- **质量维度缺席 = 工具 plumbing 缺失，非数据缺失（2026-09-30 更正）**：
+  本 run filter=none（缓存继承），recipe 的簇质量列全 0、α-vs-质量机制图
+  不可用——但 cluster_peek 实测池级 metadata 一直带 5 列逐文档质量分
+  （116M × 5，直接读到）：质量不进搜索目标仍是事实（prod6"簇内质量分"
+  立项证据，P-3 行预注册在案），但 prod6 的数据获取成本为零。
 - 20B 耦合挂账：赢家 C10 需 0.8036×20B = 16.1B vs 池 5.05B = **3.2× 超采样
   （超 cap 2）**，同 prod4 cfg25 量级——20B 设计时三出路（扩池 / 权重再
   派生 / OVERSAMPLE_OK）再裁决。
@@ -338,8 +356,9 @@ RUN_DIR/report.md §3）
   predictor_scatter.png / domain_distribution.png
 - 臂族：eval_{climb, climb-cfg90, climb-cfg100, domainfix, natural, uniform,
   base_remote}.csv + dispatch_*.log + .done 血缘（权重哈希）
-- 报告：report.md（搜索子报告 → CP4 判定 → 赢家配方 → 终报印章四节）/
-  recipe_*.png × 3 / validation_report.md
+- 报告：report.md（搜索子报告 → CP4 判定 → 赢家配方〔含 §2b 簇内容速写〕
+  → 终报印章四节）/ recipe_*.png × 3 / cluster_peek.md（C10/C0/C6 深挖版）/
+  cluster_semantics.md（§2b 紧凑版缓存，自动生成）/ validation_report.md
 - 发射：launch_env.json / remote_config.json / .code_drift.json /
   .done_fleet
 
@@ -352,3 +371,4 @@ RUN_DIR/report.md §3）
 - 2026-09-22 v0.4：P-3 课程化行更正改动面（引擎零改动，数据准备侧实施——代码核读实证）；结果区新增赢家配方解剖动作（CP4 后跑 `scripts/diagnostics/recipe_report.py` **原位更新 report.md**——单一报告、PNG 平铺 run 根、无独立产物，用户裁决 2026-09-22）。触发 = 发射窗等待期研究讨论。
 - 2026-09-29 v1.0（收官判读成文）：TL;DR + 结果区回填（搜索执行 / d28 全景 / 判决 V1–V5 + P-2 加冕 / prod6 议题单 / 附录 A–D）。判决要点：三臂 CLIMB 全部显著胜 uniform（+0.036~+0.043）；P-2 并列加冕 climb & climb-cfg90；V1 全链路 PASS（守卫触发，终选 cfg#101 = d28 赢家，代码链 `_select_final_mixture` → `_save_outputs` → 臂备料三环闭合）；V2 跨轮并列量级 + 三通道兑现；V3 强口径 PASS；V4 分裂（A4 预注册触发条件不满足）；V5 触发式未展开。判读会同日顺手修 = recipe_report 终选标签失实（`f575a10`）+ Step 8 终报上屏改 report.md 原文（`6568344`）。数据 = 归档 `prod5_20260929_201108/report.md` 全文（CP4 判定节 + 赢家配方节 + 终报印章）判读。
 - 2026-09-30 v1.0.1：V1 数据逐位对账补录（`accumulated_configs[101].weights` ≡ `optimal_mixture_weights.json`，score +1.4524 ✓）——"climb = cfg#101"升级为数据实证；README/KEY_FINDINGS 总计算量 ≈3,900 NPU·h 落账（`6b6b7e7`：两轮验证 ≈3,600 + 全池嵌入 ≈320）。
+- 2026-09-30 v1.0.2：C10/C0/C6 语义鉴定回填（cluster_peek，零 NPU）——C10 = 初等/应用统计练习题与解答体（gsm8k 机制闭环）、C0 = 近亲形式数学解题（并列的机制解释）、C6 = 综述长文（cfg100 减分的下注）；**质量分反转发现**（赢家簇质量分三簇最低 → 质量分 ≠ 训练效用，prod6 反面校准）+ 池级逐文档质量分在档更正（"质量缺席"是 recipe plumbing 缺失非数据缺失）。同批交付**报告自动带簇语义**：recipe_report §2b"簇内容速写"（cluster_peek 数据面紧凑版，池目录自动取 launch_env DATA_DIR，cluster_semantics.md 一次生成缓存复用，缺件优雅跳过——用户裁决"不再需要手工跑 CLI 才知道簇是什么"）+ 回归测试 test_cluster_semantics.py。存档报告补挂 §2b = pull 后重跑 final_report --auto。
