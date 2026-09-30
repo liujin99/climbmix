@@ -19,10 +19,13 @@ iterative bootstrapping, using **nanochat-npu** as the training backend via
 **method A** (subprocess calls).
 
 **Project scale**: five production rounds on a 116M-doc / ~92B-token STEM
-pool; a full validation round consumes **≈1,800 NPU-hours** (d20 search
-fleet + target arms at ~1.5B scaling / 3B tokens + anchors); 226 measured
-search points across two independent searches; every deliberate deviation
-from the paper itemized in
+pool. Total compute: **≈3,900 NPU-hours** — the two full validation
+rounds (prod4 + prod5: two d20 search fleets with **226 measured points**,
+14 target arms at ~1.5B scaling / 3B tokens, anchors and failed launches
+included) ≈3,600, plus the one-time full-pool embedding (116M docs
+through a 400M-param encoder, 8 NPUs × ~40 h) ≈320; the three earlier
+production rounds came before that. Every deliberate deviation from the
+paper itemized in
 [docs/paper_deviations.md](docs/paper_deviations.md) (D1–D19).
 
 The CLIMB premise is validated at target-model scale in our production
@@ -46,7 +49,8 @@ end-to-end from a **fresh cold-start search** — 115 measured points over
 3 guided rounds, zero warm-start injection, same pool and cluster cache
 as prod4. All arms: d28 (~2.5B), 3B tokens, identical training recipe and
 eval protocol (b16 era throughout); STEM = centered-accuracy mean over
-6 tasks.
+6 tasks. Round cost: **≈1,800 NPU-hours** (d20 search fleet at 640M
+tokens per point + 6 target arms at 64-NPU world size + anchor).
 
 | Arm | STEM | gsm8k_cot |
 |---|---|---|

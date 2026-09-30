@@ -1,8 +1,10 @@
 # Takeaways — What We Learned Reproducing Nemotron-CLIMB
 
-> The condensed, transferable findings from five production rounds (a full
-> validation round costs ≈1,800 NPU-hours: d20 search fleet + target arms
-> at ~1.5B scaling / 3B tokens + anchors). Every claim below is evidenced in
+> The condensed, transferable findings from five production rounds (the
+> two full validation rounds alone cost ≈3,600 NPU-hours — two d20 search
+> fleets with 226 measured points + 14 target arms at ~1.5B scaling / 3B
+> tokens + anchors — plus ≈320 NPU-hours of one-time full-pool embedding).
+> Every claim below is evidenced in
 > the round records; this page is the index-grade summary. Detail chain:
 > [experiment_prod4.md](experiment_prod4.md) (verdicts, §5–§6) ·
 > [experiment_prod5.md](experiment_prod5.md) (fresh-search replication +
