@@ -153,6 +153,9 @@ mode = **`best_measured_no_claim`**（守卫触发）：
   `optimal_mixture_weights.json` 导出 = **"climb" 臂**（代码链：
   `_select_final_mixture` no-claim 路径 `return best_config` →
   `_save_outputs` 原样导出 → 臂备料吃同一文件，权重内容哈希入 .done 血缘）。
+- 数据逐位对账（2026-09-30）：`search_state.accumulated_configs[101].weights`
+  与 `optimal_mixture_weights.json` **17 位有效数字逐位一致**，score
+  +1.4524 与终选报告吻合——"climb = cfg#101"从代码链推定升级为数据实证。
 
 ### d28 验证全景（7 臂 = 6 臂族 + base；2026-09-29 20:11 落齐，归档 `prod5_20260929_201108`）
 
@@ -348,3 +351,4 @@ RUN_DIR/report.md §3）
 - 2026-09-21 v0.3：基线臂更名 **random3b → uniform**（用户裁决；去 3b 后缀与 natural/domainfix 对齐；CP4 渲染须显式 `--ref uniform`）。
 - 2026-09-22 v0.4：P-3 课程化行更正改动面（引擎零改动，数据准备侧实施——代码核读实证）；结果区新增赢家配方解剖动作（CP4 后跑 `scripts/diagnostics/recipe_report.py` **原位更新 report.md**——单一报告、PNG 平铺 run 根、无独立产物，用户裁决 2026-09-22）。触发 = 发射窗等待期研究讨论。
 - 2026-09-29 v1.0（收官判读成文）：TL;DR + 结果区回填（搜索执行 / d28 全景 / 判决 V1–V5 + P-2 加冕 / prod6 议题单 / 附录 A–D）。判决要点：三臂 CLIMB 全部显著胜 uniform（+0.036~+0.043）；P-2 并列加冕 climb & climb-cfg90；V1 全链路 PASS（守卫触发，终选 cfg#101 = d28 赢家，代码链 `_select_final_mixture` → `_save_outputs` → 臂备料三环闭合）；V2 跨轮并列量级 + 三通道兑现；V3 强口径 PASS；V4 分裂（A4 预注册触发条件不满足）；V5 触发式未展开。判读会同日顺手修 = recipe_report 终选标签失实（`f575a10`）+ Step 8 终报上屏改 report.md 原文（`6568344`）。数据 = 归档 `prod5_20260929_201108/report.md` 全文（CP4 判定节 + 赢家配方节 + 终报印章）判读。
+- 2026-09-30 v1.0.1：V1 数据逐位对账补录（`accumulated_configs[101].weights` ≡ `optimal_mixture_weights.json`，score +1.4524 ✓）——"climb = cfg#101"升级为数据实证；README/KEY_FINDINGS 总计算量 ≈3,900 NPU·h 落账（`6b6b7e7`：两轮验证 ≈3,600 + 全池嵌入 ≈320）。
