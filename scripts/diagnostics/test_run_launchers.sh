@@ -526,6 +526,22 @@ check "unsafe residue: refusal names the offending item" $?
 check "unsafe residue: files untouched" $?
 rm -rf result/ws_smoke_unsafe_current
 
+echo "── Step 8 终报上屏 = report.md 原文 (2026-09-29 裁决) ──"
+# 旧上屏 = report_generator 的双臂 validation 视图 (climb vs uniform 两个固定
+# 日志, 看不到臂族对比, 且把固定 climb 臂误标 "CLIMB optimal"); 新上屏 =
+# final_report --auto 之后 cat report.md 原文 (全臂对比在 CP4 判定节)。
+grep -A 12 'src/climbmix/pipeline/report_generator.py' runs/run_experiment.sh \
+    | grep -q '> /dev/null'
+check "2-arm validation print silenced (validation_report.md still written)" $?
+grep -q 'cat "$OUTPUT_DIR/report.md"' runs/run_experiment.sh
+check "report.md printed verbatim after the seal" $?
+_fr_ln=$(grep -n 'final_report.py" "$OUTPUT_DIR" --auto' runs/run_experiment.sh | head -1 | cut -d: -f1)
+_cat_ln=$(grep -n 'cat "$OUTPUT_DIR/report.md"' runs/run_experiment.sh | head -1 | cut -d: -f1)
+_done_ln=$(grep -n '  Done! → ' runs/run_experiment.sh | head -1 | cut -d: -f1)
+[ -n "$_fr_ln" ] && [ -n "$_cat_ln" ] && [ -n "$_done_ln" ] \
+    && [ "$_fr_ln" -lt "$_cat_ln" ] && [ "$_cat_ln" -lt "$_done_ln" ]
+check "order: final_report seal → cat report.md → Done banner" $?
+
 echo
 if [ "$FAILED" -eq 0 ]; then
     echo "✓ all run-launcher checks passed"

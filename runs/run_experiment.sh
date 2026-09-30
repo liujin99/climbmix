@@ -730,6 +730,9 @@ fi
 # ═══════════════════════════════════════════════════════════════════════
 echo -e "\n===== Step 8: Report =====\n"
 
+# 双臂 validation 视图 (climb vs uniform, validation_report.md) 只落盘不上屏 —
+# 2026-09-29 裁决: 终报上屏 = 下方 report.md 原文 (全臂对比在 CP4 判定节);
+# 旧上屏只见两臂且把固定 climb 臂误标 "CLIMB optimal"。stdout 静默, 崩溃走 stderr。
 python3 "$CLIMBMIX_DIR/src/climbmix/pipeline/report_generator.py" \
     --result-dir "$OUTPUT_DIR" \
     --climb-train-log "$OUTPUT_DIR/mid_train_climb.log" \
@@ -738,13 +741,23 @@ python3 "$CLIMBMIX_DIR/src/climbmix/pipeline/report_generator.py" \
     --random-eval-log "$OUTPUT_DIR/eval_uniform.log" \
     --base-model-tag "d${TARGET_DEPTH}" \
     --climb-model-tag "d${TARGET_DEPTH}_climb_${EXP_NAME}" \
-    --random-model-tag "d${TARGET_DEPTH}_uniform_${EXP_NAME}"
+    --random-model-tag "d${TARGET_DEPTH}_uniform_${EXP_NAME}" \
+    > /dev/null
 
-# ⑬u: report_generator 整文件重写 report.md — 舰族在 Step 4 落地时写入的
-# cp4 判定/配方/终报节会被冲掉 (⑬t 把臂族挪进 Step 4 后的顺序反转; 旧序
-# = 先 Step 8 后人工臂落地, 无此问题)。终报链幂等 — 重挂一次恢复三节。
+# ⑬u: 终报链兜底 — 落地钩子通常已盖过章 (dispatch_fleet 全齐时), 这里幂等
+# 重挂 cp4 判定/配方/终报三节 (marker 替换, 重跑无害)。(更正: report_generator
+# 的 Step 8 CLI 只写 validation_report.md, report.md 由搜索期 climb_pipeline
+# 生成 — 旧注"整文件重写 report.md"的冲写序不成立于现 CLI。)
 python3 "$CLIMBMIX_DIR/scripts/diagnostics/final_report.py" "$OUTPUT_DIR" --auto \
     || echo "  (final_report --auto 未完成 — 见上方输出; 手动: final_report.py <RUN_DIR> --auto)"
+
+# 终报上屏 = report.md 原文, 与落盘一字不差 (判定/配方/印章节已挂齐;
+# final_report 失败也照 cat — 已有兜底提示, 报告主体仍在)
+if [ -f "$OUTPUT_DIR/report.md" ]; then
+    echo -e "\n───── report.md ─────\n"
+    cat "$OUTPUT_DIR/report.md"
+    echo -e "\n─────────────────────"
+fi
 
 echo -e "\n════════════════════════════════════════════════════════════"
 echo "  Done! → $OUTPUT_DIR"
