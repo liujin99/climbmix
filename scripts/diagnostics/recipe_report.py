@@ -85,8 +85,9 @@ def parse_arm_name(a):
     """臂名 → {"kind", "config_id", "rep"}.
     kind ∈ cfg / climb_optimal / uniform / natural / other。
     兼容历史命名: climb-cfg72 与 cfg72 等价; *_rep = 同配方重复种子臂
-    (prod4: climb_rep / random3b_rep / cfg72_rep); climb = 设计空间 argmin
-    臂 (optimal_mixture_weights.json, D19 之前的终选输出)。"""
+    (prod4: climb_rep / random3b_rep / cfg72_rep); climb = D19 终选臂
+    (optimal_mixture_weights.json — argmin 经守卫放行, 或 no-claim 降级到
+    最佳实测点; prod5 即后者)。"""
     rep = a.endswith("_rep")
     base = a[:-len("_rep")] if rep else a
     m = re.match(r"^(?:climb-)?cfg(\d+)$", base)
@@ -335,7 +336,22 @@ def main():
             v = weights_vec_from_payload(optimal_payload, labels)
             if v is not None:
                 arm_weights[a] = v
-                arm_src[a] = f"optimal_mixture_weights.json (设计空间 argmin){rep}"
+                # D19 后该文件 = 终选产物 (argmin 放行 / no-claim 降级到
+                # 最佳实测点), 标签按 topk 落册的 selection_mode 动态渲染 —
+                # 静态"设计空间 argmin"在 no-claim 轮失实 (prod5 判读发现)
+                sel_mode = str(topk.get("selection_mode") or "")
+                if "best_measured" in sel_mode:
+                    bm = next((c for c in topk.get("candidates") or []
+                               if c.get("rank") == 1), None)
+                    bm_id = f" cfg#{bm['config_id']}" if bm else ""
+                    src = (f"optimal_mixture_weights.json (D19 终选 = 最佳实测"
+                           f"点{bm_id} 权重, no-claim 降级)")
+                elif sel_mode == "predictor_design_space_claimed":
+                    src = ("optimal_mixture_weights.json (设计空间 argmin, "
+                           "D19 守卫放行)")
+                else:
+                    src = "optimal_mixture_weights.json (D19 终选产物)"
+                arm_src[a] = f"{src}{rep}"
             else:
                 arm_src[a] = ("climb 臂: optimal_mixture_weights.json 缺失"
                               "或权重无法对齐标签")
@@ -669,8 +685,12 @@ def build_section(run_dir, labels, K, tok_share, quality,
         row += [f"**{W[i]:.4f}** | {ratio:.1f}× |"]
         R.append("| " + "".join(row).rstrip("| ") + " |")
     if argmin_v is not None:
-        R += ["", f"设计空间 argmin (optimal_mixture_weights.json, D19 参照): "
-              f"与赢家 L1 = {l1(W, argmin_v):.3f}", ""]
+        if parse_arm_name(winner)["kind"] == "climb_optimal":
+            R += ["", "D19 终选参照 (optimal_mixture_weights.json): 赢家即该"
+                  "文件本体 — climb 臂配方 = 终选产物, L1 自比恒为 0, 不另列", ""]
+        else:
+            R += ["", f"D19 终选参照 (optimal_mixture_weights.json): "
+                  f"与赢家 L1 = {l1(W, argmin_v):.3f}", ""]
     if figs.get("vs_baselines"):
         R += [f"![逐簇配方对比]({figs['vs_baselines']})", ""]
 
