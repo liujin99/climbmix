@@ -381,8 +381,8 @@ if master_process and records:
             import matplotlib.pyplot as plt
             other = max(0.0, med("dt") - med("fwdbwd") - med("nan_chain")
                         - med("clip") - med("optimizer") - med("zero_grad"))
-            labels = ["fwd/bwd", "NaN 链", "clip", "优化器·等待",
-                      "优化器·host+计算", "zero_grad", "其他"]
+            labels = ["fwd/bwd", "nan chain", "clip", "optimizer wait",
+                      "optimizer host+compute", "zero_grad", "other"]
             vals = [med("fwdbwd"), med("nan_chain"), med("clip"),
                     opt_wait, med("optimizer") - opt_wait, med("zero_grad"),
                     other]
