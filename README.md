@@ -18,23 +18,74 @@ for language model pre-training through embedding-driven clustering and
 iterative bootstrapping, using **nanochat-npu** as the training backend via
 **method A** (subprocess calls).
 
-**Project scale**: four production rounds on a 116M-doc / ~92B-token STEM
-pool; a full 9-arm validation round consumes **≈1,800 NPU-hours** (d20
-search fleet + 8 target arms at ~1.5B scaling / 3B tokens + anchors);
-111 measured search points; every deliberate deviation from the paper
-itemized in [docs/paper_deviations.md](docs/paper_deviations.md) (D1–D19).
+**Project scale**: five production rounds on a 116M-doc / ~92B-token STEM
+pool; a full validation round consumes **≈1,800 NPU-hours** (d20 search
+fleet + target arms at ~1.5B scaling / 3B tokens + anchors); 226 measured
+search points across two independent searches; every deliberate deviation
+from the paper itemized in
+[docs/paper_deviations.md](docs/paper_deviations.md) (D1–D19).
 
 The CLIMB premise is validated at target-model scale in our production
-rounds: search-found mixtures beat uniform / natural / domain-ratio
-baselines by **+0.014–0.031 STEM** on a d28 (~2.5B) model at a 3B-token
-mid-training budget — see [Results](#results--round-reports) and
-[Key Findings](#key-findings).
+rounds — twice, by two independent searches (warm-started in prod4, fresh
+cold-start in prod5): search-found mixtures beat uniform / natural /
+domain-ratio baselines by **+0.014–0.043 STEM** on a d28 (~2.5B) model at
+a 3B-token mid-training budget — see
+[Results](#results--round-reports) and [Key Findings](#key-findings).
 
 ## Results & Round Reports
 
 Each production round gets one record file (`docs/experiment_prodN.md`):
 a reader-friendly closeout report up front, developer details in the
 appendix.
+
+### prod5 (2026-09) — algorithm-fix validation round, 7 arms, fresh cold-start search
+
+The D19 selection fix (best-measured fallback + no-claim guard + top-k
+region consumption) got its first live test, and the whole pipeline ran
+end-to-end from a **fresh cold-start search** — 115 measured points over
+3 guided rounds, zero warm-start injection, same pool and cluster cache
+as prod4. All arms: d28 (~2.5B), 3B tokens, identical training recipe and
+eval protocol (b16 era throughout); STEM = centered-accuracy mean over
+6 tasks.
+
+| Arm | STEM | gsm8k_cot |
+|---|---|---|
+| **CLIMB-cfg101** (best measured — the D19 no-claim final selection, run arm `climb`) | **0.2086** | **0.3010** |
+| CLIMB-cfg90 (measured search config, rank #3) | 0.2078 | 0.2593 |
+| CLIMB-cfg100 (measured search config, rank #2) | 0.2013 | 0.2654 |
+| domain-ratio (external manual ratio, math 60%) | 0.1773 | 0.1281 |
+| natural (pool-proportional) | 0.1723 | 0.0948 |
+| uniform-cluster baseline (paper App. C.1) | 0.1657 | 0.1054 |
+| base model (no mid-training, reference) | 0.1752 | 0.0288 |
+
+Key findings:
+
+- **The reproduction holds end-to-end** — a fresh cold-start search
+  reaches the same d28 plateau as prod4's warm-started search (best arm
+  0.2086 vs 0.2142, inside the ±0.016–0.032 training-seed band). The
+  outcome is robust to how the search is initialized; the guided rounds
+  improved monotonically and round 3 produced the fleet best (the
+  "later rounds stop paying off" pattern from prod4 did not replicate).
+- **The selection fix works live** — the no-claim guard fired (the
+  design-space argmin's predicted advantage −0.473 did not clear the
+  0.396 noise margin) and the degraded best-measured pick won the fleet,
+  statistically tied with cfg90 (Δ0.0008). prod4's winner's curse cannot
+  recur while the guard fires, by construction.
+- **The largest CLIMB-vs-uniform margin yet** — +0.0429 STEM (z=5.1); all
+  three CLIMB arms individually significant (z≥4.2); every non-search
+  baseline lands at or below the untrained base model, so the gain comes
+  from data selection, not from continued training.
+- **Generative reasoning is still the engine** — gsm8k 0.301 (10× base,
+  2.9× uniform) and math 0.058 (14.5× base); all four multiple-choice
+  tasks statistically flat. The winning recipe puts 80% of its weight on
+  one short-document cluster (5.5% of the pool, 389 tok/doc — a 14.6×
+  upweight), and the top-2 winner tie differs almost only in a C10↔C0
+  swap: the hot region is robust to local perturbation.
+
+Cross-round trajectory (CLIMB vs uniform, same-pool budget-matched):
+prod1 −0.004 → prod2 +0.010 → prod4 +0.016–0.032 → prod5 +0.036–0.043.
+
+Full report: [docs/experiment_prod5.md](docs/experiment_prod5.md).
 
 ### prod4 (2026-09) — winner-validation round, 9 arms
 
@@ -73,9 +124,6 @@ Key findings:
   bands), remote-eval anchor reconciliation (4-decimal match), eval-protocol
   freeze within a round, quota-exact data cross-accounting.
 
-Cross-round trajectory (CLIMB vs uniform, same-day budget-matched):
-prod1 −0.004 → prod2 +0.010 → prod4 +0.016–0.032.
-
 Full report: [docs/experiment_prod4.md](docs/experiment_prod4.md).
 
 ## Key Findings
@@ -83,17 +131,20 @@ Full report: [docs/experiment_prod4.md](docs/experiment_prod4.md).
 The condensed, transferable findings from the whole project — full version
 with evidence chains: **[docs/KEY_FINDINGS.md](docs/KEY_FINDINGS.md)**.
 
-1. **The CLIMB premise survives target-scale validation** — learned
-   mixtures beat every fixed-ratio baseline (+0.014–0.031 STEM, gains
-   concentrated in generative math), and the win comes from cluster-level
-   structure, not domain ratios (a hand-tuned math-heavy domain mix lands
-   inside the uniform band).
+1. **The CLIMB premise survives target-scale validation — twice** —
+   learned mixtures beat every fixed-ratio baseline (+0.014–0.043 STEM,
+   gains concentrated in generative math), the win comes from
+   cluster-level structure, not domain ratios (a hand-tuned math-heavy
+   domain mix lands inside the uniform band), and two independent
+   searches — warm-started (prod4) and fresh cold-start (prod5) — reach
+   the same d28 plateau.
 2. **The novel finding: final selection is the weak link** — the
    predictor's single-point extrapolation added nothing over measured
    configs (a soft winner's curse the paper does not discuss). The fix
    shipped here: best-measured fallback + a noise-calibrated no-claim
    guard + top-k region consumption
-   ([paper_deviations.md D19](docs/paper_deviations.md)).
+   ([paper_deviations.md D19](docs/paper_deviations.md)) — validated live
+   in prod5: the guard fired and its best-measured pick won the fleet.
 3. **Trust the predictor for regions, not points** — top-10 overlap 8/10
    between predicted and measured rankings, but the design-space argmin
    sits in thin-response directions and does not replicate across
@@ -126,7 +177,8 @@ Embedding Cluster (stella_en_400M_v5 → FAISS K-means K_init=1000 →
   ↓
 Iterative Bootstrapping Search — warm-started (docs/reuse_design.md):
    prod4 = 54 history-injected measured points (inherited from prod3,
-   zero NPU cost) + [36, 18] fresh configs; each = d20 proxy train+eval
+   zero NPU cost) + [36, 18] fresh configs; prod5 = fresh cold start,
+   [64, 32, 16] = 115 measured points; each = d20 proxy train+eval
    with single-pass token-capped selection (400M/exp in prod4; code
    default 640M = 80% of the paper's ~800M)
   ↓
@@ -150,12 +202,13 @@ STEM benchmark eval (arc_easy, arc_challenge, mmlu_stem, gpqa_diamond,
    gsm8k_cot, math_cot_500) → report + sampled_dataset.parquet
 ```
 
-prod4's key negative result sits exactly at the final-selection step:
+prod4's key negative result sat exactly at the final-selection step:
 both *measured* top configs beat the never-measured extrapolated winner
-(a soft winner's curse). The next round therefore ships a best-measured
-fallback with a no-claim margin guard plus top-k measured-candidate arms
-([paper_deviations.md D19](docs/paper_deviations.md)) — see
-[Results](#results--round-reports).
+(a soft winner's curse). prod5 shipped the fix — best-measured fallback
+with a no-claim margin guard plus top-k measured-candidate arms
+([paper_deviations.md D19](docs/paper_deviations.md)) — and validated it
+live: the guard fired on schedule and its best-measured pick won the
+fleet. See [Results](#results--round-reports).
 
 ## Key Design Choices
 

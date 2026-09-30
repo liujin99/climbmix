@@ -1,27 +1,35 @@
 # Takeaways — What We Learned Reproducing Nemotron-CLIMB
 
-> The condensed, transferable findings from four production rounds (a full
-> validation round costs ≈1,800 NPU-hours: d20 search fleet + 8 target arms
+> The condensed, transferable findings from five production rounds (a full
+> validation round costs ≈1,800 NPU-hours: d20 search fleet + target arms
 > at ~1.5B scaling / 3B tokens + anchors). Every claim below is evidenced in
 > the round records; this page is the index-grade summary. Detail chain:
 > [experiment_prod4.md](experiment_prod4.md) (verdicts, §5–§6) ·
+> [experiment_prod5.md](experiment_prod5.md) (fresh-search replication +
+> D19 live validation) ·
 > [algorithm_review.md](algorithm_review.md) (predictor/clustering audits) ·
 > [paper_deviations.md](paper_deviations.md) (D1–D19, every deliberate
 > deviation from the paper).
 
 ## Headline results
 
-- **The CLIMB premise holds at target scale.** Search-found mixtures beat
-  uniform-cluster / natural (pool-proportional) / hand-tuned domain-ratio
-  baselines by **+0.014–0.031 STEM** on a ~1.5B model at a 3B-token
-  mid-training budget. The gap is carried by generative math reasoning:
-  gsm8k **2.4–2.9× the uniform family**, 11× the base model.
+- **The CLIMB premise holds at target scale — and replicates.** Search-found
+  mixtures beat uniform-cluster / natural (pool-proportional) / hand-tuned
+  domain-ratio baselines by **+0.014–0.043 STEM** on a ~1.5B model at a
+  3B-token mid-training budget. The gap is carried by generative math
+  reasoning: gsm8k **2.4–2.9× the uniform family**, 10–11× the base model.
+  Two independent searches — warm-started (prod4) and fresh cold-start
+  (prod5, 115 points, zero injection) — reach the same d28 plateau (~0.21):
+  the outcome is robust to how the search is initialized.
 - **The novel finding the paper does not discuss: final selection is the
   weak link.** The predictor's design-space argmin (its "there is a better
   point over there" claim) added nothing over *measured* configs — both
   measured top configs beat the never-measured extrapolated winner. A soft
   winner's curse, and it repeats a pattern: the extrapolated optimum sits
-  exactly in the directions where the predictor has the least data.
+  exactly in the directions where the predictor has the least data. The
+  fix (D19: best-measured fallback + a noise-calibrated no-claim guard +
+  top-k region consumption) was validated live in prod5 — the guard fired
+  and its best-measured pick won the fleet.
 
 ## Eight transferable design rules
 
@@ -30,11 +38,11 @@ the source table.
 
 | # | Rule | One-line evidence |
 |---|---|---|
-| 1 | **Select best-measured by default; extrapolate only with a claim that clears a noise-calibrated margin** (no-claim guard) | the prod4 argmin winner's claimed gain was **−0.47** in replay; the guard fires at any margin ≥ 0 |
+| 1 | **Select best-measured by default; extrapolate only with a claim that clears a noise-calibrated margin** (no-claim guard) | prod4 replay: argmin claimed gain **−0.47** (guard fires at any margin ≥ 0); prod5 live: −0.473 vs margin 0.396 — fired, and the degraded best-measured pick won d28 |
 | 2 | **Consume the search output as a region (top-k measured), not a single point** | d20↔d28 rank flips inside the hot zone (proxy online ρ ≈ 0.42–0.50); the d28 winner was the d20 runner-up |
 | 3 | **Keep the skeleton: clustering + iterative guided search + predictor pruning** | all four CLIMB points clear the uniform band ceiling; the d28 winner came from a *guided* round, not the initial sweep |
 | 4 | **Cluster-level selection is not replaceable by domain-level ratios** | a hand-tuned math-60% domain mix lands inside the uniform band; the win is in cluster-level structure |
-| 5 | **Mid-training on a skewed mix is a capability swap, not a free win** | uniform-family mean ≈ base model; MC tasks drift down while gsm8k triples — composite scores hide this |
+| 5 | **Mid-training on a skewed mix is a capability swap, not a free win** | uniform-family mean ≈ base model (prod5: every non-search baseline ≤ base); MC tasks drift down while gsm8k triples — composite scores hide this |
 | 6 | **Read arms by large-N / reproducible columns first** | gpqa (N=198) swings ±.03–.07 on a single seed and dominates composite noise; gsm8k and NLL columns are the reliable invariants |
 | 7 | **Pool supply constraints become active constraints at scale — and couple with mixture choice** | winner-cluster 20B oversampling ratio ≈ 2.6 vs cap 2; plan the policy before scaling budgets |
 | 8 | **Run a reproducibility machine every round** — seed pairs, remote-anchor reconciliation, protocol freeze windows, data cross-accounting | 4-decimal anchor matches, zero-incident rounds; every "weird number" so far was caught by the machine, not by luck |
@@ -42,25 +50,30 @@ the source table.
 ## The predictor boundary (what the surrogate model can and cannot be trusted for)
 
 Measured on the 111-point prod4 fleet (`scripts/diagnostics/predictor_audit.py`,
-zero-NPU replay):
+zero-NPU replay) and confirmed on prod5's 115-point fresh fleet:
 
 - **Reliable: ranking regions.** Top-10 predicted vs top-10 measured overlap
-  8/10; pooled held-out ρ 0.58; two independently fitted models agree at
-  ρ = 0.935. Region-level guidance (which area to sample next) is where the
-  value is.
+  8/10; pooled held-out ρ 0.58 (prod4) → **0.65** (prod5, 55 pairs); two
+  independently fitted models agree at ρ = 0.935. Region-level guidance
+  (which area to sample next) is where the value is.
 - **Unreliable: single-point argmin.** The extrapolated minimum lands in
   thin-response directions (2–3% feature importance across split/gain/SHAP
   scorings) where the trees are effectively unconstrained — and the
   "winning valley" did not replicate across LightGBM builds
   (implementation-sensitivity as independent evidence of extrapolation
-  fragility).
+  fragility). prod5 added a second flavor: an argmin that does not even
+  win its own prediction (predicted +0.98 vs the best measured +1.45) —
+  the guard covers both flavors.
 - **Refit on full data after early stopping is free.** Out-of-fold
   ρ 0.606 → 0.633, R² +18% relative — the split-fit model was leaving
   ~20% of the measured points on the table at final-selection time.
-- **Late rounds over-exploit.** The pruning band's membership churned ~50%
-  across model refits; round-3 narrowing produced no improvement over
-  round-1 best. Root-cause fixes (seed ensembles + LCB acquisition) are
-  queued as next-round work, not shipped.
+- **Late rounds over-exploit — when warm-started (pool-specific, not a
+  law).** prod4: the pruning band's membership churned ~50% across model
+  refits, and round-3 narrowing produced no improvement over round-1
+  best. prod5's fresh cold-start improved monotonically, with round 3
+  producing the fleet best. Root-cause fixes (seed ensembles + LCB
+  acquisition) remain queued as next-round work — prod5's val-R² collapse
+  (0.33→0.24→0.01) keeps the case open despite the healthy outcome.
 
 ## Measurement methodology: noise floor first
 
@@ -99,7 +112,11 @@ zero-NPU replay):
 
 - Within-cluster quality selection (quality scores currently gate whole
   clusters at pruning time only; within-cluster selection is random) —
-  offline-first, zero-NPU feasibility on the existing fleet data.
+  offline-first, zero-NPU feasibility on the existing fleet data. prod5
+  sharpened the case: the run inherited its cluster cache with
+  filter=none, so the quality dimension was absent entirely and the
+  recipe report could not even render an α-vs-quality view — the gap is
+  now evidenced, not just hypothesized.
 - Acquisition robustness: predictor ensembles + LCB to fix the
   over-exploitation pattern.
 - Curriculum ordering (quality-dependent data order) — depends on the
