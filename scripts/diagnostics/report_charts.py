@@ -4,11 +4,10 @@
 #
 #  用法:
 #    python3 scripts/diagnostics/report_charts.py result/prod5_20260929_201108
-#    python3 scripts/diagnostics/report_charts.py result/prod5_current --ref uniform
+#    python3 scripts/diagnostics/report_charts.py result/prod5_current \
+#        --task2 math_cot_500                       # 臂间图第二联换任务
 #    python3 scripts/diagnostics/report_charts.py result/prod5_20260929_201108 \
 #        --extra-run result/prod4_20260922_XXXX   # 图 C 并入 prod4 的 climb 臂
-#    python3 scripts/diagnostics/report_charts.py result/prod5_current \
-#        --ref base_remote                          # z 以远端 base 锚点为参照
 #
 #  动机 (2026-10-08 推广裁决): 报告栈的表很全, 但三张最直观的结果图
 #  缺位 — 搜索收敛(只有表)、臂间主结果(只有表)、代理→真实排名一致性
@@ -34,8 +33,8 @@
 #                                    + Search Lift (vs 第 1 轮随机带, σ)
 #    arms_main_results.png           B: 条形图 STEM + 第二任务 (--task2,
 #                                    缺省 gsm8k_cot; 缺失时自动挑跨臂
-#                                    区分度最大的任务), 误差棒 + vs ref
-#                                    的 z 值标注
+#                                    区分度最大的任务), 误差棒 + vs 参照臂
+#                                    (natural, 缺席回退 uniform) 的 z 值标注
 #    proxy_target_consistency.png    C: climb 臂 proxy 实测分 vs d28 STEM
 #                                    (逐臂名次标注 #p->#d + 评测噪声误差
 #                                    棒 + 基线 d28 带 + proxy 名次轨迹线;
@@ -414,7 +413,7 @@ def chart_convergence(out_dir, fleet, maximize):
 
 # ── B: 臂间主结果图 ────────────────────────────────────────────────────
 
-def chart_arms(out_dir, run_dir, ref, se_stem, task2="gsm8k_cot"):
+def chart_arms(out_dir, run_dir, se_stem, task2="gsm8k_cot"):
     arms = discover_arms(run_dir)
     rows = []
     for a in arms:
@@ -450,24 +449,21 @@ def chart_arms(out_dir, run_dir, ref, se_stem, task2="gsm8k_cot"):
             print(f"[B] 指定任务 '{task2}' 缺失 — 自动改用区分度最大的 "
                   f"'{best_name}' (跨臂 raw 极差 {best_spread:.3f})")
 
-    ref_row = next((r for r in rows if r["arm"] == ref), None)
-    if ref_row is None:
-        # 显式 --ref 可能指向被 discover_arms 排除的锚点文件
-        # (eval_base_remote.csv); --ref base 在本地 base 缺席时映射到它
-        for cand in ([ref] + (["base_remote"] if ref == "base" else [])):
-            ev = parse_eval_csv(os.path.join(run_dir, f"eval_{cand}.csv"))
-            if ev and ev.get("stem") is not None:
-                rows.append({"arm": cand, "stem": float(ev["stem"]),
-                             "tasks": ev.get("tasks") or {}})
-                rows.sort(key=lambda r: -r["stem"])
-                ref_row = next(r for r in rows if r["arm"] == cand)
-                print(f"[B] 参照臂 '{ref}' 经 eval_{cand}.csv 载入")
-                break
+    # 参照臂 = natural (实践者的无为默认: 池子按原占比顺序吃);
+    # 缺席回退 uniform 族 (论文 App. C.1 对照)。2026-10-08 用户裁决:
+    # 固定该链, 不设 --ref 参数。
+    ref_row = next((r for r in rows if r["arm"] == "natural"), None)
     if ref_row is None:
         ref_row = next((r for r in rows
-                        if parse_arm_name(r["arm"])["kind"] == "uniform"), None)
+                        if parse_arm_name(r["arm"])["kind"] == "natural"),
+                       None)
     if ref_row is None:
-        print("[B] 找不到参照臂 (uniform 族) — 显著性标注缺位, 仍出图")
+        ref_row = next((r for r in rows
+                        if parse_arm_name(r["arm"])["kind"] == "uniform"),
+                       None)
+    if ref_row is None:
+        print("[B] 找不到参照臂 (natural / uniform 族) — 显著性标注缺位, "
+              "仍出图")
 
     def _z(v, v0, se):
         if v is None or v0 is None or not se:
@@ -794,8 +790,6 @@ def main():
         description="结果叙事图表包: 收敛/臂间/一致性/逐簇/热力图 + 判定块")
     ap.add_argument("run_dir", nargs="?", default="result/prod5_current",
                     help="RUN_DIR (含 search_state.json / eval_*.csv)")
-    ap.add_argument("--ref", default="uniform",
-                    help="显著性参照臂 (缺省 uniform, 找不到则 uniform 族)")
     ap.add_argument("--extra-run", default="",
                     help="另一 RUN_DIR: 图 C 并入其 climb 臂 (跨轮证据)")
     ap.add_argument("--direction", choices=["maximize", "minimize"],
@@ -844,7 +838,7 @@ def main():
         ev = parse_eval_csv(os.path.join(run_dir, f"eval_{a}.csv"))
         if ev and ev.get("stem") is not None:
             rows.append({"arm": a, "stem": float(ev["stem"])})
-    p = chart_arms(out_dir, run_dir, args.ref, args.se, args.task2) \
+    p = chart_arms(out_dir, run_dir, args.se, args.task2) \
         if rows else None
     if p:
         made.append(p)
