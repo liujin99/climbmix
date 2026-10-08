@@ -313,8 +313,9 @@ def verdict_block(fleet, maximize):
                          f"(round-1 sigma = 0)")
 
     lines.append("-" * 66)
-    lines.append("语境: 论文 D.10 = 94% held-out Spearman @ 112 configs /")
-    lines.append("350M proxy — 更小的 N 必然读数更低 (预算产物, 非缺陷)。")
+    lines.append("语境: 论文 D.10 = 94% held-out Spearman (350M proxy)。")
+    lines.append("其搜索共 112 配置 (64+32+16, 与本搜索同构), 但留出的")
+    lines.append("测试对数未注明 — 跨论文对比仅供参考, 非同口径。")
     lines.append("分级: rho>=0.70 strong / >=0.50 good / >=0.30 moderate;")
     lines.append("       lift>=1.0sigma strong / >=0.5 good / >=0.2 moderate。")
     lines.append("=" * 66)

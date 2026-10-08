@@ -166,8 +166,9 @@ def generate_markdown_report(
         "configs (exists from accumulated N\u226510); online = rank agreement\n"
         "between predictions made **before** training a round's configs and\n"
         "their actual scores (no split needed). Paper D.10 reports 94%\n"
-        "held-out Spearman at 112 configs / 350M proxy \u2014 a smaller N here\n"
-        "necessarily reads lower; that is a budget artifact, not a bug.")
+        "held-out Spearman with the 350M proxy (its search totals 112\n"
+        "configs in 64+32+16; the paper does not state the held-out pair\n"
+        "count) \u2014 cross-paper comparison is indicative, not exact.")
     lines.append("")
     if predictor_eval or online_eval:
         lines.append("| Iter | Val n | val R\u00b2 | val Spearman | online \u03c1 (n) |")
