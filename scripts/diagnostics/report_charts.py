@@ -18,8 +18,11 @@
 #    search_state.json          搜索舰队: accumulated_configs/scores,
 #                               realized_configs_per_iter (轮次重建),
 #                               predictor_eval (val_preds/val_targets →
-#                               Top-K Recall), selection (climb 臂 →
-#                               config_id)
+#                               Top-K Recall)
+#    topk_mixture_candidates.json  图 C 的 climb 臂解析兜底: 现行
+#                               _save_state 不落盘 selection 键, 落盘
+#                               形态是本文件的 selection_mode + rank-1
+#                               候选 (no-claim 族 → rank1 = 终选臂)
 #    macro_info.json            簇标签/规模/质量分 (⑬r 新名;
 #      或 cluster_info_cache.json   legacy 名仍读; 全缺 → C0..C{K-1})
 #    eval_<arm>.csv             各臂 d28 评测 (cp4_report 同解析)
@@ -27,13 +30,18 @@
 #  输出 (RUN_DIR 根, 与 report.md / 现有 PNG 同层):
 #    search_convergence.png          A: 115 点按轮散布 + 每轮 best 连线
 #                                    + Search Lift (vs 第 1 轮随机带, σ)
-#    arms_main_results.png           B: 双联条形图 STEM + gsm8k_cot,
-#                                    误差棒 + vs ref 的 z 值标注
+#    arms_main_results.png           B: 条形图 STEM + 第二任务 (--task2,
+#                                    缺省 gsm8k_cot; 缺失时自动挑跨臂
+#                                    区分度最大的任务), 误差棒 + vs ref
+#                                    的 z 值标注
 #    proxy_target_consistency.png    C: climb 臂 proxy 实测分 vs d28 STEM
 #                                    (基线不在舰队 → 无 proxy 分, 如实缺席)
-#    cluster_alpha_vs_score.png      D: 逐簇小倍数 (α vs proxy 分 + 逐簇 ρ)
+#    cluster_alpha_vs_score.png      D: 逐簇小倍数 (α vs proxy 分 + 线性
+#                                    趋势线 + 逐簇 ρ 正负着色)
 #    best_vs_worst_heatmap.png       E: Top-5 vs Bottom-5 逐簇 α 热力图
-#    stdout 判定块 (F): pooled ρ 状态分级 + Top-K Recall + Search Lift
+#                                    + 右联 Δ 条 (赢家比输家多/少放多少)
+#    stdout 判定块 (F): pooled ρ 状态分级 (strong/good/moderate/weak)
+#                                    + Top-K Recall + Search Lift
 #                                    + D.10 论文语境 (94% @ 112 点)
 #
 #  原则: stdlib + numpy 必需, matplotlib 可选 (缺失只出文字摘要);
@@ -66,7 +74,6 @@ except ImportError:
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cp4_report import BENCHMARK_SIZES, binom_se, discover_arms, parse_eval_csv
 
-GSM8K = "gsm8k_cot"
 CLIMB_COLOR = "#DD8452"
 BASELINE_COLOR = "#4C72B0"
 ANCHOR_COLOR = "#9A9A9A"
@@ -156,14 +163,15 @@ def _topk_idx(scores, k, maximize):
     return np.argsort(np.where(finite, s, np.inf))[:k]
 
 
-def _status_tag(v, thresholds):
-    """quadmix 式状态分级: thresholds = [(下限, 标签), ...] 降序。"""
+def _status_tag(v, thresholds, below="weak"):
+    """quadmix 式状态分级: thresholds = [(下限, 标签), ...] 降序;
+    低于全部下限 → below (prod5 实测教训: 0/3 recall 曾被错标 moderate)。"""
     if v is None or not np.isfinite(v):
         return "n/a"
     for lo, tag in thresholds:
         if v >= lo:
             return tag
-    return thresholds[-1][1]
+    return below
 
 
 RHO_TAGS = [(0.70, "strong"), (0.50, "good"), (0.30, "moderate")]
@@ -215,14 +223,28 @@ def cluster_labels(run_dir, K):
     return [f"C{i}" for i in range(K)]
 
 
-def resolve_climb_config_id(state):
-    """D19 终选臂 (arm 'climb') 的 config_id: selection.claim.best_measured
-    (no-claim 降级口径)。argmin 赢得槽位的轮次里该臂未经 proxy 实测 →
-    返回 None (图 C 如实缺席, prod4 的 climb-winner 即此类)。"""
+def resolve_climb_config_id(run_dir, state):
+    """D19 终选臂 (arm 'climb') 的 config_id。两级解析:
+    ① search_state.selection (内存 extras 的形态 — 现行 _save_state
+       不落盘该键, 留作未来兼容);
+    ② topk_mixture_candidates.json (落盘形态): selection_mode 属
+       best_measured 族 → rank-1 候选即终选 (no-claim 降级口径)。
+    argmin 赢得槽位的轮次 (predictor_design_space_claimed) 该臂未经
+    proxy 实测 → None (图 C 如实缺席, prod4 的 climb-winner 即此类)。"""
     sel = (state or {}).get("selection") or {}
-    bm = ((sel.get("claim") or {}).get("best_measured")) or {}
-    cid = bm.get("config_id")
-    return int(cid) if cid is not None else None
+    mode = str(sel.get("mode") or "")
+    if mode:
+        if "best_measured" in mode:
+            bm = ((sel.get("claim") or {}).get("best_measured")) or {}
+            cid = bm.get("config_id")
+            return int(cid) if cid is not None else None
+        return None
+    topk = load_json(os.path.join(run_dir, "topk_mixture_candidates.json")) or {}
+    if "best_measured" in str(topk.get("selection_mode") or ""):
+        cands = topk.get("candidates") or []
+        if cands and cands[0].get("config_id") is not None:
+            return int(cands[0]["config_id"])
+    return None
 
 
 # ── F: 判定块 (stdout) ─────────────────────────────────────────────────
@@ -279,12 +301,12 @@ def verdict_block(fleet, maximize):
         top = scores[_topk_idx(scores, k, maximize)]
         if sd > 0:
             lift = (float(top.mean()) - mu) / sd
-            lines.append(f"Search lift ({f'top-{k}':<7}) : "
+            lines.append(f"Search lift top-{k:<2} : "
                          f"{float(top.mean()):+.4f} vs round-1 mean "
                          f"{mu:+.4f} = {lift:+.2f} sigma  "
                          f"[{_status_tag(lift, LIFT_TAGS)}]")
         else:
-            lines.append(f"Search lift ({f'top-{k}':<7}) : n/a "
+            lines.append(f"Search lift top-{k:<2} : n/a "
                          f"(round-1 sigma = 0)")
 
     lines.append("-" * 66)
@@ -353,7 +375,7 @@ def chart_convergence(out_dir, fleet, maximize):
     if len(r1) >= 4:
         mu, sd = float(r1.mean()), float(r1.std(ddof=1))
         ax.axhspan(mu - sd, mu + sd, color="#4C72B0", alpha=0.10,
-                   label="round-1 band (random Dirichlet, mean±std)")
+                   label="round-1 random baseline (mean+/-std)")
     # 每轮 best 连线
     bx = [gi + 1 for _, _, _, gi in per_round if gi >= 0]
     by = [b for _, _, b, _ in per_round if np.isfinite(b)]
@@ -373,7 +395,13 @@ def chart_convergence(out_dir, fleet, maximize):
     ax.set_title("Search convergence: per-config proxy score by round")
     ax.legend(fontsize=8, loc="lower right")
     ax.grid(alpha=0.3)
-    fig.tight_layout()
+    fig.text(0.5, 0.005,
+             "proxy utility = SNR-weighted score of each mixture on the d20 "
+             "proxy model (6 tasks, z-scale: round-1 mean ~ 0);\n"
+             "blue band = round-1 random-sampling level - later rounds above "
+             "it = the search is learning", ha="center", fontsize=8,
+             color="#555555")
+    fig.tight_layout(rect=(0, 0.06, 1, 1))
     path = os.path.join(out_dir, "search_convergence.png")
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -382,20 +410,41 @@ def chart_convergence(out_dir, fleet, maximize):
 
 # ── B: 臂间主结果图 ────────────────────────────────────────────────────
 
-def chart_arms(out_dir, run_dir, ref, se_stem):
+def chart_arms(out_dir, run_dir, ref, se_stem, task2="gsm8k_cot"):
     arms = discover_arms(run_dir)
     rows = []
     for a in arms:
         ev = parse_eval_csv(os.path.join(run_dir, f"eval_{a}.csv"))
         if not ev or ev.get("stem") is None:
             continue
-        g = (ev.get("tasks") or {}).get(GSM8K) or {}
         rows.append({"arm": a, "stem": float(ev["stem"]),
-                     "gsm8k": g.get("raw")})
+                     "tasks": ev.get("tasks") or {}})
     if not rows:
         print("[B] 无可解析的 eval_<arm>.csv — 跳过臂间主结果图")
         return None
     rows.sort(key=lambda r: -r["stem"])
+
+    # 第二联任务解析: 显式 --task2 缺席 → 自动挑跨臂区分度 (raw 极差)
+    # 最大的任务; 完全无 per-task 行 → 只出 STEM 单联。
+    t2, t2_auto = task2, False
+    if not any(t2 in r["tasks"] for r in rows):
+        common = set.intersection(*[set(r["tasks"]) for r in rows])
+        best_name, best_spread = None, -1.0
+        for nm in sorted(common):
+            vals = [r["tasks"][nm].get("raw") for r in rows]
+            vals = [v for v in vals if v is not None]
+            if len(vals) >= 2:
+                spread = max(vals) - min(vals)
+                if spread > best_spread:
+                    best_name, best_spread = nm, spread
+        if best_name is None:
+            t2 = None
+            print(f"[B] 指定任务 '{task2}' 缺失且无备选 per-task 行 — "
+                  "只出 STEM 单联")
+        else:
+            t2, t2_auto = best_name, True
+            print(f"[B] 指定任务 '{task2}' 缺失 — 自动改用区分度最大的 "
+                  f"'{best_name}' (跨臂 raw 极差 {best_spread:.3f})")
 
     ref_row = next((r for r in rows if r["arm"] == ref), None)
     if ref_row is None:
@@ -409,15 +458,19 @@ def chart_arms(out_dir, run_dir, ref, se_stem):
             return None
         return (v - v0) / se
 
-    n_g = BENCHMARK_SIZES.get(GSM8K)
+    n_t2 = BENCHMARK_SIZES.get(t2) if t2 else None
+    if t2 and n_t2 is None:
+        print(f"[B] 任务 '{t2}' 不在 BENCHMARK_SIZES — 第二联无二项误差棒/z")
     for r in rows:
         r["z_stem"] = (_z(r["stem"], ref_row["stem"], math.sqrt(2) * se_stem)
                        if ref_row else None)
-        se_a = binom_se(r["gsm8k"], n_g) if r["gsm8k"] is not None else None
-        se_b = (binom_se(ref_row["gsm8k"], n_g)
-                if ref_row and ref_row["gsm8k"] is not None else None)
+        r["g2"] = ((r["tasks"].get(t2) or {}).get("raw")
+                   if t2 else None)
+        se_a = binom_se(r["g2"], n_t2) if r["g2"] is not None else None
+        se_b = (binom_se(ref_row.get("g2"), n_t2)
+                if ref_row and ref_row.get("g2") is not None else None)
         r["se_g"] = se_a
-        r["z_g"] = (_z(r["gsm8k"], ref_row["gsm8k"],
+        r["z_g"] = (_z(r["g2"], ref_row.get("g2"),
                        math.sqrt((se_a or 0) ** 2 + (se_b or 0) ** 2))
                     if ref_row and se_a and se_b else None)
 
@@ -425,8 +478,9 @@ def chart_arms(out_dir, run_dir, ref, se_stem):
         print("[B] matplotlib 不可用 — 文字版 (STEM 降序):")
         for r in rows:
             z = f" z={r['z_stem']:+.2f}" if r["z_stem"] is not None else ""
+            g2 = (f"{r['g2']:.4f}" if r["g2"] is not None else "n/a")
             print(f"    {r['arm']:<18} STEM {r['stem']:.4f}{z}  "
-                  f"gsm8k {r['gsm8k'] if r['gsm8k'] is not None else float('nan'):.4f}")
+                  f"{t2 or '-'} {g2}")
         return None
 
     def _panel_labels(z_key):
@@ -441,12 +495,22 @@ def chart_arms(out_dir, run_dir, ref, se_stem):
     colors = [_arm_color(r["arm"]) for r in rows]
     hatches = ["//" if r["arm"].endswith("_rep") else "" for r in rows]
 
-    fig, axes = plt.subplots(1, 2, figsize=(max(12, 1.5 * len(rows)), 5.5))
-    for ax, key, se_key, z_key, ttl, ylab in (
+    if t2:
+        fig, axes = plt.subplots(1, 2,
+                                 figsize=(max(12, 1.5 * len(rows)), 5.5))
+        panels = [
             (axes[0], "stem", None, "z_stem",
              "STEM (centered acc, 6 tasks)", "STEM centered"),
-            (axes[1], "gsm8k", "se_g", "z_g",
-             "gsm8k_cot (raw acc)", "gsm8k raw acc")):
+            (axes[1], "g2", "se_g", "z_g",
+             f"{t2} (raw acc)" + ("  [auto-picked]" if t2_auto else ""),
+             f"{t2} raw acc"),
+        ]
+    else:
+        fig, axes = plt.subplots(1, 1,
+                                 figsize=(max(8, 1.5 * len(rows)), 5.5))
+        panels = [(axes, "stem", None, "z_stem",
+                   "STEM (centered acc, 6 tasks)", "STEM centered")]
+    for ax, key, se_key, z_key, ttl, ylab in panels:
         vals = [r[key] if r[key] is not None else float("nan")
                 for r in rows]
         xs = np.arange(len(rows))
@@ -474,7 +538,8 @@ def chart_arms(out_dir, run_dir, ref, se_stem):
         ax.set_axisbelow(True)
     ref_name = ref_row["arm"] if ref_row else "n/a"
     fig.suptitle(f"Arm comparison at target scale (ref = {ref_name}; "
-                 f"STEM z = delta / sqrt(2)*{se_stem:.3f})", fontsize=11)
+                 f"z = advantage in noise units, |z|>=2 significant)",
+                 fontsize=11)
     fig.tight_layout()
     path = os.path.join(out_dir, "arms_main_results.png")
     fig.savefig(path, dpi=150)
@@ -490,7 +555,7 @@ def collect_pairs(run_dir, fleet, rows):
     if fleet is None:
         return []
     ids_map = {int(cid): i for i, cid in enumerate(fleet["ids"].tolist())}
-    climb_cid = resolve_climb_config_id(fleet["state"])
+    climb_cid = resolve_climb_config_id(run_dir, fleet["state"])
     pairs = []
     for r in rows:
         k = parse_arm_name(r["arm"])
@@ -582,14 +647,25 @@ def chart_cluster_smallmult(out_dir, fleet, labels, maximize):
         ax.scatter(W[:, k], scores, s=10, alpha=0.5,
                    color=ROUND_COLORS[k % len(ROUND_COLORS)],
                    edgecolors="none")
-        ax.set_title(f"{labels[k]}  rho={rhos[k]:+.2f}", fontsize=9)
+        mk = np.isfinite(W[:, k]) & np.isfinite(scores)
+        if int(mk.sum()) >= 3 and float(np.ptp(W[mk, k])) > 0:
+            fit = np.poly1d(np.polyfit(W[mk, k], scores[mk], 1))
+            xs = np.linspace(float(W[mk, k].min()), float(W[mk, k].max()), 24)
+            ax.plot(xs, fit(xs), "--", color="#333333", lw=1.0, alpha=0.75)
+        col = ("#2A7F3E" if rhos[k] > 0.3 else
+               "#C44E52" if rhos[k] < -0.3 else "#666666")
+        ax.set_title(f"{labels[k]}  rho={rhos[k]:+.2f}", fontsize=9, color=col)
         ax.tick_params(labelsize=7)
     for k in range(K, nrows * ncols):
         axes.flat[k].axis("off")
-    better = "higher" if maximize else "lower"
-    fig.suptitle("Per-cluster mixture weight vs proxy score "
-                 f"(search fleet, {better} = better)", fontsize=12)
-    fig.tight_layout()
+    fig.suptitle("Per cluster: does putting MORE of it help? "
+                 "(x = mixture weight, y = proxy score; dashed = linear fit)",
+                 fontsize=12)
+    fig.text(0.5, 0.005,
+             "rho = Spearman(weight, score) per cluster: green = the search "
+             "rewards MORE of this cluster, red = less, gray = no clear "
+             "direction", ha="center", fontsize=8, color="#555555")
+    fig.tight_layout(rect=(0, 0.04, 1, 1))
     path = os.path.join(out_dir, "cluster_alpha_vs_score.png")
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -626,23 +702,47 @@ def chart_heatmap(out_dir, fleet, labels, maximize, n_side=5):
                   " ".join(f"{M[r, k]:>8.3f}" for r in range(M.shape[0])))
         return None
 
-    fig, ax = plt.subplots(figsize=(max(8, 1.1 * M.shape[0]), 0.5 * fleet["K"] + 2))
+    K = fleet["K"]
+    delta = W[best_i].mean(axis=0) - W[worst_i].mean(axis=0)
+    fig = plt.figure(figsize=(max(8, 1.1 * M.shape[0]) + 3.5, 0.5 * K + 2.5))
+    gs = fig.add_gridspec(1, 2, width_ratios=[M.shape[0], 2.4], wspace=0.05)
+    ax = fig.add_subplot(gs[0, 0])
+    axd = fig.add_subplot(gs[0, 1], sharey=ax)
     im = ax.imshow(M.T, aspect="auto", cmap="viridis",
                    vmin=0, vmax=max(float(M.max()), 1e-9))
     ax.set_xticks(np.arange(M.shape[0]))
     ax.set_xticklabels(col_labels, fontsize=8)
-    ax.set_yticks(np.arange(fleet["K"]))
+    ax.set_yticks(np.arange(K))
     ax.set_yticklabels(labels, fontsize=8)
     for r in range(M.shape[0]):
-        for k in range(fleet["K"]):
+        for k in range(K):
             v = M[r, k]
             ax.text(r, k, f"{v:.2f}", ha="center", va="center", fontsize=7,
                     color="white" if v > 0.6 * float(M.max()) else "black")
     ax.axvline(n_side - 0.5, color="white", linewidth=2)
-    ax.set_title(f"Recipe heatmap: top-{n_side} vs bottom-{n_side} "
-                 "measured configs (cluster weight alpha)")
-    fig.colorbar(im, ax=ax, shrink=0.8, label="cluster weight alpha")
-    fig.tight_layout()
+    ax.set_title("Winners vs losers: cluster mixture share")
+    fig.colorbar(im, ax=ax, shrink=0.8, label="mixture share (alpha)")
+    axd.barh(np.arange(K), delta,
+             color=["#2A7F3E" if v > 0 else "#C44E52" if v < 0 else "#999999"
+                    for v in delta])
+    axd.axvline(0, color="gray", linewidth=0.8)
+    for k, v in enumerate(delta):
+        axd.text(v, k, f" {v:+.2f}", va="center",
+                 ha="left" if v >= 0 else "right", fontsize=7)
+    lo, hi = float(delta.min()), float(delta.max())
+    pad = 0.3 * max(hi - lo, 0.05)
+    axd.set_xlim(lo - pad, hi + pad)
+    axd.set_xlabel("winner - loser\n(mean share)")
+    axd.tick_params(labelleft=False)
+    axd.grid(axis="x", alpha=0.3)
+    fig.text(0.5, 0.005,
+             "columns b1..b5 = top-5 / w1..w5 = bottom-5 measured configs; "
+             "right panel: how much MORE (green) or LESS (red) the winners "
+             "put in each cluster", ha="center", fontsize=8, color="#555555")
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        fig.tight_layout(rect=(0, 0.05, 1, 1))
     path = os.path.join(out_dir, "best_vs_worst_heatmap.png")
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -665,6 +765,9 @@ def main():
                     help="proxy 分方向 (prod SNR utility = maximize)")
     ap.add_argument("--se", type=float, default=0.006,
                     help="STEM 单次评测噪声 (cp4 同约定, 缺省 0.006)")
+    ap.add_argument("--task2", default="gsm8k_cot",
+                    help="臂间图第二联任务 (缺省 gsm8k_cot; 该任务缺失时"
+                         "自动改用跨臂区分度最大的任务)")
     ap.add_argument("--out-dir", default="",
                     help="输出目录 (缺省 RUN_DIR)")
     args = ap.parse_args()
@@ -703,7 +806,8 @@ def main():
         ev = parse_eval_csv(os.path.join(run_dir, f"eval_{a}.csv"))
         if ev and ev.get("stem") is not None:
             rows.append({"arm": a, "stem": float(ev["stem"])})
-    p = chart_arms(out_dir, run_dir, args.ref, args.se) if rows else None
+    p = chart_arms(out_dir, run_dir, args.ref, args.se, args.task2) \
+        if rows else None
     if p:
         made.append(p)
 
