@@ -7,6 +7,8 @@
 #    python3 scripts/diagnostics/report_charts.py result/prod5_current --ref uniform
 #    python3 scripts/diagnostics/report_charts.py result/prod5_20260929_201108 \
 #        --extra-run result/prod4_20260922_XXXX   # 图 C 并入 prod4 的 climb 臂
+#    python3 scripts/diagnostics/report_charts.py result/prod5_current \
+#        --ref base_remote                          # z 以远端 base 锚点为参照
 #
 #  动机 (2026-10-08 推广裁决): 报告栈的表很全, 但三张最直观的结果图
 #  缺位 — 搜索收敛(只有表)、臂间主结果(只有表)、代理→真实排名一致性
@@ -35,7 +37,9 @@
 #                                    区分度最大的任务), 误差棒 + vs ref
 #                                    的 z 值标注
 #    proxy_target_consistency.png    C: climb 臂 proxy 实测分 vs d28 STEM
-#                                    (基线不在舰队 → 无 proxy 分, 如实缺席)
+#                                    (逐臂名次标注 #p->#d + 评测噪声误差
+#                                    棒 + 基线 d28 带 + proxy 名次轨迹线;
+#                                    基线不在舰队 → 无 proxy 分, 如实缺席)
 #    cluster_alpha_vs_score.png      D: 逐簇小倍数 (α vs proxy 分 + 线性
 #                                    趋势线 + 逐簇 ρ 正负着色)
 #    best_vs_worst_heatmap.png       E: Top-5 vs Bottom-5 逐簇 α 热力图
@@ -448,6 +452,18 @@ def chart_arms(out_dir, run_dir, ref, se_stem, task2="gsm8k_cot"):
 
     ref_row = next((r for r in rows if r["arm"] == ref), None)
     if ref_row is None:
+        # 显式 --ref 可能指向被 discover_arms 排除的锚点文件
+        # (eval_base_remote.csv); --ref base 在本地 base 缺席时映射到它
+        for cand in ([ref] + (["base_remote"] if ref == "base" else [])):
+            ev = parse_eval_csv(os.path.join(run_dir, f"eval_{cand}.csv"))
+            if ev and ev.get("stem") is not None:
+                rows.append({"arm": cand, "stem": float(ev["stem"]),
+                             "tasks": ev.get("tasks") or {}})
+                rows.sort(key=lambda r: -r["stem"])
+                ref_row = next(r for r in rows if r["arm"] == cand)
+                print(f"[B] 参照臂 '{ref}' 经 eval_{cand}.csv 载入")
+                break
+    if ref_row is None:
         ref_row = next((r for r in rows
                         if parse_arm_name(r["arm"])["kind"] == "uniform"), None)
     if ref_row is None:
@@ -576,45 +592,67 @@ def collect_pairs(run_dir, fleet, rows):
     return pairs
 
 
-def chart_consistency(out_dir, pairs):
+def chart_consistency(out_dir, pairs, baseline_stems=None, se=0.006):
     if len(pairs) < 2:
         print("[C] 可配对的 climb 臂不足 (需要 eval 臂 + 舰队 config_id) — "
               "跳过一致性散点")
         return None
     rho = _spearman([p["proxy"] for p in pairs], [p["d28"] for p in pairs])
+    prank = {i: r + 1 for r, i in enumerate(
+        sorted(range(len(pairs)), key=lambda i: -pairs[i]["proxy"]))}
+    drank = {i: r + 1 for r, i in enumerate(
+        sorted(range(len(pairs)), key=lambda i: -pairs[i]["d28"]))}
     txt = (f"proxy->target rank consistency: n={len(pairs)}, "
            f"Spearman rho = {rho:+.4f}" if len(pairs) >= 3
            else f"proxy->target rank consistency: n={len(pairs)} (rho "
                 f"needs n>=3)")
     print(f"[C] {txt}")
+    for i, p in enumerate(pairs):
+        print(f"    {p['arm']:<18} proxy {p['proxy']:+.4f} (#{prank[i]})  "
+              f"d28 {p['d28']:.4f} (#{drank[i]})")
 
     if not HAS_MPL:
-        for p in pairs:
-            print(f"    {p['arm']:<18} proxy {p['proxy']:+.4f}  "
-                  f"d28 {p['d28']:.4f}")
         print("    注: 基线臂 (uniform/natural/domainfix) 不在搜索舰队, "
               "无实测 proxy 分 — 如实缺席")
         return None
 
-    fig, ax = plt.subplots(figsize=(7, 6))
+    fig, ax = plt.subplots(figsize=(7.5, 6.5))
+    if baseline_stems:
+        ax.axhspan(min(baseline_stems), max(baseline_stems),
+                   color="#999999", alpha=0.20,
+                   label="baseline arms d28 range "
+                         "(uniform/natural/domainfix)")
+    # 沿 proxy 名次连接各点: 线单调上行 = 排名传递; 折返 = 该处换位
+    order = sorted(range(len(pairs)), key=lambda i: -pairs[i]["proxy"])
+    ax.plot([pairs[i]["proxy"] for i in order],
+            [pairs[i]["d28"] for i in order],
+            "--", color="#888888", lw=1.0, zorder=3)
+    ax.errorbar([p["proxy"] for p in pairs], [p["d28"] for p in pairs],
+                yerr=[se] * len(pairs), fmt="none", ecolor="#333333",
+                capsize=3, linewidth=1, zorder=4)
     ax.scatter([p["proxy"] for p in pairs], [p["d28"] for p in pairs],
                s=90, color=CLIMB_COLOR, edgecolors="white", linewidth=1.2,
                zorder=5)
-    for p in pairs:
-        ax.annotate(p["arm"], (p["proxy"], p["d28"]),
-                    textcoords="offset points", xytext=(8, -4),
-                    fontsize=9)
+    for i, p in enumerate(pairs):
+        ax.annotate(f"{p['arm']}\n#{prank[i]} -> #{drank[i]}",
+                    (p["proxy"], p["d28"]),
+                    textcoords="offset points", xytext=(9, -4),
+                    fontsize=8.5)
     ax.set_xlabel("d20 proxy utility (measured, search fleet)")
-    ax.set_ylabel("d28 STEM (centered)")
+    ax.set_ylabel(f"d28 STEM (centered, +/- {se:.3f} eval noise)")
     ax.set_title(txt if len(pairs) >= 3
                  else "proxy->target rank consistency")
     ax.grid(alpha=0.3)
-    fig.text(0.5, 0.01,
-             "climb-family arms only: baselines are not in the search fleet "
-             "(no measured proxy score);\nthe claim is rank transfer within "
-             "the climb family (KEY_FINDINGS #3)",
+    if baseline_stems:
+        ax.legend(fontsize=8, loc="lower right")
+    fig.text(0.5, 0.005,
+             "each point = one climb arm: its measured proxy score (x) vs "
+             "its d28 STEM (y); '#p->#d' = its rank in each space.\n"
+             "reading: top-1 holds; adjacent swaps inside the error bars "
+             "are noise (trust regions, not points - KEY_FINDINGS #3); "
+             "all climb arms sit above the gray baseline band.",
              ha="center", fontsize=8, color="#555555")
-    fig.tight_layout(rect=(0, 0.05, 1, 1))
+    fig.tight_layout(rect=(0, 0.10, 1, 1))
     path = os.path.join(out_dir, "proxy_target_consistency.png")
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -827,7 +865,11 @@ def main():
                 e["arm"] = e["arm"] + "@" + os.path.basename(
                     args.extra_run.rstrip("/"))
             pairs.extend(extra)
-    p = chart_consistency(out_dir, pairs)
+    p = chart_consistency(out_dir, pairs,
+                          [r["stem"] for r in rows
+                           if parse_arm_name(r["arm"])["kind"]
+                           in ("uniform", "natural", "domainfix")],
+                          args.se)
     if p:
         made.append(p)
 
