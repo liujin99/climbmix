@@ -478,21 +478,25 @@ def land_logs(obs, result_uri: str, output_dir: str, arm: str,
     """Land the master's mid_train.log/eval.log plus every non-master
     node's mid_train_node{r}.log — and eval_node{r}.log when the model
     relay delivered (32-rank eval; a node that fell back after train
-    never produces one, and obs.stat skips it)."""
+    never produces one, and obs.stat skips it).
+
+    2026-10-09 布局裁决: 落到 logs/ 子目录, run 根只留结果与状态。"""
+    log_dir = os.path.join(output_dir, "logs")
+    os.makedirs(log_dir, exist_ok=True)
     names = ["mid_train.log", "eval.log"]
     for r in range(1, max(1, node_count)):
         names += [f"mid_train_node{r}.log", f"eval_node{r}.log"]
     for name in names:
         src = f"{result_uri.rstrip('/')}/{name}"
         if name == "mid_train.log":
-            dst = os.path.join(output_dir, f"mid_train_{arm}.log")
+            dst = os.path.join(log_dir, f"mid_train_{arm}.log")
         elif name == "eval.log":
-            dst = os.path.join(output_dir, f"eval_{arm}.log")
+            dst = os.path.join(log_dir, f"eval_{arm}.log")
         else:
-            dst = os.path.join(output_dir, f"{name[:-4]}_{arm}.log")
+            dst = os.path.join(log_dir, f"{name[:-4]}_{arm}.log")
         if obs.stat(src):
             obs.download_file(src, dst)
-            print(f"  [{arm}] landed {os.path.basename(dst)}")
+            print(f"  [{arm}] landed logs/{os.path.basename(dst)}")
 
 
 def auto_refresh_report(output_dir: str, arm: str) -> None:
@@ -1336,8 +1340,8 @@ def main() -> int:
     if not ok:
         print(f"✗ [{arm}] remote arm did not complete "
               f"(status={status.value}, mid_train_rc={mid_rc}, "
-              f"eval_rc={eval_rc}) — see {output_dir}/mid_train_{arm}.log / "
-              f"eval_{arm}.log; console tail:\n{console[-2000:]}")
+              f"eval_rc={eval_rc}) — see logs/mid_train_{arm}.log / "
+              f"logs/eval_{arm}.log; console tail:\n{console[-2000:]}")
         return 1
     print(f"✓ [{arm}] remote arm complete ({elapsed/60:.0f}m) — "
           f"audit: target_arm_{arm}.json")

@@ -19,8 +19,8 @@ Per arm (全部幂等, marker 门控):
        natural      池占比权重 (gen_natural_weights) → --weights
        domainfix    四域固定配比 → --label-source domain --weights
        base         无备料 (eval-only 锚点, 恒单节点)
-  3. dispatch 为**后台进程** (scripts/dispatch_target_arm.py, 日志 →
-     dispatch_<arm>.log, 独立 session: 父进程被杀不牵连落地/报告)。
+   3. dispatch 为**后台进程** (scripts/dispatch_target_arm.py, 日志 →
+      logs/dispatch_<arm>.log, 独立 session: 父进程被杀不牵连落地/报告)。
      并发安全性全在 dispatch 内建: per-arm mutex + .validation_fleet
      节点预算注册表 (REMOTE_MAX_VALIDATION_NODES, 默认 16 = 2 臂 × 8
      节点, 超限自动排队) + 报告刷新 flock。
@@ -376,7 +376,10 @@ def dispatch_cmd(arm: str, output_dir: str, climbmix_dir: str,
 
 def launch(plan: dict, output_dir: str, climbmix_dir: str,
            retry_failed: bool):
-    log_path = os.path.join(output_dir, f"dispatch_{plan['arm']}.log")
+    # 2026-10-09 布局裁决: 派发日志进 logs/ 子目录
+    log_dir = os.path.join(output_dir, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    log_path = os.path.join(log_dir, f"dispatch_{plan['arm']}.log")
     log = open(log_path, "w")
     try:
         proc = subprocess.Popen(
@@ -571,7 +574,8 @@ def main() -> int:
     print("\n[Fleet] summary")
     for p in plans:
         state = "OK" if arm_landed(output_dir, p["arm"]) else "MISSING"
-        log = os.path.join(output_dir, f"dispatch_{p['arm']}.log")
+        log = os.path.join(output_dir, "logs",
+                           f"dispatch_{p['arm']}.log")
         hint = "" if state == "OK" else (
             f" — log: {os.path.basename(log)}; idempotent re-run retries "
             f"exactly this arm (--retry-failed to override a prior "

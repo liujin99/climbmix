@@ -76,7 +76,10 @@ def main():
             "[拒] run 目录已有 optimal_mixture_weights.json (搜索收官产物) — "
             "已收官轮次的 exps 是存档, 本工具不碰")
 
+    # 双布局 (2026-10-09 裁决: 日志进 logs/): 老 run 根级, 新 run logs/
     log = os.path.join(run_dir, "search.log")
+    if not os.path.isfile(log):
+        log = os.path.join(run_dir, "logs", "search.log")
     if os.path.isfile(log) and time.time() - os.path.getmtime(log) < 1800:
         print(f"[警] search.log {(time.time() - os.path.getmtime(log)) / 60:.0f} "
               f"分钟前仍有写入 — 引擎可能还在跑, 先 pkill -f "

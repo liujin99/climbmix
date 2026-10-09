@@ -177,7 +177,8 @@ def main() -> int:
             f"✗ {target_state} already exists — refusing to clobber "
             f"(move it away, or pass --force if you really mean it)")
     if os.path.isdir(args.target_dir):
-        others = [f for f in (".fingerprint_search", "search.log",
+        others = [f for f in (".fingerprint_search",
+                              "search.log", "logs/search.log",
                               "optimal_mixture_weights.json")
                   if os.path.exists(os.path.join(args.target_dir, f))]
         if others:

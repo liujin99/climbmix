@@ -60,6 +60,7 @@ from climbmix.pipeline.proxy_runner import ProxyRunner
 from climbmix.remote.exp_spec import ExpSpec, SPEC_VERSION
 from climbmix.remote.backends import resolve_backend
 from climbmix.remote.job_api import JobStatus, TransientSubmitError
+from climbmix.utils.paths import exp_dir_for
 
 
 class QueueTimeoutError(RuntimeError):
@@ -1068,7 +1069,9 @@ class RemoteExecutor(ProxyRunner):
         is_floor: bool = False,
     ) -> ProxyResult:
         output_dir = output_dir or self.config.output_dir
-        exp_dir = os.path.join(output_dir, f"exp_{experiment_id:04d}")
+        # exps/ 子目录 (2026-10-09 布局裁决); 老 run 的根级 exp_NNNN/
+        # 由 exp_dir_for 兜底续读
+        exp_dir = exp_dir_for(output_dir, experiment_id)
         meta_path = os.path.join(exp_dir, "meta.json")
         model_tag = f"climbmix_{self.experiment_name}_{experiment_id:04d}"
         t_start = time.time()

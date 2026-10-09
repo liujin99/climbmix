@@ -28,6 +28,7 @@
 target_arm_train() {
     # usage: target_arm_train <data_dir> <tag> <name>
     local data_dir="$1" tag="$2" name="$3"
+    mkdir -p "$OUTPUT_DIR/logs"   # 2026-10-09 布局: 日志进 logs/
     local link_dir="$NANOCHAT_BASE_DIR/base_checkpoints/$tag"
     # Clean a stale/broken symlink from a previous crashed attempt BEFORE the
     # `[ -e ] || ln -s`: a broken link fails `[ -e ]` yet still blocks ln -s
@@ -61,7 +62,7 @@ target_arm_train() {
         --eval-every=-1 \
         ${lo_extra[@]+"${lo_extra[@]}"} \
         --run="${name}_mid" --model-tag="$tag" \
-        --data-dir="$data_dir" 2>&1 | tee "$OUTPUT_DIR/mid_train_${name}.log"
+        --data-dir="$data_dir" 2>&1 | tee "$OUTPUT_DIR/logs/mid_train_${name}.log"
     )
     # NOT `[ -L ] && rm` as the last statement: when link_dir is absent or not
     # a symlink the function would return 1, and under set -e the script dies
@@ -72,6 +73,7 @@ target_arm_train() {
 target_arm_eval() {
     # usage: target_arm_eval <tag> <name>
     local tag="$1" name="$2"
+    mkdir -p "$OUTPUT_DIR/logs"   # 2026-10-09 布局: 日志进 logs/
     (
         # shellcheck source=/dev/null
         source "$CLIMBMIX_DIR/runs/lib/npu_env.sh"
@@ -80,7 +82,7 @@ target_arm_eval() {
         --max-per-task="$EVAL_MAX_PER_TASK" \
         --device-batch-size="$EVAL_DEVICE_BATCH_SIZE" \
         --core-eval-batch-size="$EVAL_CORE_BATCH_SIZE" \
-        --model-tag="$tag" --model-type=mid 2>&1 | tee "$OUTPUT_DIR/eval_${name}.log"
+        --model-tag="$tag" --model-type=mid 2>&1 | tee "$OUTPUT_DIR/logs/eval_${name}.log"
     )
     # base_eval writes a step-only CSV name (mid_model_{step}.csv) into the
     # shared base dir; both arms train the same step count, so the second

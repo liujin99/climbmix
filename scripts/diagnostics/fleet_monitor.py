@@ -158,11 +158,12 @@ def main():
         return 1
 
     timeline_path = os.path.join(args.run_dir, "fleet_timeline.jsonl")
-    sources = [args.main_log,
-               os.path.join(args.run_dir, "search.log")]
-    sources += sorted(globmod.glob(
-        os.path.join(args.run_dir, "dispatch_*.log")))
-    sources += [os.path.join(args.run_dir, "arm_watcher.log")]
+    # 双布局 (2026-10-09 裁决: 日志进 logs/): 老 run 根级, 新 run logs/
+    sources = [args.main_log]
+    for _d in (args.run_dir, os.path.join(args.run_dir, "logs")):
+        sources.append(os.path.join(_d, "search.log"))
+        sources += sorted(globmod.glob(os.path.join(_d, "dispatch_*.log")))
+        sources.append(os.path.join(_d, "arm_watcher.log"))
 
     prev_statuses = {}
     while True:

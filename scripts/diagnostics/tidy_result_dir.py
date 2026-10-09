@@ -26,6 +26,10 @@
 
 幂等: 重复执行无副作用 (已挪过的不再匹配, 同名冲突直接拒绝)。
 
+注: 2026-10-09 起写入端已改 (remote_worker/dispatch_fleet/dispatch_target_arm/
+run_experiment.sh/target_arm.sh 日志进 logs/, remote_executor/proxy_runner 的
+搜索工件进 exps/) — 新 run 出生即整洁, 本工具用于此前已收官归档的 run。
+
 用法:
     python3 scripts/diagnostics/tidy_result_dir.py result/prod5_xxx           # dry-run
     python3 scripts/diagnostics/tidy_result_dir.py result/prod5_xxx --apply   # 执行

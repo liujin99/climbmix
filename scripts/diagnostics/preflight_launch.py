@@ -297,9 +297,11 @@ def main():
     else:
         sources = [args.main_log]
         if args.run_dir:
-            sources.append(os.path.join(args.run_dir, "search.log"))
-            sources += sorted(globmod.glob(
-                os.path.join(args.run_dir, "dispatch_*.log")))
+            # 双布局 (2026-10-09 裁决: 日志进 logs/): 老 run 根级, 新 run logs/
+            for _d in (args.run_dir, os.path.join(args.run_dir, "logs")):
+                sources.append(os.path.join(_d, "search.log"))
+                sources += sorted(globmod.glob(os.path.join(_d,
+                                                            "dispatch_*.log")))
         ids = set()
         for path in sources:
             if path and os.path.isfile(path):

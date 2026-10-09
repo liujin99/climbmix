@@ -25,6 +25,9 @@ set -uo pipefail
 
 DIR="${1:-result/${EXP_NAME:-main}_current}"
 PY=python3
+# 2026-10-09 布局裁决: 日志在 logs/, 搜索工件在 exps/ (老 run 在根级)
+SLOG="$DIR/search.log"
+[ -f "$DIR/logs/search.log" ] && SLOG="$DIR/logs/search.log"
 
 mark() { # mark <ok:0|1> <text>
     if [ "$1" = "0" ]; then printf "  [✓] %s\n" "$2"
@@ -118,29 +121,29 @@ fi
 
 # ── 3. CP1: 搜索健康 ────────────────────────────────────────────────────
 echo "── CP1: search health ──"
-N_EXP=$(ls "$DIR"/exp_*/meta.json 2>/dev/null | wc -l)
-N_ALL=$(ls -d "$DIR"/exp_* 2>/dev/null | wc -l)
+N_EXP=$(ls "$DIR"/exp_*/meta.json "$DIR"/exps/exp_*/meta.json 2>/dev/null | wc -l)
+N_ALL=$(ls -d "$DIR"/exp_* "$DIR"/exps/exp_* 2>/dev/null | wc -l)
 echo "  exps: $N_EXP completed / $N_ALL started"
-if [ -f "$DIR/search.log" ]; then
+if [ -f "$SLOG" ]; then
     echo "  last SNR lines (per-task f, w):"
-    grep -E '^\s+\w+: w=' "$DIR/search.log" 2>/dev/null | tail -6 | sed 's/^/    /'
+    grep -E '^\s+\w+: w=' "$SLOG" 2>/dev/null | tail -6 | sed 's/^/    /'
     echo "  mmlu_stem acc-only line:"
-    grep -m1 "acc-only" "$DIR/search.log" 2>/dev/null | sed 's/^/    /' \
+    grep -m1 "acc-only" "$SLOG" 2>/dev/null | sed 's/^/    /' \
         || echo "    (not yet — appears after the first iteration's scoring)"
     echo "  adaptive lines (last 3):"
-    grep -E "\[Adaptive\]|\] adaptive:" "$DIR/search.log" 2>/dev/null | tail -3 | sed 's/^/    /' \
+    grep -E "\[Adaptive\]|\] adaptive:" "$SLOG" 2>/dev/null | tail -3 | sed 's/^/    /' \
         || true
     echo "  last iteration line:"
-    grep -E "^\[Iter [0-9]+\] (Complete|adaptive:)" "$DIR/search.log" 2>/dev/null | tail -3 | sed 's/^/    /'
+    grep -E "^\[Iter [0-9]+\] (Complete|adaptive:)" "$SLOG" 2>/dev/null | tail -3 | sed 's/^/    /'
     echo "  predictor quality:"
-    grep -E "Online backtest|Predictor val R" "$DIR/search.log" 2>/dev/null | tail -4 | sed 's/^/    /'
+    grep -E "Online backtest|Predictor val R" "$SLOG" 2>/dev/null | tail -4 | sed 's/^/    /'
 else
     mark 1 "search.log (search not started)"
 fi
 
 # ── 4. CP2: 预测器 (由上面 online rho 历史判断) ─────────────────────────
-if [ -f "$DIR/search_state.json" ] && [ -f "$DIR/search.log" ]; then
-    RHO=$(grep -oE "Online backtest: Spearman rho=[-0-9.]+" "$DIR/search.log" 2>/dev/null | tail -1 | grep -oE "[-0-9.]+$" || true)
+if [ -f "$DIR/search_state.json" ] && [ -f "$SLOG" ]; then
+    RHO=$(grep -oE "Online backtest: Spearman rho=[-0-9.]+" "$SLOG" 2>/dev/null | tail -1 | grep -oE "[-0-9.]+$" || true)
     if [ -n "$RHO" ]; then
         ok=$(awk -v r="$RHO" 'BEGIN{print (r>=0.4)?0:1}')
         mark "$ok" "CP2: latest online rho=$RHO (target ≥ 0.4)"
@@ -151,8 +154,8 @@ fi
 
 # ── 5. CP3: 选料 ────────────────────────────────────────────────────────
 echo "── CP3: selection ──"
-if [ -f "$DIR/search.log" ] && grep -q "Selection mode:" "$DIR/search.log" 2>/dev/null; then
-    grep -A2 "Selection mode:" "$DIR/search.log" | tail -3 | sed 's/^/    /'
+if [ -f "$SLOG" ] && grep -q "Selection mode:" "$SLOG" 2>/dev/null; then
+    grep -A2 "Selection mode:" "$SLOG" | tail -3 | sed 's/^/    /'
     mark 0 "CP3: selection done"
 else
     mark 1 "CP3: Selection mode line not printed yet (search still running)"
@@ -189,7 +192,7 @@ fi
 echo "── quick verdict ──"
 if [ -f "$DIR/.done_eval_climb" ] && [ -f "$DIR/.done_eval_random" ]; then
     echo "  RUN COMPLETE — see $DIR/report.md"
-elif ls "$DIR"/exp_*/meta.json >/dev/null 2>&1; then
+elif ls "$DIR"/exp_*/meta.json "$DIR"/exps/exp_*/meta.json >/dev/null 2>&1; then
     echo "  search in progress — CP1 checks above should all turn ✓ by h≈6.5"
 elif [ -f "$DIR/sampled_dataset.parquet" ]; then
     echo "  arms in progress — CP4 checks above"

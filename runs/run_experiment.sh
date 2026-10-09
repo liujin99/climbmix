@@ -658,6 +658,8 @@ else
     ADAPTIVE_ARGS=()
     [ "$ADAPTIVE_CONFIGS" = "1" ] && ADAPTIVE_ARGS+=(--adaptive-configs)
     [ "$ADAPTIVE_COMPACT" = "1" ] && ADAPTIVE_ARGS+=(--adaptive-compact)
+    # 2026-10-09 布局裁决: 过程日志收进 logs/, run 根只留结果与状态
+    mkdir -p "$OUTPUT_DIR/logs"
     python3 "$CLIMBMIX_DIR/scripts/run_climb.py" \
         --data-dir "$DATA_DIR" \
         --nanochat-dir "$NANOCHAT_DIR" \
@@ -697,7 +699,7 @@ else
         --resume-search \
         --schema "$CLIMBMIX_DIR/config/schema_stem.yaml" \
         $REMOTE_CONFIG_ARG \
-        --skip-target 2>&1 | tee "$OUTPUT_DIR/search.log"
+        --skip-target 2>&1 | tee "$OUTPUT_DIR/logs/search.log"
 fi
 
 [ ! -f "$OUTPUT_DIR/sampled_dataset.parquet" ] && { echo "✗ No sampled_dataset.parquet"; exit 1; }
@@ -735,10 +737,10 @@ echo -e "\n===== Step 8: Report =====\n"
 # 旧上屏只见两臂且把固定 climb 臂误标 "CLIMB optimal"。stdout 静默, 崩溃走 stderr。
 python3 "$CLIMBMIX_DIR/src/climbmix/pipeline/report_generator.py" \
     --result-dir "$OUTPUT_DIR" \
-    --climb-train-log "$OUTPUT_DIR/mid_train_climb.log" \
-    --random-train-log "$OUTPUT_DIR/mid_train_uniform.log" \
-    --climb-eval-log "$OUTPUT_DIR/eval_climb.log" \
-    --random-eval-log "$OUTPUT_DIR/eval_uniform.log" \
+    --climb-train-log "$OUTPUT_DIR/logs/mid_train_climb.log" \
+    --random-train-log "$OUTPUT_DIR/logs/mid_train_uniform.log" \
+    --climb-eval-log "$OUTPUT_DIR/logs/eval_climb.log" \
+    --random-eval-log "$OUTPUT_DIR/logs/eval_uniform.log" \
     --base-model-tag "d${TARGET_DEPTH}" \
     --climb-model-tag "d${TARGET_DEPTH}_climb_${EXP_NAME}" \
     --random-model-tag "d${TARGET_DEPTH}_uniform_${EXP_NAME}" \

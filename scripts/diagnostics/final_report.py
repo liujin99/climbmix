@@ -8,7 +8,8 @@
 #        --arms climb-cfg72,climb-cfg25,climb-cfg88,uniform,natural,domainfix
 #
 #  结构对应 (2026-09-22 用户裁决):
-#    每配方结果目录   = 搜索层 exp_NNNN/ (meta.json = 权重+分数+逐任务+日志)
+#    每配方结果目录   = 搜索层 exps/exp_NNNN/ (meta.json = 权重+分数+逐任务+
+#                       日志; 2026-10-09 前的老 run 在根级 exp_NNNN/)
 #    子报告           = report.md 的搜索节 + CP4 判定节 + 赢家配方节
 #                       (随臂落地自动刷新, 过程可见)
 #    大报告(本脚本)   = 实验全部完成后的最后一步: 臂盘点 → 判定节刷新

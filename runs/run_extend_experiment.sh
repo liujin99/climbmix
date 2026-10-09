@@ -61,8 +61,11 @@ try:
     if not k:
         k = s.get("n_clusters") or "?"
     # 池身份: search.log 记录的池 key 优先, 退回 launch_env 的 DATA_DIR
+    # (双布局: 老 run 根级, 新 run logs/)
     pool_id = "?"
     log = os.path.join(rundir, "search.log")
+    if not os.path.isfile(log):
+        log = os.path.join(rundir, "logs", "search.log")
     if os.path.isfile(log):
         m = re.search(r"Pool-level embedding/kmeans cache:.*embeddings/([0-9a-f]{12})",
                       open(log, errors="replace").read())
@@ -142,9 +145,12 @@ PY
 verify_pool_identity() {
     echo "  池身份核验 (内容级):"
     local src_key=""
-    if [ -f "$HISTORY_RUN/search.log" ]; then
+    # 双布局 (2026-10-09 裁决: 日志进 logs/): 老 run 根级, 新 run logs/
+    local hlog="$HISTORY_RUN/search.log"
+    [ -f "$HISTORY_RUN/logs/search.log" ] && hlog="$HISTORY_RUN/logs/search.log"
+    if [ -f "$hlog" ]; then
         src_key=$(grep -oE "Pool-level embedding/kmeans cache:.*embeddings/[0-9a-f]{12}" \
-            "$HISTORY_RUN/search.log" | grep -oE "[0-9a-f]{12}$" | head -1)
+            "$hlog" | grep -oE "[0-9a-f]{12}$" | head -1)
     fi
     if [ -n "$src_key" ]; then
         local verdict

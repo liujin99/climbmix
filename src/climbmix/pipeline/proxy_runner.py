@@ -42,6 +42,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from climbmix.core.types import MixtureConfig, MixtureWeights, ProxyResult, CLIMBConfig
 from climbmix.sampling.data_selector import select_data_by_mixture
+from climbmix.utils.paths import exp_dir_for
 from climbmix.pipeline.nanochat_cmds import (
     build_mid_train_cmd as _nc_build_mid_train_cmd,
     build_eval_cmd as _nc_build_eval_cmd,
@@ -167,7 +168,9 @@ class ProxyRunner:
         nproc_per_node: Optional[int] = None,
     ) -> ProxyResult:
         output_dir = output_dir or self.config.output_dir
-        exp_dir = os.path.join(output_dir, f"exp_{experiment_id:04d}")
+        # exps/ 子目录 (2026-10-09 布局裁决); 老 run 的根级 exp_NNNN/
+        # 由 exp_dir_for 兜底续读
+        exp_dir = exp_dir_for(output_dir, experiment_id)
         meta_path = os.path.join(exp_dir, "meta.json")
 
         model_tag = f"climbmix_{self.experiment_name}_{experiment_id:04d}"

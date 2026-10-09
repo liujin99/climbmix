@@ -118,7 +118,8 @@ with tempfile.TemporaryDirectory(prefix="prod2rt_") as td:
     check("parity: no --device-type in target train (shell-proven form)",
           "--device-type" not in py_train)
     check("parity: train log tee'd",
-          os.path.isfile(os.path.join(out_dir, f"mid_train_{NAME}.log")))
+          os.path.isfile(os.path.join(out_dir, "logs",
+                                      f"mid_train_{NAME}.log")))
     link = os.path.join(base_dir, "base_checkpoints", TAG)
     check("parity: base symlink cleaned up after train",
           not os.path.lexists(link))
