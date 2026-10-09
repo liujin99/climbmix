@@ -264,14 +264,21 @@ def main():
     if args.run_dir:
         # Any arm incl. custom ones (docs/reuse_design.md §4.4) —
         # target_arm_<name>.json with a path-safe name.
+        # 双布局 (2026-10-09 deep-tidy): 根级 + detail/
         import re as _re
-        arm_files = sorted(
-            f for f in os.listdir(args.run_dir)
-            if _re.fullmatch(r"target_arm_[A-Za-z0-9_-]+\.json", f))
+        arm_files = []
+        for _d in (args.run_dir, os.path.join(args.run_dir, "detail")):
+            try:
+                names = os.listdir(_d)
+            except OSError:
+                continue
+            arm_files += [
+                os.path.join(_d, f) for f in names
+                if _re.fullmatch(r"target_arm_[A-Za-z0-9_-]+\.json", f)]
+        arm_files.sort()
         found = 0
-        for af in arm_files:
-            arm = af[len("target_arm_"):-len(".json")]
-            p = os.path.join(args.run_dir, af)
+        for p in arm_files:
+            arm = os.path.basename(p)[len("target_arm_"):-len(".json")]
             found += 1
             try:
                 d = json.load(open(p))

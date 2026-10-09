@@ -97,13 +97,29 @@ def parse_eval_csv(path):
     return out
 
 
+def resolve_run_file(run_dir, name):
+    """双布局 (2026-10-09 deep-tidy 裁决): 根级优先, detail/ 兜底。
+
+    深整理后的 run 根只留 report.md + 决策图 + logs/ + exps/ + detail/,
+    状态/CSV/审计都在 detail/ — 事后分析工具经此函数兼容两种布局。
+    返回的路径可能不存在 (调用方自行判存), 只是位置决策。"""
+    p = os.path.join(run_dir, name)
+    if os.path.exists(p):
+        return p
+    d = os.path.join(run_dir, "detail", name)
+    return d if os.path.exists(d) else p
+
+
 def discover_arms(run_dir):
-    """eval_<arm>.csv 全发现 (锚点 eval_base_remote.csv 除外) → 臂名列表."""
+    """eval_<arm>.csv 全发现 (锚点 eval_base_remote.csv 除外) → 臂名列表.
+    双布局: 根级 + detail/ (deep-tidy 后 CSV 在 detail/)。"""
     arms = set()
-    try:
-        names = os.listdir(run_dir)
-    except OSError:
-        return []
+    names = []
+    for d in (run_dir, os.path.join(run_dir, "detail")):
+        try:
+            names += os.listdir(d)
+        except OSError:
+            pass
     for n in names:
         if (n.startswith("eval_") and n.endswith(".csv")
                 and n != "eval_base_remote.csv"):
@@ -240,7 +256,7 @@ def main():
     # 解析 + stem (STEM 行缺失时回退 per-benchmark 均值)
     parsed, stems, no_stem = {}, {}, []
     for a in arms:
-        d = parse_eval_csv(os.path.join(args.run_dir, f"eval_{a}.csv"))
+        d = parse_eval_csv(resolve_run_file(args.run_dir, f"eval_{a}.csv"))
         if d is None:
             out(f"  [·] eval_{a}.csv — not found (arm not finished yet?)")
             continue
@@ -274,7 +290,8 @@ def main():
 
     # ── 1. 锚点校验 ─────────────────────────────────────────────────
     out("── 1. base anchor (remote eval pipeline check) ──")
-    base = parse_eval_csv(os.path.join(args.run_dir, "eval_base_remote.csv"))
+    base = parse_eval_csv(resolve_run_file(args.run_dir,
+                                           "eval_base_remote.csv"))
     if base is None:
         out("  [·] eval_base_remote.csv — not found (skipped; optional)")
         out("      NOTE: without the anchor a systematic eval bias would "

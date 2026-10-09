@@ -39,20 +39,35 @@ CLIMBMIX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$CLIMBMIX_DIR"
 OUTPUT_DIR="$CLIMBMIX_DIR/result/${EXP_NAME}_current"
 
+# 历史 run 文件双布局 (2026-10-09 deep-tidy): 根级优先, detail/ 兜底
+hrf() {
+    if [ -f "$HISTORY_RUN/$1" ]; then printf '%s\n' "$HISTORY_RUN/$1"
+    else printf '%s\n' "$HISTORY_RUN/detail/$1"; fi
+}
+
 # HISTORY_RUN 缺失 → 列出可用历史 run (点数 + 池 K + 池身份 + 可复用性)
 if [ -z "$HISTORY_RUN" ]; then
     echo "✗ HISTORY_RUN 必填 (复用源 run)。可用历史 run (result/ 下):"
-    for s in "$CLIMBMIX_DIR"/result/*/search_state.json; do
+    for s in "$CLIMBMIX_DIR"/result/*/search_state.json \
+             "$CLIMBMIX_DIR"/result/*/detail/search_state.json; do
         [ -f "$s" ] || continue
-        d="${s%/*}"; d="${d#"$CLIMBMIX_DIR"/}"
+        d="${s%/*}"; d="${d%/detail}"; d="${d#"$CLIMBMIX_DIR"/}"
         info=$(python3 - "$s" "$d" "$K_ENHANCED" <<'PY'
 import json, os, re, sys
 state, rundir, want_k = sys.argv[1], sys.argv[2], sys.argv[3]
+
+
+def _rf(rd, name):
+    """双布局 (2026-10-09 deep-tidy): 根级优先, detail/ 兜底。"""
+    p = os.path.join(rd, name)
+    return p if os.path.isfile(p) else os.path.join(rd, "detail", name)
+
+
 try:
     s = json.load(open(state))
     n = len(s.get("accumulated_configs") or [])
     k = ""
-    prof = os.path.join(rundir, "balanced_profile.json")
+    prof = _rf(rundir, "balanced_profile.json")
     if os.path.isfile(prof):
         try:
             k = json.load(open(prof)).get("K_final")
@@ -72,7 +87,7 @@ try:
         if m:
             pool_id = f"key={m.group(1)}"
     if pool_id == "?":
-        envf = os.path.join(rundir, "launch_env.json")
+        envf = _rf(rundir, "launch_env.json")
         if os.path.isfile(envf):
             dd = json.load(open(envf)).get("DATA_DIR")
             if dd:
@@ -194,7 +209,7 @@ print(f'{key}|{len(shards)}')
         src_dir=$(python3 -c "
 import json
 try:
-    print(json.load(open('$HISTORY_RUN/launch_env.json')).get('DATA_DIR', ''))
+    print(json.load(open('$(hrf launch_env.json)')).get('DATA_DIR', ''))
 except (OSError, ValueError):
     print('')")
         if [ -z "$src_dir" ]; then
@@ -226,7 +241,7 @@ verify_immutable_layer() {
     local params_tmp
     params_tmp="$(mktemp)"
     _current_launch_params > "$params_tmp"
-    python3 - "$HISTORY_RUN/launch_env.json" "$params_tmp" <<'PY'
+    python3 - "$(hrf launch_env.json)" "$params_tmp" <<'PY'
 import json, os, sys
 src_path, params_path = sys.argv[1], sys.argv[2]
 if not os.path.isfile(src_path):
@@ -299,10 +314,10 @@ if [ -f "$OUTPUT_DIR/search_state.json" ]; then
 else
     # 首次增量: 校验 → 继承池缓存 → 注入 (docs/reuse_design.md §4.2/§8)
     echo "  → 复用注入: ${HISTORY_RUN} 的历史点"
-    [ -f "$HISTORY_RUN/search_state.json" ] || { echo "✗ ${HISTORY_RUN}/search_state.json 不存在 (用上面列出的可用 run)"; exit 1; }
-    [ -f "$HISTORY_RUN/cluster_cache.npz" ] || { echo "✗ ${HISTORY_RUN}/cluster_cache.npz 不存在 (池缓存来源)"; exit 1; }
-    if [ -f "$HISTORY_RUN/balanced_profile.json" ]; then
-        SRC_K=$(python3 -c "import json;print(json.load(open('${HISTORY_RUN}/balanced_profile.json'))['K_final'])")
+    [ -f "$(hrf search_state.json)" ] || { echo "✗ 历史 run 缺 search_state.json (用上面列出的可用 run)"; exit 1; }
+    [ -f "$(hrf cluster_cache.npz)" ] || { echo "✗ 历史 run 缺 cluster_cache.npz (池缓存来源)"; exit 1; }
+    if [ -f "$(hrf balanced_profile.json)" ]; then
+        SRC_K=$(python3 -c "import json;print(json.load(open('$(hrf balanced_profile.json)'))['K_final'])")
         [ "$SRC_K" = "$K_ENHANCED" ] || { echo "✗ 源池 K_final=${SRC_K} != K_ENHANCED=${K_ENHANCED} — 聚类空间不同, 历史点不可复用 (docs/reuse_design.md §2)"; exit 1; }
         echo "    K 校验: 源池 K_final=${SRC_K} == K_ENHANCED ✓"
     fi
@@ -311,20 +326,20 @@ else
     if [ ! -f "$OUTPUT_DIR/cluster_cache.npz" ]; then
         # 池缓存 = 两个文件 (climb_pipeline 缓存命中条件: npz + info json 同在):
         # 缺任一个都会触发重新聚类 → 历史点静默作废
-        cp "$HISTORY_RUN/cluster_cache.npz" "$OUTPUT_DIR/"
-        if [ -f "$HISTORY_RUN/cluster_info_cache.json" ]; then
-            cp "$HISTORY_RUN/cluster_info_cache.json" "$OUTPUT_DIR/"
+        cp "$(hrf cluster_cache.npz)" "$OUTPUT_DIR/"
+        if [ -f "$(hrf cluster_info_cache.json)" ]; then
+            cp "$(hrf cluster_info_cache.json)" "$OUTPUT_DIR/"
         else
             echo "    ⚠ 源 run 缺 cluster_info_cache.json — 缓存不完整, Step 1 可能重新聚类!"
             echo "      (重新聚类 = 历史点作废; 源归档不完整请先补齐)"
         fi
-        if [ -f "$HISTORY_RUN/balanced_profile.json" ]; then
-            cp "$HISTORY_RUN/balanced_profile.json" "$OUTPUT_DIR/"
+        if [ -f "$(hrf balanced_profile.json)" ]; then
+            cp "$(hrf balanced_profile.json)" "$OUTPUT_DIR/"
         fi
         echo "    池缓存已继承 (继承, 不重新聚类 — 重新聚类 = 历史点静默作废)"
     fi
     python3 scripts/inject_history.py \
-        --source "$HISTORY_RUN/search_state.json" \
+        --source "$(hrf search_state.json)" \
         --target-dir "$OUTPUT_DIR" \
         --pool "$OUTPUT_DIR/cluster_cache.npz"
     normalize_slots

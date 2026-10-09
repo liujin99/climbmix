@@ -52,6 +52,9 @@ import time
 
 import numpy as np
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from cp4_report import resolve_run_file   # 双布局 (2026-10-09 deep-tidy)
+
 try:
     import matplotlib
     matplotlib.use("Agg")
@@ -155,16 +158,19 @@ def parse_eval_csv(path):
 
 
 def discover_arms(run_dir):
-    """eval_<arm>.csv 全发现 (锚点除外) → 臂名列表."""
+    """eval_<arm>.csv 全发现 (锚点除外) → 臂名列表.
+    双布局 (2026-10-09 deep-tidy): 根级 + detail/。"""
     arms = []
-    try:
-        names = os.listdir(run_dir)
-    except OSError:
-        return []
+    names = []
+    for d in (run_dir, os.path.join(run_dir, "detail")):
+        try:
+            names += os.listdir(d)
+        except OSError:
+            pass
     for n in names:
         if n.startswith("eval_") and n.endswith(".csv") and n != "eval_base_remote.csv":
             arms.append(n[len("eval_"):-len(".csv")])
-    return sorted(arms)
+    return sorted(set(arms))
 
 
 def weights_vec_from_payload(payload, labels):
@@ -199,7 +205,7 @@ def _cluster_semantics(run_dir, pool_dir):
     if not pool_dir or not os.path.isdir(pool_dir):
         return None, (f"pool dir 不可解析 "
                       f"({pool_dir or 'launch_env DATA_DIR 缺失'})")
-    cache_npz = os.path.join(run_dir, "cluster_cache.npz")
+    cache_npz = resolve_run_file(run_dir, "cluster_cache.npz")
     if not os.path.isfile(cache_npz):
         return None, "cluster_cache.npz 缺失"
     sem_path = os.path.join(run_dir, "cluster_semantics.md")
@@ -250,8 +256,16 @@ def main():
         from climbmix.utils.io_utils import stage1_pair
         _, ci_path = stage1_pair(run_dir)
     except ImportError:
-        ci_path = os.path.join(run_dir, "cluster_info_cache.json")
-    cluster_info = load_json(ci_path)
+        ci_path = ""
+    if not ci_path or not os.path.isfile(ci_path):
+        # 双布局兜底 (2026-10-09 deep-tidy): 根级配对缺失时逐名找
+        # (stage1_pair 要求 npz+json 成对, 深整理后两者都在 detail/)
+        for name in ("macro_info.json", "cluster_info_cache.json"):
+            p = resolve_run_file(run_dir, name)
+            if os.path.isfile(p):
+                ci_path = p
+                break
+    cluster_info = load_json(ci_path) if ci_path else None
     if not isinstance(cluster_info, list) or not cluster_info:
         print(f"[!] no usable cluster_info_cache.json under {run_dir} — abort")
         return 1
@@ -271,7 +285,7 @@ def main():
         return 1
     scores = {}
     for a in arms:
-        d = parse_eval_csv(os.path.join(run_dir, f"eval_{a}.csv"))
+        d = parse_eval_csv(resolve_run_file(run_dir, f"eval_{a}.csv"))
         if d and d["stem"] is not None:
             scores[a] = d
     if not scores:
@@ -291,7 +305,7 @@ def main():
     # 注意: topk_mixture_candidates.json 的写出代码 2026-09-21 才落地
     # (8ff8d84), prod4 的搜索早于它 — prod4 的 cfg 臂权重只能从
     # search_state.json 的 accumulated_configs 按 config_id 兜底解析。
-    state = load_json(os.path.join(run_dir, "search_state.json")) or {}
+    state = load_json(resolve_run_file(run_dir, "search_state.json")) or {}
     fleet = None
     fleet_iter_of = {}
     state_by_id = {}    # config_id -> (weights list, score | None)
@@ -335,14 +349,15 @@ def main():
         notes.append("search_state.json 缺失 — 舰队语境跳过 (cfg 臂将无法兜底解析)")
 
     # ── 配方解析: 每个臂 → 权重向量 (能解则解, 解不了注明) ──
-    topk = load_json(os.path.join(run_dir, "topk_mixture_candidates.json")) or {}
+    topk = load_json(resolve_run_file(run_dir,
+                                         "topk_mixture_candidates.json")) or {}
     topk_by_id = {}
     for c in topk.get("candidates") or []:
         cid = c.get("config_id")
         if cid is not None:
             topk_by_id[int(cid)] = c
     optimal_payload = load_json(
-        os.path.join(run_dir, "optimal_mixture_weights.json"))
+        resolve_run_file(run_dir, "optimal_mixture_weights.json"))
 
     arm_weights = {}    # arm -> np.ndarray
     arm_src = {}        # arm -> 人类可读的配方来源
@@ -471,7 +486,7 @@ def main():
     # ── §2b 簇内容速写: cluster_peek 数据面, 一次生成缓存复用 ──
     # (2026-09-30 用户裁决: 簇语义进报告自动化, 不再依赖手工 CLI)
     pool_dir = args.pool_dir or str(
-        (load_json(os.path.join(run_dir, "launch_env.json")) or {})
+        (load_json(resolve_run_file(run_dir, "launch_env.json")) or {})
         .get("DATA_DIR") or "")
     sem_block, sem_note = _cluster_semantics(run_dir, pool_dir)
     if sem_note:
@@ -629,7 +644,8 @@ def build_section(run_dir, labels, K, tok_share, quality,
     R += ["### 1. 臂间记分板 (d28)", "",
           "| 臂 | stem | Δ vs 赢家 | 噪声带 | 配方来源 |",
           "|---|---|---|---|---|"]
-    base = parse_eval_csv(os.path.join(run_dir, "eval_base_remote.csv"))
+    base = parse_eval_csv(resolve_run_file(run_dir,
+                                            "eval_base_remote.csv"))
     if base and base["stem"] is not None:
         R.append(f"| _base (锚点)_ | _{base['stem']:.4f}_ | "
                  f"_{base['stem'] - scores[winner]['stem']:+.4f}_ | | "

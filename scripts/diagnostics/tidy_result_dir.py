@@ -8,31 +8,42 @@
   - ~45 个 结果+状态 (eval_*.csv, search_state.json, PNG/MD, ...)
 人看的和脚本读的全混在一起。
 
-整理规则 (只挪两类, 结果与状态全部留在根):
-    logs/ <- 根目录全部 *.log
-    exps/ <- exp_NNNN/ 搜索工件目录
+两档整理:
+
+  基础档 (缺省): 根层 ~45 项
+      logs/ <- 根目录全部 *.log
+      exps/ <- exp_NNNN/ 搜索工件目录
+
+  深度档 (--deep, 2026-10-09 用户裁决 "根层 <10 项"): 发布形态
+      根层   = report.md + 5 张决策图 + logs/ + exps/ + detail/  (≤9 项)
+      detail/ <- 其余全部 (状态 JSON, eval CSV, 臂审计, 旧 5 图,
+                 validation_report/cluster_peek/cluster_semantics.md,
+                 fleet_weights/, sampled_dataset.parquet, ...)
+      report.md 内嵌的 PNG 相对链接同步改写为 detail/ 前缀。
+      隐藏文件 (.done_* / .dispatch_*.lock / .fingerprint_*) 留根 —
+      运行标记, ls 不可见, 不碍观瞻。
+      事后重跑分析工具 (report_charts / cp4 / final_report / recipe_report)
+      经 resolve_run_file 双布局兼容: 根级优先, detail/ 兜底; 新生成的
+      图/报告落根层, 重跑本工具可再次归位。
 
 为什么安全:
-  - 分析/报告脚本 (cp4_report / report_charts / recipe_report /
-    cluster_peek / final_report) 只读根目录的 search_state.json /
-    eval_*.csv / topk_mixture_candidates.json / cluster_info*.json /
-    launch_env.json / fleet_weights 等 — 不读根目录 .log, 不读 exp_NNNN/
-    (final_report.py 的 exp_NNNN 只出现在注释里)。
-  - exp_NNNN/ 与根日志只在【运行中/续跑】被 remote_executor 读写 — 因此
-    本工具只允许在已归档 (archive_meta.json 存在) 的目录上执行; 未归档
-    需 --force 自担风险。
+  - 分析/报告脚本经双布局解析读状态文件 (cp4_report.resolve_run_file);
+    exp_NNNN/ 与根日志只在【运行中/续跑】被 remote_executor 读写 — 因此
+    本工具只允许在已归档 (archive_meta.json 存在, 根或 detail/) 的目录上
+    执行; 未归档需 --force 自担风险。
   - fleet_monitor / preflight_launch 读 run 根的 search.log /
     dispatch_*.log, 但那是【运行中】的监控工具, 归档后不再使用。
 
-幂等: 重复执行无副作用 (已挪过的不再匹配, 同名冲突直接拒绝)。
+幂等: 重复执行无副作用 (已挪过的不再匹配, 同名冲突直接拒绝, 链接改写
+只匹配裸文件名 — 已带 detail/ 前缀的不会二次改写)。
 
-注: 2026-10-09 起写入端已改 (remote_worker/dispatch_fleet/dispatch_target_arm/
-run_experiment.sh/target_arm.sh 日志进 logs/, remote_executor/proxy_runner 的
-搜索工件进 exps/) — 新 run 出生即整洁, 本工具用于此前已收官归档的 run。
+注: 2026-10-09 起写入端已改 (日志进 logs/, 搜索工件进 exps/) — 新 run
+出生即整洁; mark_completed 归档时自动追加深整理 (--deep --apply)。
 
 用法:
-    python3 scripts/diagnostics/tidy_result_dir.py result/prod5_xxx           # dry-run
-    python3 scripts/diagnostics/tidy_result_dir.py result/prod5_xxx --apply   # 执行
+    python3 scripts/diagnostics/tidy_result_dir.py result/prod5_xxx            # dry-run
+    python3 scripts/diagnostics/tidy_result_dir.py result/prod5_xxx --apply    # 基础档
+    python3 scripts/diagnostics/tidy_result_dir.py result/prod5_xxx --deep --apply  # 深度档
 """
 import argparse
 import os
@@ -42,13 +53,73 @@ import sys
 
 EXP_RE = re.compile(r"^exp_\d{4,}$")
 
+# 深度档的根层保留集: 主报告 + report_charts.py 五张决策图
+ROOT_KEEP_FILES = {
+    "report.md",
+    "search_convergence.png",
+    "arms_main_results.png",
+    "proxy_target_consistency.png",
+    "cluster_alpha_vs_score.png",
+    "best_vs_worst_heatmap.png",
+}
+ROOT_KEEP_DIRS = {"logs", "exps", "detail"}
+
+
+def _exists_anywhere(rd, name):
+    return any(os.path.exists(os.path.join(rd, sub, name))
+               for sub in ("", "detail"))
+
+
+def plan_deep(rd, claimed):
+    """深度档移动计划: 根层除保留集外的一切 (含目录) -> detail/。
+    claimed = 基础档已认领的条目 (logs/exps) — 不重复挪。"""
+    moves = []
+    for e in sorted(os.listdir(rd)):
+        if e.startswith("."):
+            continue                       # 运行标记/锁 — 留根
+        if e in claimed:
+            continue
+        if e in ROOT_KEEP_DIRS and os.path.isdir(os.path.join(rd, e)):
+            continue
+        if e in ROOT_KEEP_FILES and os.path.isfile(os.path.join(rd, e)):
+            continue
+        moves.append(e)
+    return moves
+
+
+def rewrite_report_links(rd, moved):
+    """report.md 内嵌的 PNG/MD 相对链接改写为 detail/ 前缀 (只改真被挪走
+    的文件名; 已带前缀的不匹配 — 幂等)。返回改写处数。"""
+    rp = os.path.join(rd, "report.md")
+    if not os.path.isfile(rp):
+        return 0
+    with open(rp, encoding="utf-8", errors="replace") as f:
+        txt = f.read()
+    n = 0
+    for name in moved:
+        if not (name.endswith(".png") or name.endswith(".md")):
+            continue
+        old, new = f"]({name})", f"](detail/{name})"
+        if old in txt:
+            n += txt.count(old)
+            txt = txt.replace(old, new)
+    if n:
+        with open(rp, "w", encoding="utf-8") as f:
+            f.write(txt)
+    return n
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="整理已收官的搜索结果目录: *.log -> logs/, exp_NNNN/ -> exps/")
+        description="整理已收官的搜索结果目录: 基础档 *.log -> logs/, "
+                    "exp_NNNN/ -> exps/; 深度档 --deep 再收 detail/, "
+                    "根层只留 report.md + 决策图")
     ap.add_argument("run_dir", help="结果目录 (如 result/prod5_20260929_201108)")
     ap.add_argument("--apply", action="store_true",
                     help="实际移动 (缺省只打印计划)")
+    ap.add_argument("--deep", action="store_true",
+                    help="深度档: 根层只留 report.md + 5 张决策图 + "
+                         "logs/ + exps/ + detail/, 其余进 detail/")
     ap.add_argument("--force", action="store_true",
                     help="目录无 archive_meta.json (未归档) 时仍执行")
     args = ap.parse_args()
@@ -57,10 +128,10 @@ def main() -> int:
     if not os.path.isdir(rd):
         print(f"refuse: 不是目录: {rd}")
         return 2
-    if not os.path.isfile(os.path.join(rd, "search_state.json")):
+    if not _exists_anywhere(rd, "search_state.json"):
         print(f"refuse: {rd} 下无 search_state.json — 不是搜索结果目录")
         return 2
-    if not args.force and not os.path.isfile(os.path.join(rd, "archive_meta.json")):
+    if not args.force and not _exists_anywhere(rd, "archive_meta.json"):
         print("refuse: 无 archive_meta.json (未收官归档) — 收官后再整理, "
               "确认无碍用 --force")
         return 2
@@ -70,25 +141,32 @@ def main() -> int:
             if e.endswith(".log") and os.path.isfile(os.path.join(rd, e))]
     exps = [e for e in entries
             if EXP_RE.match(e) and os.path.isdir(os.path.join(rd, e))]
+    deep = plan_deep(rd, set(logs) | set(exps)) if args.deep else []
 
     n_before = len(entries)
-    n_after = (n_before - len(logs) - len(exps)
-               + (1 if logs else 0) + (1 if exps else 0))
     print(f"{rd}")
-    print(f"  根条目: {n_before} -> 约 {n_after}"
-          f" (logs/ {len(logs)} 项, exps/ {len(exps)} 项)")
-    if logs:
-        print(f"  logs/: {len(logs)} 个日志, 例: {', '.join(logs[:3])}"
-              f"{' ...' if len(logs) > 3 else ''}")
-    if exps:
-        print(f"  exps/: {len(exps)} 个搜索工件目录, 例: {', '.join(exps[:3])}"
-              f"{' ...' if len(exps) > 3 else ''}")
-    if not logs and not exps:
+    if logs or exps:
+        print(f"  基础档: 根条目 {n_before} -> "
+              f"{n_before - len(logs) - len(exps) + (1 if logs else 0) + (1 if exps else 0)}"
+              f" (logs/ {len(logs)} 项, exps/ {len(exps)} 项)")
+    if deep:
+        stay = [e for e in entries
+                if e not in deep and e not in logs and e not in exps
+                and not e.startswith(".")]
+        print(f"  深度档: detail/ {len(deep)} 项; 根层保留 {len(stay)} 项:")
+        print(f"    {', '.join(stay) if stay else '(无)'}")
+    if not logs and not exps and not deep:
         print("  已整洁, 无可挪项")
         return 0
 
-    # 目标子目录里的同名冲突 = 拒绝 (绝不覆盖)
+    plans = [("logs", logs), ("exps", exps), ("detail", deep)]
+
+    # logs/ 与 exps/ 的同名冲突 = 拒绝 (绝不覆盖 — 它们不会被事后再生)。
+    # detail/ 不在此列: 分析工具重跑会在根层再生成产物, 再整理时按
+    # "根层新版归位" 覆盖 detail/ 旧档 (apply 段处理, 类型冲突仍跳过)。
     for sub, names in (("logs", logs), ("exps", exps)):
+        if not names:
+            continue
         dst = os.path.join(rd, sub)
         if os.path.isdir(dst):
             clash = [x for x in names if os.path.exists(os.path.join(dst, x))]
@@ -100,15 +178,34 @@ def main() -> int:
         print("  (dry-run: 加 --apply 执行移动)")
         return 0
 
-    for sub, names in (("logs", logs), ("exps", exps)):
+    for sub, names in plans:
         if not names:
             continue
         dst = os.path.join(rd, sub)
         os.makedirs(dst, exist_ok=True)
+        replaced = 0
         for x in names:
-            shutil.move(os.path.join(rd, x), os.path.join(dst, x))
-        print(f"  moved {len(names)} 项 -> {sub}/")
-    print(f"  完成: 根条目 {n_before} -> {len(os.listdir(rd))}")
+            src = os.path.join(rd, x)
+            d = os.path.join(dst, x)
+            if os.path.exists(d):
+                if sub != "detail" or os.path.isdir(d) != os.path.isdir(src):
+                    print(f"  refuse: {sub}/{x} 冲突 — 不覆盖, 留在根层")
+                    continue
+                if os.path.isdir(d):
+                    shutil.rmtree(d)
+                replaced += 1
+            shutil.move(src, d)
+        msg = f"  moved {len(names)} 项 -> {sub}/"
+        if replaced:
+            msg += f" (其中 {replaced} 项覆盖 detail/ 旧档 — 再生成归位)"
+        print(msg)
+    if deep:
+        n = rewrite_report_links(rd, deep)
+        if n:
+            print(f"  report.md 链接改写 {n} 处 -> detail/")
+    final = sorted(os.listdir(rd))
+    print(f"  完成: 根条目 {n_before} -> {len(final)}"
+          f"{'' if not args.deep else ' (' + ', '.join(final) + ')'}")
     return 0
 
 

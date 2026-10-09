@@ -28,7 +28,8 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from cp4_report import discover_arms, parse_eval_csv
+from cp4_report import (discover_arms, parse_eval_csv,
+                         resolve_run_file)
 
 SEAL_BEGIN = "<!-- final_report:begin -->"
 SEAL_END = "<!-- final_report:end -->"
@@ -44,7 +45,8 @@ def derive_expected_arms(run_dir):
     + RUN_DIR/expected_arms.txt 覆盖/追加 (每行一个臂名, 历史命名或
     条件臂如 no-claim 精确控制用)。
     topk 缺失 → (None, 原因) — 不猜, 拒绝自动终报。"""
-    topk_path = os.path.join(run_dir, "topk_mixture_candidates.json")
+    topk_path = resolve_run_file(run_dir,
+                                   "topk_mixture_candidates.json")
     if not os.path.isfile(topk_path):
         return None, "topk_mixture_candidates.json 缺失 — 无法推导预期臂"
     try:
@@ -56,7 +58,7 @@ def derive_expected_arms(run_dir):
     if not ids:
         return None, "topk 候选为空 — 无法推导预期臂"
     expected = [f"climb-cfg{i}" for i in ids] + list(FIXED_BASELINES)
-    override = os.path.join(run_dir, "expected_arms.txt")
+    override = resolve_run_file(run_dir, "expected_arms.txt")
     if os.path.isfile(override):
         with open(override) as f:
             names = [ln.strip() for ln in f if ln.strip()]
@@ -107,11 +109,13 @@ def main():
     arms = discover_arms(args.run_dir)
     stems = {}
     for a in arms:
-        d = parse_eval_csv(os.path.join(args.run_dir, f"eval_{a}.csv"))
+        d = parse_eval_csv(resolve_run_file(args.run_dir,
+                                             f"eval_{a}.csv"))
         if d and d["stem"] is not None:
             stems[a] = d["stem"]
     ranked = sorted(stems, key=lambda a: -stems[a])
-    base = parse_eval_csv(os.path.join(args.run_dir, "eval_base_remote.csv"))
+    base = parse_eval_csv(resolve_run_file(args.run_dir,
+                                            "eval_base_remote.csv"))
     missing = [a for a in expected if a not in stems]
     complete = not missing
 

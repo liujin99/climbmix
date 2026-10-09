@@ -75,7 +75,8 @@ except ImportError:
     HAS_MPL = False
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from cp4_report import BENCHMARK_SIZES, binom_se, discover_arms, parse_eval_csv
+from cp4_report import (BENCHMARK_SIZES, binom_se, discover_arms,
+                        parse_eval_csv, resolve_run_file)
 
 CLIMB_COLOR = "#DD8452"
 BASELINE_COLOR = "#4C72B0"
@@ -186,7 +187,7 @@ RECALL_TAGS = [(0.70, "strong"), (0.50, "good"), (0.30, "moderate")]
 
 def load_fleet(run_dir):
     """search_state → {scores, ids, W, iters, K, state} 或 None。"""
-    state = load_json(os.path.join(run_dir, "search_state.json"))
+    state = load_json(resolve_run_file(run_dir, "search_state.json"))
     if not state:
         return None
     configs = state.get("accumulated_configs") or []
@@ -219,7 +220,7 @@ def load_fleet(run_dir):
 def cluster_labels(run_dir, K):
     """macro_info.json (⑬r) / cluster_info_cache.json (legacy) → 标签列表。"""
     for name in ("macro_info.json", "cluster_info_cache.json"):
-        ci = load_json(os.path.join(run_dir, name))
+        ci = load_json(resolve_run_file(run_dir, name))
         if isinstance(ci, list) and ci:
             return [str(c.get("label") or f"C{c.get('cluster_id', i)}")
                     for i, c in enumerate(ci[:K])]
@@ -242,7 +243,8 @@ def resolve_climb_config_id(run_dir, state):
             cid = bm.get("config_id")
             return int(cid) if cid is not None else None
         return None
-    topk = load_json(os.path.join(run_dir, "topk_mixture_candidates.json")) or {}
+    topk = load_json(resolve_run_file(run_dir,
+                                     "topk_mixture_candidates.json")) or {}
     if "best_measured" in str(topk.get("selection_mode") or ""):
         cands = topk.get("candidates") or []
         if cands and cands[0].get("config_id") is not None:
@@ -418,7 +420,7 @@ def chart_arms(out_dir, run_dir, se_stem, task2="gsm8k_cot"):
     arms = discover_arms(run_dir)
     rows = []
     for a in arms:
-        ev = parse_eval_csv(os.path.join(run_dir, f"eval_{a}.csv"))
+        ev = parse_eval_csv(resolve_run_file(run_dir, f"eval_{a}.csv"))
         if not ev or ev.get("stem") is None:
             continue
         rows.append({"arm": a, "stem": float(ev["stem"]),
@@ -836,7 +838,7 @@ def main():
     # B: 臂间主结果 (+ 供 C 用的 rows)
     rows = []
     for a in discover_arms(run_dir):
-        ev = parse_eval_csv(os.path.join(run_dir, f"eval_{a}.csv"))
+        ev = parse_eval_csv(resolve_run_file(run_dir, f"eval_{a}.csv"))
         if ev and ev.get("stem") is not None:
             rows.append({"arm": a, "stem": float(ev["stem"])})
     p = chart_arms(out_dir, run_dir, args.se, args.task2) \

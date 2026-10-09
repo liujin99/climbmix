@@ -464,4 +464,9 @@ mark_completed() {
         "fingerprint_target=$(cat "$new/.fingerprint_target" 2>/dev/null || echo unknown)" \
         "restored_from=$(cat "$new/.restored_from" 2>/dev/null || echo '')"
     echo "  ✓ Run complete — archived as $new"
+    # ⑮ 发布形态 (2026-10-09 裁决: 根层 <10 项): 归档即深整理 —
+    # 根层只留 report.md + 决策图; 失败不阻断 (可手动补)
+    python3 "$CLIMBMIX_DIR/scripts/diagnostics/tidy_result_dir.py" \
+        "$new" --deep --apply \
+        || echo "  (deep tidy 未完成 — 手动: tidy_result_dir.py $new --deep --apply)"
 }
