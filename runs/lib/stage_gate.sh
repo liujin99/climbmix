@@ -480,6 +480,16 @@ mark_completed() {
         "fingerprint_target=$(cat "$new/.fingerprint_target" 2>/dev/null || echo unknown)" \
         "restored_from=$(cat "$new/.restored_from" 2>/dev/null || echo '')"
     echo "  ✓ Run complete — archived as $new"
+    # ⑮ 决策图 (2026-10-10 用户裁决: 六件套自动接入收官链): 收官即出图,
+    # 在深整理前生成 — 5 张决策图落根层 (整理保留集), 判定块留档
+    # logs/report_charts.log; 失败只警告不阻断 (手动补跑同命令)。
+    mkdir -p "$new/logs"
+    if python3 "$CLIMBMIX_DIR/scripts/diagnostics/report_charts.py" "$new" \
+            > "$new/logs/report_charts.log" 2>&1; then
+        tail -n 40 "$new/logs/report_charts.log"
+    else
+        echo "  (report_charts 未完成 — 详见 logs/report_charts.log; 手动: report_charts.py $new)"
+    fi
     # ⑮ 发布形态 (2026-10-09 裁决: 根层 <10 项): 归档即深整理 —
     # 根层只留 report.md + 决策图; 失败不阻断 (可手动补)
     python3 "$CLIMBMIX_DIR/scripts/diagnostics/tidy_result_dir.py" \
