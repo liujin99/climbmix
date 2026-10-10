@@ -172,17 +172,33 @@ _restore_completed() {
     # search fingerprint matches (a completed run's products are exactly what
     # the fingerprints validated). Search-only match: a target mismatch then
     # re-runs only Steps 4-8 through the normal gate below.
+    # 2026-10-09 deep-tidy: 归档 run 的指纹在根层或 detail/ — 双布局读取;
+    # 复活时运行期点文件 (.done_* / .fingerprint_* / 锁) 从 detail/ 归位
+    # 根层 — 生命周期机器 (dispatch 幂等跳过 / _is_complete) 只认根层。
     local d best=""
     for d in "$CLIMBMIX_DIR/result/${EXP_NAME}_"[0-9]*; do
         [ -d "$d" ] || continue
-        [ -f "$d/.fingerprint_search" ] || continue
+        local fp=""
+        if [ -f "$d/.fingerprint_search" ]; then
+            fp=$(cat "$d/.fingerprint_search")
+        elif [ -f "$d/detail/.fingerprint_search" ]; then
+            fp=$(cat "$d/detail/.fingerprint_search")
+        fi
+        [ -n "$fp" ] || continue
         # glob expansion is sorted: later (newer) matches overwrite $best
-        if [ "$(cat "$d/.fingerprint_search")" = "$fp_search" ]; then
+        if [ "$fp" = "$fp_search" ]; then
             best="$d"
         fi
     done
     if [ -n "$best" ]; then
         mv "$best" "$OUTPUT_DIR"
+        if [ -d "$OUTPUT_DIR/detail" ]; then
+            local f
+            for f in "$OUTPUT_DIR"/detail/.[!.]*; do
+                [ -e "$f" ] || continue
+                mv -f "$f" "$OUTPUT_DIR/" 2>/dev/null || true
+            done
+        fi
         echo "${best##*/}" > "$OUTPUT_DIR/.restored_from"
         echo "  RESTORE: completed run ${best##*/} matches the current search"
         echo "    fingerprint — reactivated as ${EXP_NAME}_current (idempotent:"

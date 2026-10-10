@@ -46,6 +46,18 @@ BENCHMARK_SIZES = {
     "gsm8k_cot": 1319,
     "math_cot_500": 500,
 }
+
+# 基准猜测层 (与 src/climbmix/core/types.py BENCHMARK_CHANCE 一致;
+# 独立硬编码副本 — 诊断脚本不依赖包导入)。centered = (raw-chance)/(1-chance)
+# 的方差缩放: 原始二项方差 p(1-p)/N 除以 (1-chance)^2。
+BENCHMARK_CHANCE = {
+    "arc_easy": 0.25,
+    "arc_challenge": 0.25,
+    "mmlu_stem": 0.25,
+    "gpqa_diamond": 0.25,
+    "gsm8k_cot": 0.0,
+    "math_cot_500": 0.0,
+}
 STEM_LABELS = list(BENCHMARK_SIZES)
 
 # prod1 参照 (context footer)
@@ -139,6 +151,34 @@ def binom_se(p, n):
     if p is None or n is None or n <= 0 or not (0.0 <= p <= 1.0):
         return None
     return math.sqrt(max(p * (1.0 - p), 0.0) / n)
+
+
+def stem_se(parsed):
+    """STEM 复合分的评测抽样 SE — 从 per-task 数据实算, 不用经验常数。
+
+    STEM 复合 = 逐任务 centered 准确率的宏平均 (nanochat base_eval
+    "STEM metric" 同义), 故独立误差按方差相加后除 K:
+
+        SE_stem = sqrt( sum_i [ sqrt(p_i(1-p_i)/N_i) / (1-chance_i) ]^2 ) / K
+
+    任一任务缺 raw acc / 题量未知 → None (调用方回退经验值)。
+    假设全量评测 (EVAL_MAX_PER_TASK=-1, launch_env.json 有实录);
+    若 run 用了子采样, 此值为下界 (真实 SE 只会更大)。"""
+    if not parsed:
+        return None
+    var, n = 0.0, 0
+    for name, t in (parsed.get("tasks") or {}).items():
+        p = (t or {}).get("raw")
+        N = BENCHMARK_SIZES.get(name)
+        if p is None or N is None or not (0.0 <= p <= 1.0):
+            return None
+        ch = BENCHMARK_CHANCE.get(name, 0.25)
+        se_i = math.sqrt(max(p * (1.0 - p), 0.0) / N) / (1.0 - ch)
+        var += se_i * se_i
+        n += 1
+    if n == 0:
+        return None
+    return math.sqrt(var) / n
 
 
 def norm_sf(z):

@@ -20,8 +20,10 @@
                  validation_report/cluster_peek/cluster_semantics.md,
                  fleet_weights/, sampled_dataset.parquet, ...)
       report.md 内嵌的 PNG 相对链接同步改写为 detail/ 前缀。
-      隐藏文件 (.done_* / .dispatch_*.lock / .fingerprint_*) 留根 —
-      运行标记, ls 不可见, 不碍观瞻。
+      运行期隐藏点文件 (.done_* / .dispatch_*.lock / .fingerprint_* /
+      .validation_fleet/ / .ipynb_checkpoints/ ...) 也收进 detail/ —
+      归档 run 上它们是惰性生命周期工件; 复活该 run 时 (stage_gate
+      _restore_completed) 自动归位根层, 幂等跳过语义不变。
       事后重跑分析工具 (report_charts / cp4 / final_report / recipe_report)
       经 resolve_run_file 双布局兼容: 根级优先, detail/ 兜底; 新生成的
       图/报告落根层, 重跑本工具可再次归位。
@@ -71,12 +73,15 @@ def _exists_anywhere(rd, name):
 
 
 def plan_deep(rd, claimed):
-    """深度档移动计划: 根层除保留集外的一切 (含目录) -> detail/。
-    claimed = 基础档已认领的条目 (logs/exps) — 不重复挪。"""
+    """深度档移动计划: 根层除保留集外的一切 (含目录与隐藏点文件) ->
+    detail/。claimed = 基础档已认领的条目 — 不重复挪。
+
+    隐藏点文件 (.done_* / .dispatch_*.lock / .fingerprint_* /
+    .validation_fleet/ / .ipynb_checkpoints/ ...) 是运行期生命周期工件,
+    归档 run 上惰性 — 一并收进 detail/; 复活 (stage_gate
+    _restore_completed) 时自动归位根层。"""
     moves = []
     for e in sorted(os.listdir(rd)):
-        if e.startswith("."):
-            continue                       # 运行标记/锁 — 留根
         if e in claimed:
             continue
         if e in ROOT_KEEP_DIRS and os.path.isdir(os.path.join(rd, e)):

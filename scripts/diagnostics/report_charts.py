@@ -76,7 +76,7 @@ except ImportError:
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cp4_report import (BENCHMARK_SIZES, binom_se, discover_arms,
-                        parse_eval_csv, resolve_run_file)
+                        parse_eval_csv, resolve_run_file, stem_se)
 
 CLIMB_COLOR = "#DD8452"
 BASELINE_COLOR = "#4C72B0"
@@ -424,7 +424,8 @@ def chart_arms(out_dir, run_dir, se_stem, task2="gsm8k_cot"):
         if not ev or ev.get("stem") is None:
             continue
         rows.append({"arm": a, "stem": float(ev["stem"]),
-                     "tasks": ev.get("tasks") or {}})
+                     "tasks": ev.get("tasks") or {},
+                     "se": stem_se(ev)})
     if not rows:
         print("[B] 无可解析的 eval_<arm>.csv — 跳过臂间主结果图")
         return None
@@ -473,11 +474,24 @@ def chart_arms(out_dir, run_dir, se_stem, task2="gsm8k_cot"):
             return None
         return (v - v0) / se
 
+    _comp = [f"{r['arm']} {r['se']:.4f}" for r in rows
+             if r.get("se") is not None]
+    if _comp:
+        print(f"[B] STEM 评测噪声 (per-task N 实算): {', '.join(_comp)}"
+              f"  (经验回退 {se_stem})")
+
+    def _se_diff(r):
+        """两臂 STEM 差的 SE: 双侧实算可用则 sqrt(sa^2+sb^2), 否则
+        等方差近似 sqrt(2)*se_stem。"""
+        if ref_row and r.get("se") and ref_row.get("se"):
+            return math.sqrt(r["se"] ** 2 + ref_row["se"] ** 2)
+        return math.sqrt(2) * se_stem
+
     n_t2 = BENCHMARK_SIZES.get(t2) if t2 else None
     if t2 and n_t2 is None:
         print(f"[B] 任务 '{t2}' 不在 BENCHMARK_SIZES — 第二联无二项误差棒/z")
     for r in rows:
-        r["z_stem"] = (_z(r["stem"], ref_row["stem"], math.sqrt(2) * se_stem)
+        r["z_stem"] = (_z(r["stem"], ref_row["stem"], _se_diff(r))
                        if ref_row else None)
         r["g2"] = ((r["tasks"].get(t2) or {}).get("raw")
                    if t2 else None)
@@ -537,7 +551,8 @@ def chart_arms(out_dir, run_dir, se_stem, task2="gsm8k_cot"):
         if se_key:
             errs = [r[se_key] if r[se_key] is not None else 0.0 for r in rows]
         else:
-            errs = [se_stem] * len(rows)
+            errs = [r["se"] if r.get("se") is not None else se_stem
+                    for r in rows]
         ax.errorbar(xs, vals, yerr=errs, fmt="none",
                     ecolor="#333333", capsize=3, linewidth=1)
         for xi, v in zip(xs, vals):
@@ -587,7 +602,8 @@ def collect_pairs(run_dir, fleet, rows):
         proxy = float(fleet["scores"][i])
         if not np.isfinite(proxy):
             continue
-        pairs.append({"arm": r["arm"], "proxy": proxy, "d28": r["stem"]})
+        pairs.append({"arm": r["arm"], "proxy": proxy, "d28": r["stem"],
+                      "se": r.get("se")})
     return pairs
 
 
@@ -607,8 +623,12 @@ def chart_consistency(out_dir, pairs, baseline_stems=None, se=0.006):
                 f"needs n>=3)")
     print(f"[C] {txt}")
     for i, p in enumerate(pairs):
+        se_txt = (f"  SE {p['se']:.4f}" if p.get("se") is not None
+                  else f"  SE ~{se:.4f}*")
         print(f"    {p['arm']:<18} proxy {p['proxy']:+.4f} (#{prank[i]})  "
-              f"d28 {p['d28']:.4f} (#{drank[i]})")
+              f"d28 {p['d28']:.4f} (#{drank[i]}){se_txt}")
+    if any(p.get("se") is None for p in pairs):
+        print(f"    (* = per-task N 不可得, 回退经验值 ±{se})")
 
     if not HAS_MPL:
         print("    注: 基线臂 (uniform/natural/domainfix) 不在搜索舰队, "
@@ -627,7 +647,9 @@ def chart_consistency(out_dir, pairs, baseline_stems=None, se=0.006):
             [pairs[i]["d28"] for i in order],
             "--", color="#888888", lw=1.0, zorder=3)
     ax.errorbar([p["proxy"] for p in pairs], [p["d28"] for p in pairs],
-                yerr=[se] * len(pairs), fmt="none", ecolor="#333333",
+                yerr=[p.get("se") if p.get("se") is not None else se
+                      for p in pairs],
+                fmt="none", ecolor="#333333",
                 capsize=3, linewidth=1, zorder=4)
     ax.scatter([p["proxy"] for p in pairs], [p["d28"] for p in pairs],
                s=90, color=CLIMB_COLOR, edgecolors="white", linewidth=1.2,
@@ -638,7 +660,7 @@ def chart_consistency(out_dir, pairs, baseline_stems=None, se=0.006):
                     textcoords="offset points", xytext=(9, -4),
                     fontsize=8.5)
     ax.set_xlabel("d20 proxy utility (measured, search fleet)")
-    ax.set_ylabel(f"d28 STEM (centered, +/- {se:.3f} eval noise)")
+    ax.set_ylabel("d28 STEM (centered, +/- per-arm eval SE)")
     ax.set_title(txt if len(pairs) >= 3
                  else "proxy->target rank consistency")
     ax.grid(alpha=0.3)
@@ -647,6 +669,8 @@ def chart_consistency(out_dir, pairs, baseline_stems=None, se=0.006):
     fig.text(0.5, 0.005,
              "each point = one climb arm: its measured proxy score (x) vs "
              "its d28 STEM (y); '#p->#d' = its rank in each space.\n"
+             "error bars = per-arm eval sampling SE, computed from per-task "
+             "accuracy + item counts (binomial, macro-average composite);\n"
              "reading: top-1 holds; adjacent swaps inside the error bars "
              "are noise (trust regions, not points - KEY_FINDINGS #3); "
              "all climb arms sit above the gray baseline band.",
@@ -799,7 +823,9 @@ def main():
                     default="maximize",
                     help="proxy 分方向 (prod SNR utility = maximize)")
     ap.add_argument("--se", type=float, default=0.006,
-                    help="STEM 单次评测噪声 (cp4 同约定, 缺省 0.006)")
+                    help="STEM 评测噪声回退值 — 各臂 SE 优先从 per-task "
+                         "acc+题量实算 (cp4_report.stem_se), 实算不可得"
+                         " (缺题量/子采样未知) 才用此经验值")
     ap.add_argument("--task2", default="gsm8k_cot",
                     help="臂间图第二联任务 (缺省 gsm8k_cot; 该任务缺失时"
                          "自动改用跨臂区分度最大的任务)")
@@ -840,7 +866,8 @@ def main():
     for a in discover_arms(run_dir):
         ev = parse_eval_csv(resolve_run_file(run_dir, f"eval_{a}.csv"))
         if ev and ev.get("stem") is not None:
-            rows.append({"arm": a, "stem": float(ev["stem"])})
+            rows.append({"arm": a, "stem": float(ev["stem"]),
+                         "se": stem_se(ev)})
     p = chart_arms(out_dir, run_dir, args.se, args.task2) \
         if rows else None
     if p:
@@ -856,7 +883,8 @@ def main():
                 ev = parse_eval_csv(
                     os.path.join(args.extra_run, f"eval_{a}.csv"))
                 if ev and ev.get("stem") is not None:
-                    rows2.append({"arm": a, "stem": float(ev["stem"])})
+                    rows2.append({"arm": a, "stem": float(ev["stem"]),
+                                  "se": stem_se(ev)})
             extra = collect_pairs(args.extra_run, fleet2, rows2)
             for e in extra:
                 e["arm"] = e["arm"] + "@" + os.path.basename(
