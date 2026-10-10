@@ -186,5 +186,18 @@ done
 
 # ── CP4 报告 (本轮目录内的臂, 对照 random) ──
 auto_cp4_report "$ROUND_DIR"
+
+# ── 决策图 (2026-10-10): B 联 winner vs random = 本轮主结果;
+# A/D/E 为来源实验的搜索语境 (轮目录复制了 search_state/cluster 信息);
+# 无 climb 族臂 → C 自动跳过。判定块留档 logs/report_charts.log。
+# 注意: 轮目录【不做】深整理 — .done 标记必须留在根层供幂等重入
+# (arm_engine/dispatch 的跳过检查只认根层)。──
+mkdir -p "$ROUND_DIR/logs"
+if python3 scripts/diagnostics/report_charts.py "$ROUND_DIR" \
+        > "$ROUND_DIR/logs/report_charts.log" 2>&1; then
+    tail -n 30 "$ROUND_DIR/logs/report_charts.log"
+else
+    echo "  (report_charts 未完成 — 详见 $ROUND_DIR/logs/report_charts.log)"
+fi
 echo "═══ done (FAILED=$FAILED) — 报告: ${ROUND_DIR}/report.md ═══"
 exit $FAILED

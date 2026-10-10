@@ -27,6 +27,27 @@ if [ "$RETRY_FAILED" = "1" ]; then
     EXTRA+=(--retry-failed)
 fi
 
-exec python3 scripts/dispatch_target_arm.py \
+python3 scripts/dispatch_target_arm.py \
     --arm base_eval_check --output-dir "$RUN_DIR" \
     "${EXTRA[@]+"${EXTRA[@]}"}"
+
+# ── 落地后的发布形态维护 (2026-10-10): 锚点 CSV 落在根层 —
+# ① 决策图刷新 (有搜索状态才画; 判定块留档 logs/report_charts.log)
+# ② 已归档的 run 重新深整理, 根层回到 9 项发布形态;
+#    活跃 run 跳过 (未收官, 状态文件必须原位)。
+# 锚点臂无 dispatch 跳过检查 (总是重发), 整理不影响幂等语义。──
+mkdir -p "$RUN_DIR/logs"
+if [ -f "$RUN_DIR/search_state.json" ] || [ -f "$RUN_DIR/detail/search_state.json" ]; then
+    if python3 scripts/diagnostics/report_charts.py "$RUN_DIR" \
+            > "$RUN_DIR/logs/report_charts.log" 2>&1; then
+        tail -n 40 "$RUN_DIR/logs/report_charts.log"
+    else
+        echo "  (report_charts 未完成 — 详见 $RUN_DIR/logs/report_charts.log)"
+    fi
+fi
+if [ -f "$RUN_DIR/archive_meta.json" ] || [ -f "$RUN_DIR/detail/archive_meta.json" ]; then
+    python3 scripts/diagnostics/tidy_result_dir.py "$RUN_DIR" --deep --apply \
+        || echo "  (tidy 未完成 — 手动: tidy_result_dir.py $RUN_DIR --deep --apply)"
+else
+    echo "  (run 未归档 — 跳过深整理)"
+fi
