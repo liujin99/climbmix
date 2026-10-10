@@ -511,7 +511,8 @@ class TargetRunner:
 
         csv_path = self._locate_eval_csv(csv_dir, model_tag, eval_start, eval_end)
         if csv_path is not None:
-            local_copy = os.path.join(run_dir, f"eval_{model_tag}.csv")
+            from climbmix.utils.paths import state_file
+            local_copy = state_file(run_dir, f"eval_{model_tag}.csv")
             shutil.copy2(csv_path, local_copy)
             print(f"  [Target Eval] Using {os.path.basename(csv_path)}")
 

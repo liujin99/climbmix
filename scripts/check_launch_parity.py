@@ -27,6 +27,16 @@ def load(path):
         return None
 
 
+def load_run_file(run_dir, fname):
+    """三代布局 (2026-10-10): state/ → 根级 → detail/。"""
+    for sub in ("state", "", "detail"):
+        p = (os.path.join(run_dir, sub, fname) if sub
+             else os.path.join(run_dir, fname))
+        if os.path.isfile(p):
+            return load(p)
+    return None
+
+
 def main():
     if len(sys.argv) != 3:
         print(__doc__)
@@ -34,8 +44,8 @@ def main():
     src_dir, dst_dir = sys.argv[1], sys.argv[2]
 
     for fname in ("launch_env.json", "remote_config.json"):
-        src = load(os.path.join(src_dir, fname))
-        dst = load(os.path.join(dst_dir, fname))
+        src = load_run_file(src_dir, fname)
+        dst = load_run_file(dst_dir, fname)
         print(f"═══ {fname} ═══")
         if src is None or dst is None:
             missing = []

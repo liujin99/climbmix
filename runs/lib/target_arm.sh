@@ -93,7 +93,8 @@ target_arm_eval() {
     local newest
     newest=$(ls -t "$NANOCHAT_BASE_DIR"/base_eval/mid_model_*.csv 2>/dev/null | head -1)
     if [ -n "$newest" ]; then
-        cp -f "$newest" "$OUTPUT_DIR/eval_${name}.csv"
+        mkdir -p "$OUTPUT_DIR/state"   # 2026-10-10 统一布局
+        cp -f "$newest" "$OUTPUT_DIR/state/eval_${name}.csv"
         echo "  Archived $(basename "$newest") -> eval_${name}.csv"
     else
         echo "  WARNING: no mid_model_*.csv found after eval ${name}"

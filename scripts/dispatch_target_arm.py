@@ -106,19 +106,22 @@ from climbmix.sampling.single_pass import (  # noqa: E402
     check_single_pass, measure_train_tokens, read_meta_key,
     read_total_batch_size)
 from climbmix.utils.io_utils import shard_content_key  # noqa: E402
+from climbmix.utils.paths import (  # noqa: E402
+    stage1_pair_anywhere as _stage1_pair_anywhere, state_file)
 
 
 # ── helpers ──────────────────────────────────────────────────────────────
 
 def _run_file(output_dir: str, name: str) -> str:
-    """Run-dir 文件, 根级优先, detail/ 兜底 (2026-10-09 深整理布局:
-    归档 run 的状态文件在 detail/ — extend 流程在归档 run 上作业,
-    如 run_extend_eval 补发锚点)。仅用于【读】; 写入仍走根层。"""
-    p = os.path.join(output_dir, name)
-    if os.path.isfile(p):
-        return p
-    d = os.path.join(output_dir, "detail", name)
-    return d if os.path.isfile(d) else p
+    """Run-dir 状态文件【读】路径: state/ → 根层 → detail/ 三代回退
+    (2026-10-10 统一布局; 根层 = 2026-10 前的平铺归档, detail/ =
+    2026-10-09 深整理一代)。写入一律 state_file()。"""
+    for sub in ("state", "", "detail"):
+        p = os.path.join(output_dir, sub, name) if sub else \
+            os.path.join(output_dir, name)
+        if os.path.isfile(p):
+            return p
+    return os.path.join(output_dir, "state", name)
 
 
 def load_launch_env(output_dir: str) -> Dict[str, str]:
@@ -891,7 +894,7 @@ def main() -> int:
         if os.path.isfile(os.path.join(output_dir, f".done_mid_train_{arm}")):
             print(f"  [{arm}] .done_mid_train_{arm} already present — nothing to do")
             return 0
-        audit_path = os.path.join(output_dir, f"target_arm_{arm}.json")
+        audit_path = _run_file(output_dir, f"target_arm_{arm}.json")
         if (os.path.isfile(audit_path) and not args.retry_failed):
             try:
                 prior = json.load(open(audit_path))
@@ -906,11 +909,14 @@ def main() -> int:
     # ── data preparation (random arm only; climb expects Steps 4-5 done) ──
     if arm == "random":
         # ⑬r naming: macro_labels.npz with legacy cluster_cache.npz fallback
-        from climbmix.utils.io_utils import stage1_pair
-        cluster_cache, _ = stage1_pair(output_dir)
-        balanced_profile = os.path.join(output_dir, "balanced_profile.json")
+        cluster_cache = ""
+        balanced_profile = ""
         deadline = time.time() + args.wait_cluster_min * 60.0
-        while not (os.path.isfile(cluster_cache) and os.path.isfile(balanced_profile)):
+        while True:
+            cluster_cache, _ = _stage1_pair_anywhere(output_dir)
+            balanced_profile = _run_file(output_dir, "balanced_profile.json")
+            if os.path.isfile(cluster_cache) and os.path.isfile(balanced_profile):
+                break
             if time.time() > deadline:
                 raise SystemExit(
                     f"✗ [random] cluster cache / balanced profile not found after "
@@ -1295,9 +1301,9 @@ def main() -> int:
         csv_uri = f"{result_uri.rstrip('/')}/eval_{tag}.csv"
         if obs.stat(csv_uri):
             if base_check:
-                csv_dst = os.path.join(output_dir, "eval_base_remote.csv")
+                csv_dst = state_file(output_dir, "eval_base_remote.csv")
             else:
-                csv_dst = os.path.join(output_dir, f"eval_{arm}.csv")
+                csv_dst = state_file(output_dir, f"eval_{arm}.csv")
             obs.download_file(csv_uri, csv_dst)
             csv_landed = True
             print(f"  [{arm}] landed {os.path.basename(csv_dst)}")
@@ -1343,10 +1349,10 @@ def main() -> int:
         "d28_asset_uri": d28_uri,
         "asset_mounts": mounts,
         "node_info": grep_node_info(console),
-        "csv": (os.path.join(output_dir, "eval_base_remote.csv") if base_check
-                else os.path.join(output_dir, f"eval_{arm}.csv")),
+        "csv": (state_file(output_dir, "eval_base_remote.csv") if base_check
+                else state_file(output_dir, f"eval_{arm}.csv")),
     }
-    write_audit(os.path.join(output_dir, f"target_arm_{arm}.json"), audit)
+    write_audit(state_file(output_dir, f"target_arm_{arm}.json"), audit)
 
     if not ok:
         print(f"✗ [{arm}] remote arm did not complete "

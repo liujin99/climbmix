@@ -171,7 +171,9 @@ def main() -> int:
               f"score {float(scores[i]):+.4f}")
 
     # ── target safety ──
-    target_state = os.path.join(args.target_dir, "search_state.json")
+    # 2026-10-10 统一布局: 种子写进 state/
+    target_state = os.path.join(args.target_dir, "state",
+                                 "search_state.json")
     if os.path.isfile(target_state) and not args.force:
         raise SystemExit(
             f"✗ {target_state} already exists — refusing to clobber "
@@ -179,7 +181,9 @@ def main() -> int:
     if os.path.isdir(args.target_dir):
         others = [f for f in (".fingerprint_search",
                               "search.log", "logs/search.log",
-                              "optimal_mixture_weights.json")
+                              "state/search_state.json",
+                              "optimal_mixture_weights.json",
+                              "state/optimal_mixture_weights.json")
                   if os.path.exists(os.path.join(args.target_dir, f))]
         if others:
             print(f"⚠ target dir already holds run products ({', '.join(others)}) "
@@ -230,7 +234,7 @@ def main() -> int:
               f"({n} points as iteration 1, K={k_expected})")
         return 0
 
-    os.makedirs(args.target_dir, exist_ok=True)
+    os.makedirs(os.path.dirname(target_state), exist_ok=True)
     atomic_write_json(target_state, seed, indent=2)
     print(f"\n✓ seed written → {target_state}")
     print(f"  iteration 1 = {n} history points; the new run starts at "

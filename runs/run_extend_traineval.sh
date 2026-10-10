@@ -58,10 +58,11 @@ CLIMBMIX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$CLIMBMIX_DIR"
 source "$CLIMBMIX_DIR/runs/lib/auto_report.sh"
 
-# ── 深整理布局 (2026-10-10): 归档 run 的状态文件在 detail/ — 根级优先,
-#    detail/ 兜底 (SRC_RUN_DIR 常指向已收官深整理的归档目录) ──
+# ── 三代布局 (2026-10-10 统一布局): state/ → 根级 → detail/
+#    (SRC_RUN_DIR 常指向已收官的归档目录, 三代形态都可能) ──
 sfile() {
-    if [ -f "$SRC_RUN_DIR/$1" ]; then printf '%s\n' "$SRC_RUN_DIR/$1"
+    if [ -f "$SRC_RUN_DIR/state/$1" ]; then printf '%s\n' "$SRC_RUN_DIR/state/$1"
+    elif [ -f "$SRC_RUN_DIR/$1" ]; then printf '%s\n' "$SRC_RUN_DIR/$1"
     else printf '%s\n' "$SRC_RUN_DIR/detail/$1"; fi
 }
 

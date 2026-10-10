@@ -79,11 +79,13 @@ try:
 except Exception:
     kv.setdefault("git_head", "unknown")
 kv["archived_at"] = datetime.now().isoformat(timespec="seconds")
-os.makedirs(d, exist_ok=True)
-tmp = os.path.join(d, "archive_meta.json.tmp")
+# 2026-10-10 state/ 布局: 归档元数据入 state/
+sd = os.path.join(d, "state")
+os.makedirs(sd, exist_ok=True)
+tmp = os.path.join(sd, "archive_meta.json.tmp")
 with open(tmp, "w") as f:
     json.dump(kv, f, indent=2, sort_keys=True)
-os.replace(tmp, os.path.join(d, "archive_meta.json"))
+os.replace(tmp, os.path.join(sd, "archive_meta.json"))
 PYEOF
 }
 
@@ -199,10 +201,52 @@ _restore_completed() {
                 mv -f "$f" "$OUTPUT_DIR/" 2>/dev/null || true
             done
         fi
+        _upgrade_layout "$OUTPUT_DIR"
         echo "${best##*/}" > "$OUTPUT_DIR/.restored_from"
         echo "  RESTORE: completed run ${best##*/} matches the current search"
         echo "    fingerprint — reactivated as ${EXP_NAME}_current (idempotent:"
         echo "    .done markers skip; target fingerprint checked next)"
+    fi
+}
+
+_upgrade_layout() {
+    # 2026-10-10 统一布局: 复活的旧归档升级到 state/ 形态 —
+    # ① detail/ (2026-10-09 深整理一代) 内容摊平进 state/
+    # ② 根级平铺的旧状态文件归位 state/ (目标不存在才挪, 绝不覆盖)
+    # 升级后与新 run 同构, 全部机器走单一路径。
+    local d="$1" f
+    mkdir -p "$d/state"
+    if [ -d "$d/detail" ]; then
+        for f in "$d"/detail/* "$d"/detail/.[!.]*; do
+            [ -e "$f" ] || continue
+            case "${f##*/}" in .|..) continue ;; esac
+            if [ "${f##*/}" = .* ]; then
+                [ -e "$d/${f##*/}" ] || mv "$f" "$d/" 2>/dev/null || true
+            else
+                [ -e "$d/state/${f##*/}" ] || mv "$f" "$d/state/" 2>/dev/null || true
+            fi
+        done
+        rmdir "$d/detail" 2>/dev/null || true
+    fi
+    for f in search_state.json topk_mixture_candidates.json \
+             optimal_mixture_weights.json pipeline_summary.json \
+             sampled_dataset.parquet cluster_info.json \
+             cluster_info_cache.json macro_info.json cluster_cache.npz \
+             macro_labels.npz balanced_profile.json prune_profile.json \
+             launch_env.json remote_config.json expected_arms.txt \
+             archive_meta.json; do
+        if [ -e "$d/$f" ] && [ ! -e "$d/state/$f" ]; then
+            mv "$d/$f" "$d/state/"
+        fi
+    done
+    for f in "$d"/eval_*.csv "$d"/target_arm_*.json; do
+        [ -e "$f" ] || continue
+        if [ ! -e "$d/state/${f##*/}" ]; then
+            mv "$f" "$d/state/"
+        fi
+    done
+    if [ -d "$d/fleet_weights" ] && [ ! -d "$d/state/fleet_weights" ]; then
+        mv "$d/fleet_weights" "$d/state/"
     fi
 }
 
@@ -292,13 +336,18 @@ _archive_target_products() {
     # ⑬t: 臂族产物按家族归档 (glob 覆盖 top-k/natural/domainfix 扩展臂 +
     # uniform 更名 + legacy random) — 旧预算的 .done 标记若留在新目录会
     # 谎报"已备/已评", 静默复用错配数据。
+    # 2026-10-10 state/ 布局: 臂产物在 state/, 过程日志在 logs/ (目标臂
+    # 期日志随族归档, search.log 留在活跃 logs/)。
     for item in "$OUTPUT_DIR"/.done_fleet \
                 "$OUTPUT_DIR"/.dispatch_*.lock \
                 "$OUTPUT_DIR"/*_shards "$OUTPUT_DIR"/*_mixed \
-                "$OUTPUT_DIR"/mid_train_*.log \
-                "$OUTPUT_DIR"/eval_*.log "$OUTPUT_DIR"/eval_*.csv \
-                "$OUTPUT_DIR"/target_arm_*.json \
-                "$OUTPUT_DIR"/dispatch_*.log \
+                "$OUTPUT_DIR"/logs/dispatch_*.log \
+                "$OUTPUT_DIR"/logs/eval_*.log \
+                "$OUTPUT_DIR"/logs/mid_train_*.log \
+                "$OUTPUT_DIR"/state/eval_*.csv \
+                "$OUTPUT_DIR"/state/target_arm_*.json \
+                "$OUTPUT_DIR"/state/fleet_weights \
+                "$OUTPUT_DIR"/state/expected_arms.txt \
                 "$OUTPUT_DIR"/.done_mid_train_* \
                 "$OUTPUT_DIR"/.done_eval_* \
                 "$OUTPUT_DIR"/.validation_fleet; do
@@ -481,8 +530,8 @@ mark_completed() {
         "restored_from=$(cat "$new/.restored_from" 2>/dev/null || echo '')"
     echo "  ✓ Run complete — archived as $new"
     # ⑮ 决策图 (2026-10-10 用户裁决: 六件套自动接入收官链): 收官即出图,
-    # 在深整理前生成 — 5 张决策图落根层 (整理保留集), 判定块留档
-    # logs/report_charts.log; 失败只警告不阻断 (手动补跑同命令)。
+    # 5 张决策图落根层, 判定块留档 logs/report_charts.log。
+    # 2026-10-10 统一布局后根层出生即发布形态 — 无需任何收尾搬运。
     mkdir -p "$new/logs"
     if python3 "$CLIMBMIX_DIR/scripts/diagnostics/report_charts.py" "$new" \
             > "$new/logs/report_charts.log" 2>&1; then
@@ -490,9 +539,4 @@ mark_completed() {
     else
         echo "  (report_charts 未完成 — 详见 logs/report_charts.log; 手动: report_charts.py $new)"
     fi
-    # ⑮ 发布形态 (2026-10-09 裁决: 根层 <10 项): 归档即深整理 —
-    # 根层只留 report.md + 决策图; 失败不阻断 (可手动补)
-    python3 "$CLIMBMIX_DIR/scripts/diagnostics/tidy_result_dir.py" \
-        "$new" --deep --apply \
-        || echo "  (deep tidy 未完成 — 手动: tidy_result_dir.py $new --deep --apply)"
 }

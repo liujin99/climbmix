@@ -61,12 +61,13 @@ def main():
     run_dir = os.path.abspath(args.run_dir)
 
     def _rf(name):
-        """双布局 (2026-10-09 深整理): 根级优先, detail/ 兜底。"""
-        p = os.path.join(run_dir, name)
-        if os.path.isfile(p):
-            return p
-        d = os.path.join(run_dir, "detail", name)
-        return d if os.path.isfile(d) else p
+        """三代布局 (2026-10-10): state/ → 根级 → detail/。"""
+        for sub in ("state", "", "detail"):
+            p = (os.path.join(run_dir, sub, name) if sub
+                 else os.path.join(run_dir, name))
+            if os.path.isfile(p):
+                return p
+        return os.path.join(run_dir, "state", name)
 
     rc_path = _rf("remote_config.json")
     le_path = _rf("launch_env.json")

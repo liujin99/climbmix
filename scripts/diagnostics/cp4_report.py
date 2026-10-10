@@ -110,24 +110,24 @@ def parse_eval_csv(path):
 
 
 def resolve_run_file(run_dir, name):
-    """双布局 (2026-10-09 deep-tidy 裁决): 根级优先, detail/ 兜底。
-
-    深整理后的 run 根只留 report.md + 决策图 + logs/ + exps/ + detail/,
-    状态/CSV/审计都在 detail/ — 事后分析工具经此函数兼容两种布局。
-    返回的路径可能不存在 (调用方自行判存), 只是位置决策。"""
-    p = os.path.join(run_dir, name)
-    if os.path.exists(p):
-        return p
-    d = os.path.join(run_dir, "detail", name)
-    return d if os.path.exists(d) else p
+    """状态文件【读】路径: state/ → 根层 → detail/ 三代回退
+    (2026-10-10 统一布局; 根层 = 2026-10 前的平铺归档, detail/ =
+    2026-10-09 深整理一代)。诊断工具一律经此函数; 返回路径可能不存在
+    (调用方自行判存), 只是位置决策。"""
+    for sub in ("state", "", "detail"):
+        p = os.path.join(run_dir, sub, name) if sub else os.path.join(run_dir, name)
+        if os.path.exists(p):
+            return p
+    return os.path.join(run_dir, "state", name)
 
 
 def discover_arms(run_dir):
     """eval_<arm>.csv 全发现 (锚点 eval_base_remote.csv 除外) → 臂名列表.
-    双布局: 根级 + detail/ (deep-tidy 后 CSV 在 detail/)。"""
+    三代布局: state/ + 根级 + detail/。"""
     arms = set()
     names = []
-    for d in (run_dir, os.path.join(run_dir, "detail")):
+    for d in (os.path.join(run_dir, "state"), run_dir,
+              os.path.join(run_dir, "detail")):
         try:
             names += os.listdir(d)
         except OSError:

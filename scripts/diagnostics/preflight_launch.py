@@ -105,7 +105,9 @@ def main():
     rc_file = None
     rc = None
     if args.run_dir:
-        rc_file = os.path.join(args.run_dir, "remote_config.json")
+        # 三代布局: state/ → 根级 → detail/
+        from cp4_report import resolve_run_file
+        rc_file = resolve_run_file(args.run_dir, "remote_config.json")
         if os.path.isfile(rc_file):
             try:
                 from climbmix.remote.remote_executor import RemoteConfig
@@ -267,7 +269,8 @@ def main():
         # 双布局 (2026-10-09 deep-tidy): 根级 + detail/
         import re as _re
         arm_files = []
-        for _d in (args.run_dir, os.path.join(args.run_dir, "detail")):
+        for _d in (os.path.join(args.run_dir, "state"), args.run_dir,
+                   os.path.join(args.run_dir, "detail")):
             try:
                 names = os.listdir(_d)
             except OSError:

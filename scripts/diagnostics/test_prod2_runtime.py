@@ -165,8 +165,9 @@ with tempfile.TemporaryDirectory(prefix="prod2rt_") as td:
     check("parity: eval argv token-identical (shell == python)",
           shell_eval == py_eval,
           f"shell={shell_eval}" if shell_eval != py_eval else "")
-    check("parity: eval CSV archived to eval_<name>.csv",
-          os.path.isfile(os.path.join(out_dir, f"eval_{NAME}.csv")))
+    check("parity: eval CSV archived to state/eval_<name>.csv",
+          os.path.isfile(os.path.join(out_dir, "state",
+                                      f"eval_{NAME}.csv")))
 
     # base-check variant (model_type=base)
     py_base = build_target_eval_cmd(

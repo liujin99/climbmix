@@ -145,7 +145,8 @@ def main():
               f"    Run from the repo root, or: "
               f"source /tmp/prod2_remote.env")
         return 1
-    rc_path = os.path.join(args.run_dir, "remote_config.json")
+    from cp4_report import resolve_run_file   # 三代布局 (2026-10-10)
+    rc_path = resolve_run_file(args.run_dir, "remote_config.json")
     if not os.path.isfile(rc_path):
         print(f"[!] {rc_path} not found — wrong run dir?")
         return 1

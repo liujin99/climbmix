@@ -55,8 +55,10 @@ for _p in ("src", "climbmix-ma"):
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from dispatch_target_arm import (  # noqa: E402
-    _run_file, load_launch_env, mix_subprocess_env, run_logged)
+    _run_file, _stage1_pair_anywhere, load_launch_env,
+    mix_subprocess_env, run_logged)
 from climbmix.utils.io_utils import stage1_pair  # noqa: E402
+from climbmix.utils.paths import state_file  # noqa: E402
 
 FLEET_TOKENS = ("climb", "topk", "uniform", "natural", "domainfix", "base")
 DEFAULT_ARMS = "climb,topk,uniform,natural,domainfix,base"
@@ -73,7 +75,7 @@ def load_topk_candidates(output_dir: str):
     """topk_mixture_candidates.json → [{"arm": "climb-cfgN", "weights":
     ...}], 候选序 (分数降序)。文件缺失/为空 = fail-loud (搜索收官必有:
     D19 A3 每条终选路径都导出)。"""
-    path = os.path.join(output_dir, "topk_mixture_candidates.json")
+    path = _run_file(output_dir, "topk_mixture_candidates.json")
     if not os.path.isfile(path):
         raise SystemExit(
             f"✗ {path} not found — the search stage writes it at close "
@@ -160,7 +162,7 @@ def dedupe_final_duplicate(output_dir: str, plans):
     optimal_mixture_weights.json 相同的 topk 臂被剔除 (大声注明)。
     要强制跑复本: 手动 dispatch_target_arm --arm <cfg> 并自管
     expected_arms.txt。"""
-    opt_path = os.path.join(output_dir, "optimal_mixture_weights.json")
+    opt_path = _run_file(output_dir, "optimal_mixture_weights.json")
     if not os.path.isfile(opt_path):
         return plans
     try:
@@ -193,15 +195,15 @@ def dedupe_final_duplicate(output_dir: str, plans):
 
 def arm_landed(output_dir: str, arm: str) -> bool:
     if arm == "base_eval_check":
-        return os.path.isfile(os.path.join(output_dir,
-                                           "eval_base_remote.csv"))
+        return os.path.isfile(_run_file(output_dir,
+                                        "eval_base_remote.csv"))
     return os.path.isfile(os.path.join(output_dir, f".done_eval_{arm}"))
 
 
 def check_balanced_profile(output_dir: str, launch_env: dict) -> None:
     """任何簇键控备料前的 run 级结构门 (原 --arm random 生命周期同款:
     K_final == K_ENHANCED + max_share <= 15% — 基线与赢家必须同簇空间)。"""
-    path = os.path.join(output_dir, "balanced_profile.json")
+    path = _run_file(output_dir, "balanced_profile.json")
     try:
         with open(path) as f:
             prof = json.load(f)
@@ -259,14 +261,14 @@ def build_plan(arms, output_dir: str, launch_env: dict):
                   "--num-workers", num_npu, "--num-npu", num_npu])
 
     def weights_path(arm):
-        return os.path.join(output_dir, "fleet_weights", f"{arm}.json")
+        return state_file(output_dir, f"fleet_weights/{arm}.json")
 
     needs_cluster = [a for a in arms
                      if a not in ("climb", "base_eval_check")
                      and not arm_landed(output_dir, a)]
     stage1_npz = ""
     if needs_cluster:
-        stage1_npz, _info = stage1_pair(output_dir)
+        stage1_npz, _info = _stage1_pair_anywhere(output_dir)
         if not os.path.isfile(stage1_npz):
             raise SystemExit(
                 f"✗ stage-1 cluster cache not found (looked for "
@@ -291,7 +293,7 @@ def build_plan(arms, output_dir: str, launch_env: dict):
             plans.append(plan)      # landed or data already prepped
             continue
         if arm == "climb":
-            sampled = os.path.join(output_dir, "sampled_dataset.parquet")
+            sampled = _run_file(output_dir, "sampled_dataset.parquet")
             if not os.path.isfile(sampled):
                 raise SystemExit(
                     f"✗ {sampled} not found — the climb arm consumes the "
@@ -310,8 +312,8 @@ def build_plan(arms, output_dir: str, launch_env: dict):
                     plan["weights_payload"] = topk[arm]["weights"]
                     wf = weights_path(arm)
                 elif arm == "natural":
-                    wf = os.path.join(output_dir, "fleet_weights",
-                                      "natural_weights.json")
+                    wf = state_file(output_dir,
+                                    "fleet_weights/natural_weights.json")
                     steps.append((
                         [sys.executable,
                          os.path.join(climbmix_dir, "scripts",
@@ -339,7 +341,7 @@ def build_plan(arms, output_dir: str, launch_env: dict):
 
 def write_weights(output_dir: str, arm: str, payload) -> str:
     """备料期落盘权重文件 (plan 只带 payload — dry-run 零副作用)。"""
-    d = os.path.join(output_dir, "fleet_weights")
+    d = state_file(output_dir, "fleet_weights")
     os.makedirs(d, exist_ok=True)
     path = os.path.join(d, f"{arm}.json")
     with open(path, "w") as f:
@@ -447,7 +449,7 @@ def salvage_local_eval(plan: dict, output_dir: str, launch_env: dict,
           f"training landed but eval did not", flush=True)
     r = subprocess.run(["bash", "-c", script], env=env)
     if r.returncode == 0 and os.path.isfile(
-            os.path.join(output_dir, f"eval_{arm}.csv")):
+            _run_file(output_dir, f"eval_{arm}.csv")):
         open(os.path.join(output_dir, f".done_eval_{arm}"), "w").close()
         print(f"  [fleet] salvage: {arm} local eval landed", flush=True)
         return True

@@ -210,7 +210,7 @@ def _inject_tests(tmp):
                        "--target-dir", target, "--pool", pool])
     check("inject: merged sources -> exit 0", rc == 0, f"rc={rc}")
 
-    seed_path = os.path.join(target, "search_state.json")
+    seed_path = os.path.join(target, "state", "search_state.json")
     seed = json.load(open(seed_path))
     # 12 + 6 - 1 dup - 1 unmeasured = 16
     check("inject: 16 points kept (1 dup + 1 unmeasured dropped)",
@@ -250,7 +250,8 @@ def _inject_tests(tmp):
     t2 = os.path.join(tmp, "dryrun_target")
     rc = run_main(ih, ["--source", src1, "--target-dir", t2, "--dry-run"])
     check("inject: dry-run writes nothing",
-          rc == 0 and not os.path.exists(os.path.join(t2, "search_state.json")))
+          rc == 0 and not os.path.exists(
+              os.path.join(t2, "state", "search_state.json")))
 
     # cross-source K mismatch
     src3 = os.path.join(tmp, "runC", "search_state.json")
@@ -273,7 +274,7 @@ def _warmstart_tests(tmp):
     target = os.path.join(tmp, "warm_current")
     rc = run_main(ih, ["--source", src, "--target-dir", target])
     check("warmstart: seed injected", rc == 0)
-    seed_path = os.path.join(target, "search_state.json")
+    seed_path = os.path.join(target, "state", "search_state.json")
     n_hist = len(json.load(open(seed_path))["accumulated_configs"])
     n_new = 3
 

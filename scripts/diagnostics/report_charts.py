@@ -881,7 +881,7 @@ def main():
             rows2 = []
             for a in discover_arms(args.extra_run):
                 ev = parse_eval_csv(
-                    os.path.join(args.extra_run, f"eval_{a}.csv"))
+                    resolve_run_file(args.extra_run, f"eval_{a}.csv"))
                 if ev and ev.get("stem") is not None:
                     rows2.append({"arm": a, "stem": float(ev["stem"]),
                                   "se": stem_se(ev)})

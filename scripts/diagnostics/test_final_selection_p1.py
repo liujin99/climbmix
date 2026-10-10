@@ -320,7 +320,7 @@ with tempfile.TemporaryDirectory() as td:
                                      "claim": claim, "topk": topk_export},
                        "_final_predictor": None},
     )
-    topk_path = os.path.join(td, "topk_mixture_candidates.json")
+    topk_path = os.path.join(td, "state", "topk_mixture_candidates.json")
     check("pipeline: topk_mixture_candidates.json written", os.path.exists(topk_path))
     payload = json.load(open(topk_path))
     check("pipeline: weights keyed by cluster label",
@@ -328,7 +328,8 @@ with tempfile.TemporaryDirectory() as td:
           and payload["selection_mode"] == "best_measured_no_claim"
           and payload["k_requested"] == 3)
     check("pipeline: optimal weights still written",
-          os.path.exists(os.path.join(td, "optimal_mixture_weights.json")))
+          os.path.exists(os.path.join(td, "state",
+                                "optimal_mixture_weights.json")))
 
 print()
 if _failures:

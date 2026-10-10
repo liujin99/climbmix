@@ -1,32 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""tidy_result_dir.py — 收官后的结果目录整理 (过程文件收进子目录)。
+"""tidy_result_dir.py — 【legacy 工具】2026-10-09 深整理一代的归档整理。
 
-背景 (prod5_20260929_201108 实测): 结果目录根层 ~230 项, 其中
-  - 115 个 exp_NNNN/ (d20 代理训练的 per-config 工件)
-  - ~107 个 *.log (eval_node*/mid_train_node*/eval_*/dispatch_*/search.log)
-  - ~45 个 结果+状态 (eval_*.csv, search_state.json, PNG/MD, ...)
-人看的和脚本读的全混在一起。
+2026-10-10 起写入端统一 state/ 布局 (utils/paths.py), 新 run 的根层
+出生即发布形态 — 不再需要本工具。保留它只为服务存量归档:
+  - 2026-10 前的平铺归档 (prod1-4): --deep --apply 可整理成 9 项形态
+    (该代形态的根层保留集与本工具一致)
+  - 读取端 (cp4_report.resolve_run_file 三代链) 对新旧形态通吃,
+    整理与否不影响任何工具
 
-两档整理:
-
-  基础档 (缺省): 根层 ~45 项
-      logs/ <- 根目录全部 *.log
-      exps/ <- exp_NNNN/ 搜索工件目录
-
-  深度档 (--deep, 2026-10-09 用户裁决 "根层 <10 项"): 发布形态
-      根层   = report.md + 5 张决策图 + logs/ + exps/ + detail/  (≤9 项)
-      detail/ <- 其余全部 (状态 JSON, eval CSV, 臂审计, 旧 5 图,
-                 validation_report/cluster_peek/cluster_semantics.md,
-                 fleet_weights/, sampled_dataset.parquet, ...)
-      report.md 内嵌的 PNG 相对链接同步改写为 detail/ 前缀。
-      运行期隐藏点文件 (.done_* / .dispatch_*.lock / .fingerprint_* /
-      .validation_fleet/ / .ipynb_checkpoints/ ...) 也收进 detail/ —
-      归档 run 上它们是惰性生命周期工件; 复活该 run 时 (stage_gate
-      _restore_completed) 自动归位根层, 幂等跳过语义不变。
-      事后重跑分析工具 (report_charts / cp4 / final_report / recipe_report)
-      经 resolve_run_file 双布局兼容: 根级优先, detail/ 兜底; 新生成的
-      图/报告落根层, 重跑本工具可再次归位。
+整理规则 (只对已归档 run, archive_meta.json 守卫):
+    logs/ <- 根目录全部 *.log
+    exps/ <- exp_NNNN/ 搜索工件目录
+    detail/ <- 其余全部 (深度档 --deep; report.md 链接同步改写)
 
 为什么安全:
   - 分析/报告脚本经双布局解析读状态文件 (cp4_report.resolve_run_file);

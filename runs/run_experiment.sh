@@ -139,7 +139,7 @@ else
 fi
 
 # ── 情形判定 (状态驱动) ──
-if [ -f "$OUTPUT_DIR/search_state.json" ]; then
+if [ -f "$OUTPUT_DIR/state/search_state.json" ] || [ -f "$OUTPUT_DIR/search_state.json" ]; then
     echo "  → 检测到已有 search_state — 续跑 (三级断点, 不从头来)"
 else
     echo "  → 从零开始"
@@ -523,7 +523,8 @@ export EXP_NAME DATA_DIR CLIMBMIX_DIR NANOCHAT_DIR NANOCHAT_BASE_DIR \
        REMOTE_D28_ASSET_URI NANOCHAT_DTYPE OUTPUT_DIR \
        TARGET_ARM_NODES TARGET_LOAD_OPTIMIZER FLEET_ARMS \
        CONFIGS_PER_ITER PROXY_TARGET_TOKENS
-python3 - "$OUTPUT_DIR/launch_env.json" "$TARGET_BASE_CKPT" <<'PYEOF'
+mkdir -p "$OUTPUT_DIR/state"   # 2026-10-10 统一布局: 机器层状态入 state/
+python3 - "$OUTPUT_DIR/state/launch_env.json" "$TARGET_BASE_CKPT" <<'PYEOF'
 import json, os, sys
 out, target_base_ckpt = sys.argv[1], sys.argv[2]
 keys = ["EXP_NAME", "DATA_DIR", "CLIMBMIX_DIR", "NANOCHAT_DIR",
@@ -553,7 +554,8 @@ if [ "$REMOTE_ENABLED" = "1" ]; then
         *) echo "✗ REMOTE_OBS_PREFIX must start with obs:// (got: ${REMOTE_OBS_PREFIX})"; exit 1 ;;
     esac
     mkdir -p "$OUTPUT_DIR"
-    REMOTE_CONFIG_PATH="$OUTPUT_DIR/remote_config.json"
+    mkdir -p "$OUTPUT_DIR/state"
+    REMOTE_CONFIG_PATH="$OUTPUT_DIR/state/remote_config.json"
     REMOTE_CONFIG_ARG="--remote-config $REMOTE_CONFIG_PATH"
     # Export for the config-gen heredoc below (namespaced, harmless).
     export REMOTE_OBS_PREFIX REMOTE_BACKEND REMOTE_BACKEND_MODULE \
@@ -650,7 +652,7 @@ done
 #  (embedding 分片级续跑 + 聚类缓存 + search_state 迭代级续跑 +
 #   exp_*/meta.json 实验级复用 — 均自动)
 # ═══════════════════════════════════════════════════════════════════════
-if [ -f "$OUTPUT_DIR/sampled_dataset.parquet" ]; then
+if [ -f "$OUTPUT_DIR/state/sampled_dataset.parquet" ] || [ -f "$OUTPUT_DIR/sampled_dataset.parquet" ]; then
     echo -e "\n===== Step 1-3: Proxy Search — already complete (sampled_dataset.parquet), skip =====\n"
 else
     echo -e "\n===== Step 1-3: Proxy Search (d${PROXY_DEPTH}) =====\n"
@@ -694,7 +696,7 @@ else
         --device-type npu --npu-devices "$NUM_NPU" --npu-per-exp "$NPU_PER_EXP" \
         --output-dir "$OUTPUT_DIR" \
         --exp-name "$EXP_NAME" \
-        --cluster-cache-dir "$OUTPUT_DIR" \
+        --cluster-cache-dir "$OUTPUT_DIR/state" \
         --embedding-cache-dir "$EMBEDDING_CACHE_DIR" \
         --resume-search \
         --schema "$CLIMBMIX_DIR/config/schema_stem.yaml" \
@@ -702,7 +704,7 @@ else
         --skip-target 2>&1 | tee "$OUTPUT_DIR/logs/search.log"
 fi
 
-[ ! -f "$OUTPUT_DIR/sampled_dataset.parquet" ] && { echo "✗ No sampled_dataset.parquet"; exit 1; }
+[ ! -f "$OUTPUT_DIR/state/sampled_dataset.parquet" ] && [ ! -f "$OUTPUT_DIR/sampled_dataset.parquet" ] && { echo "✗ No sampled_dataset.parquet"; exit 1; }
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Step 4: Target-Arm Fleet (d${TARGET_DEPTH} — ⑬t 全自动臂族)

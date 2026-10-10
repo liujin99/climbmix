@@ -35,6 +35,7 @@ from climbmix.core.cluster_merge import validate_cluster_structure
 from climbmix.core.discovery import get_discovery
 from climbmix.core.quality_filter import get_filter
 from climbmix.core.iterative_bootstrapper import IterativeBootstrapper
+from climbmix.utils.paths import state_file
 from climbmix.sampling.data_selector import select_data_by_mixture, compute_mixture_dataset_stats
 from climbmix.utils.token_estimate import estimate_tokens_from_text
 from climbmix.utils.io_utils import (
@@ -242,7 +243,14 @@ class CLIMBPipeline:
         _t = time.time()
         print("\n[Stage 3] Running iterative bootstrapping search")
 
-        state_path = os.path.join(output_dir, "search_state.json") if resume_search else None
+        state_path = None
+        if resume_search:
+            # 2026-10-10 state/ 布局; 老 run (根级, 含复活的旧归档) 兜底续读
+            state_path = state_file(output_dir, "search_state.json")
+            if not os.path.isfile(state_path):
+                legacy = os.path.join(output_dir, "search_state.json")
+                if os.path.isfile(legacy):
+                    state_path = legacy
         bootstrapper = IterativeBootstrapper(
             self.config, cluster_token_counts, filtered_labels,
             state_path=state_path,
@@ -648,7 +656,7 @@ class CLIMBPipeline:
         weights_dict = optimal_weights.mixture_weights.to_dict(
             cluster_labels=[c.label for c in cluster_info]
         )
-        weights_path = os.path.join(output_dir, "optimal_mixture_weights.json")
+        weights_path = state_file(output_dir, "optimal_mixture_weights.json")
         atomic_write_json(weights_path, weights_dict)
         print(f"[Save] Optimal weights -> {weights_path}")
 
@@ -682,7 +690,7 @@ class CLIMBPipeline:
                     for c in topk_cands
                 ],
             }
-            topk_path = os.path.join(output_dir, "topk_mixture_candidates.json")
+            topk_path = state_file(output_dir, "topk_mixture_candidates.json")
             atomic_write_json(topk_path, payload, indent=2)
             print(f"[Save] Top-k arm candidates ({len(topk_cands)}) -> {topk_path}")
 
@@ -716,11 +724,11 @@ class CLIMBPipeline:
             "elapsed_seconds": elapsed,
             "stage_times": {k: round(v, 1) for k, v in stage_times.items()},
         }
-        summary_path = os.path.join(output_dir, "pipeline_summary.json")
+        summary_path = state_file(output_dir, "pipeline_summary.json")
         atomic_write_json(summary_path, summary, indent=2,
                           default=lambda x: float(x) if isinstance(x, np.floating) else x)
 
-        sampled_path = os.path.join(output_dir, "sampled_dataset.parquet")
+        sampled_path = state_file(output_dir, "sampled_dataset.parquet")
         if metadata_manager is not None:
             sampled_texts = metadata_manager.read_texts(selected_indices)
         elif texts is not None:
@@ -739,7 +747,7 @@ class CLIMBPipeline:
             )
             print(f"[Save] Sampled dataset ({len(selected_indices)} docs) -> {sampled_path}")
 
-        cluster_path = os.path.join(output_dir, "cluster_info.json")
+        cluster_path = state_file(output_dir, "cluster_info.json")
         cluster_json = [
             {
                 "cluster_id": c.cluster_id,

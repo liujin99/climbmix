@@ -53,7 +53,7 @@ import time
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from cp4_report import resolve_run_file   # 双布局 (2026-10-09 deep-tidy)
+from cp4_report import discover_arms, resolve_run_file   # 三代布局读取端
 
 try:
     import matplotlib
@@ -157,22 +157,6 @@ def parse_eval_csv(path):
     return {"stem": stem, "stem_nll": stem_nll, "tasks": tasks}
 
 
-def discover_arms(run_dir):
-    """eval_<arm>.csv 全发现 (锚点除外) → 臂名列表.
-    双布局 (2026-10-09 deep-tidy): 根级 + detail/。"""
-    arms = []
-    names = []
-    for d in (run_dir, os.path.join(run_dir, "detail")):
-        try:
-            names += os.listdir(d)
-        except OSError:
-            pass
-    for n in names:
-        if n.startswith("eval_") and n.endswith(".csv") and n != "eval_base_remote.csv":
-            arms.append(n[len("eval_"):-len(".csv")])
-    return sorted(set(arms))
-
-
 def weights_vec_from_payload(payload, labels):
     """权重载荷 (标签键 dict | list | 最优权重的 {"weights": {...}} 变体)
     → 按 labels 顺序的向量; 长度不符/缺标签 → None."""
@@ -253,13 +237,12 @@ def main():
     # ── 簇信息 (地基; 缺它什么都做不了) ──
     # ⑬r naming: macro_info.json with legacy cluster_info_cache.json fallback
     try:
-        from climbmix.utils.io_utils import stage1_pair
-        _, ci_path = stage1_pair(run_dir)
+        from climbmix.utils.paths import stage1_pair_anywhere
+        _, ci_path = stage1_pair_anywhere(run_dir)
     except ImportError:
         ci_path = ""
     if not ci_path or not os.path.isfile(ci_path):
-        # 双布局兜底 (2026-10-09 deep-tidy): 根级配对缺失时逐名找
-        # (stage1_pair 要求 npz+json 成对, 深整理后两者都在 detail/)
+        # 兜底: 逐名三代解析 (stage1_pair 要求 npz+json 成对)
         for name in ("macro_info.json", "cluster_info_cache.json"):
             p = resolve_run_file(run_dir, name)
             if os.path.isfile(p):
