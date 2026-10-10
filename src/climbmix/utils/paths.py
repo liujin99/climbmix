@@ -8,7 +8,6 @@ Layout contract (2026-10-10 state/ ruling — the uniform layout):
     ├── state/                    ALL machine-layer state & result files
     ├── logs/                     process logs (write-only streams)
     ├── exps/                     per-config search artifacts
-    ├── traineval/                independent validation rounds
     └── (.done_* / .fingerprint_* / locks — invisible lifecycle markers,
          read at root by the idempotency machinery; zero ls cost)
 

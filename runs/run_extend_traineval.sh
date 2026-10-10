@@ -6,19 +6,17 @@
 #  实验身份 = 一个最优配比策略的产出条件 (数据池 + 聚类 + 搜索配置,
 #  即搜索指纹); 池/聚类/搜索变了才是新实验 (run_experiment /
 #  run_extend_experiment)。同一配比的更多训练评测 (更大 token 预算 /
-#  换 seed / 对比臂) 不是新实验 — 是本实验的 traineval 轮, 住进实验
-#  目录的 traineval/ 子目录:
+#  换 seed / 对比臂) 不是搜索新实验 — 是独立成 run 的验证轮, 与源实验
+#  平级并存 (2026-10-10 裁决: 开训练 = 新 run, 只重打分 = 原地):
 #
-#    result/prod3_current/                 # 实验 prod3 (一个 _current)
-#    ├── 搜索产物 + 首轮 3B 验证 (run_experiment 的 Step 1-8, 根目录历史约定)
-#    └── traineval/
-#        ├── val20b/                       # 本脚本产出的轮 (独立成套)
-#        └── val35b_s7/
+#    result/prod3_<ts>/                  # 实验 prod3 (搜索 + 首轮验证, 封存只读)
+#    result/prod3_<ts>_val20b/           # 本脚本产出 (state/ 布局, 自洽)
+#    result/prod3_<ts>_val35b_s7/
 #
-#  本脚本做什么: 校验 → 建 traineval/<轮名>/ (从实验根目录只读复制
-#  weights/cluster_cache/launch_env/remote_config, OBS 前缀重写隔离) →
-#  后台预取 general 分片 → 按臂表逐臂调 runs/lib/arm_engine.sh (选样→
-#  混合→single-pass 守卫→远端 dispatch) → 落地后渲染本轮 CP4 报告。
+#  本脚本做什么: 校验 → 建独立轮 run 目录 result/<源名>_<轮名>/ (从源
+#  只读复制 state 文件进 state/, OBS 前缀重写隔离) → 后台预取 general
+#  分片 → 按臂表逐臂调 runs/lib/arm_engine.sh (选样→混合→single-pass
+#  守卫→远端 dispatch) → 落地后渲染本轮 CP4 报告。
 #
 #  入口家族 (后两个 extend_* = 对已有实验的扩展动作, 非必经下一站):
 #    run_experiment / run_extend_experiment / run_extend_traineval(本) /
@@ -32,8 +30,9 @@
 #  臂表: ARMS="winner random" (默认) | 含自定义: "winner random fix1=0.1,..."
 #
 #  注意:
-#  · 实验 run 绿色收官后目录会改名 (prod3_current → prod3_<ts>);
-#    下一轮把 SRC_RUN_DIR 指向归档目录即可 (轮目录内容自洽, 不受影响)
+#  · 轮目录名 = <源目录名>_<轮名>; 源收官改名 (prod3_current →
+#    prod3_<ts>) 后重跑同命令会生成新轮目录、丢掉 .done 幂等 —
+#    重跑/续跑请始终指向同一源目录
 #  · NODES 必须 2 的幂 (1/2/4/8/16): d28 优化器按 ws=8×NODES 切分全部
 #    2^k 张量维度, ws 含因子 3 时 optim.py:499 断言必炸 (probe C 实证)
 # ═══════════════════════════════════════════════════════════════════
@@ -110,7 +109,10 @@ if [ -z "$ROUND_NAME" ]; then
     ROUND_NAME="val${TOKTAG}"
     [ "$SEED" != "42" ] && ROUND_NAME="${ROUND_NAME}_s${SEED}"
 fi
-ROUND_DIR="$SRC_RUN_DIR/traineval/$ROUND_NAME"
+# 独立轮 run 目录 (2026-10-10 裁决): 与源实验平级, 名字携带来源、排序相邻
+SRC_BASE="${SRC_RUN_DIR%/}"; SRC_BASE="${SRC_BASE##*/}"
+[ -n "$SRC_BASE" ] || { echo "✗ SRC_RUN_DIR 无法解析出目录名: ${SRC_RUN_DIR}"; exit 1; }
+ROUND_DIR="${ROUND_DIR:-result/${SRC_BASE}_${ROUND_NAME}}"
 
 FREE_GB=$(df -BG . | awk 'NR==2{print $4}' | tr -d G)
 [ "$FREE_GB" -ge $((DISK_GB + 50)) ] \
@@ -118,37 +120,49 @@ FREE_GB=$(df -BG . | awk 'NR==2{print $4}' | tr -d G)
 
 echo "═══ traineval round: ${ARMS} @ ${SCALE_TOKENS} (=${TOK_BYTES} tokens) ═══"
 echo "  src:     ${SRC_RUN_DIR} (只读)"
-echo "  round:   ${ROUND_DIR} (实验内的独立验证轮)"
+echo "  round:   ${ROUND_DIR} (独立验证 run, 与源平级)"
+
+# 防改名脚枪: 同轮名兄弟轮已存在 (多半是源改名后重跑) → 点名提示;
+# 20B 级重训很贵, 不要静默开新轮
+for _d in result/*_"$ROUND_NAME"; do
+    if [ -f "$_d/.traineval_round" ] && [ "$_d" != "$ROUND_DIR" ]; then
+        echo "  ⚠ 已存在同轮名目录: $_d"
+        echo "    $(sed -n 2p "$_d/.traineval_round")"
+        echo "    若为源改名后的重跑, 请改回原源/原轮目录 (保住 .done 幂等)"
+    fi
+done
 echo "  nodes:   ${NODES}/臂 (ws=$((NODES*8))) → est ${STEPS_EST} 步, job timeout ${TIMEOUT_H}h"
 echo "  general: ~${NEEDED} 分片 (cap=${CAP}, 预取 ${PREFETCH_N})"
 echo "  disk:    est ${DISK_GB}G, free ${FREE_GB}G"
 
 [ "$LAUNCH" = "1" ] || { echo; echo "[dry-run] LAUNCH=0 — 只打印计划"; exit 0; }
 
-# ── 初始化轮目录 (幂等; 从实验根目录复制数据源, OBS 前缀重写隔离;
-#    源文件经 sfile 双布局解析 — 归档 run 的状态文件在 detail/) ──
-mkdir -p "$ROUND_DIR"
+# ── 初始化轮 run 目录 (幂等; 从源只读复制 state 文件进 state/ — 轮是
+#    正经 state/ 布局 run; OBS 前缀重写隔离; 源文件经 sfile 三代解析,
+#    平铺/detail/ 归档皆可为源) ──
+mkdir -p "$ROUND_DIR/state"
 for f in optimal_mixture_weights.json cluster_cache.npz cluster_info_cache.json \
-         launch_env.json search_state.json; do
+         macro_info.json launch_env.json search_state.json; do
     src="$(sfile "$f")"
-    [ -f "$src" ] && { [ -f "$ROUND_DIR/$f" ] || cp "$src" "$ROUND_DIR/$f"; }
+    [ -f "$src" ] && { [ -f "$ROUND_DIR/state/$f" ] || cp "$src" "$ROUND_DIR/state/$f"; }
 done
-[ -f "$ROUND_DIR/remote_config.json" ] || cp "$(sfile remote_config.json)" "$ROUND_DIR/remote_config.json"
-python3 - "$ROUND_DIR/remote_config.json" "$ROUND_NAME" <<'PY'
+[ -f "$ROUND_DIR/state/remote_config.json" ] || cp "$(sfile remote_config.json)" "$ROUND_DIR/state/remote_config.json"
+python3 - "$ROUND_DIR/state/remote_config.json" "$ROUND_NAME" <<'PY'
 import json, sys
 p, round_name = sys.argv[1], sys.argv[2]
 c = json.load(open(p))
 pre = (c.get("obs_prefix") or "").rstrip("/")
 if pre:
     base, _, exp = pre.rpartition("/")
-    c["obs_prefix"] = f"{base}/{exp}/traineval/{round_name}"
+    c["obs_prefix"] = f"{base}/{exp}_{round_name}"
 json.dump(c, open(p, "w"), indent=2)
-print("[setup] obs_prefix ->", c["obs_prefix"])
+print("[setup] obs_prefix ->", c.get("obs_prefix") or "(none)")
 PY
 cat > "$ROUND_DIR/.traineval_round" <<MSG
 traineval round managed by runs/run_extend_traineval.sh
 src experiment: ${SRC_RUN_DIR}   budget: ${SCALE_TOKENS}   nodes: ${NODES}   seed: ${SEED}
-不要把此目录当 run 目录使用 (无指纹, 非 stage-gate 管理)
+独立验证 run (state/ 布局, state 文件从源只读复制而来); 非 stage-gate
+管理 — 无指纹, 报告由本脚本直接渲染, 不走 mark_completed 改名流
 MSG
 echo "  setup ✓ (${ROUND_DIR})"
 
@@ -171,7 +185,7 @@ fi
 declare -a PIDS=() NAMES=()
 for spec in $ARMS; do
     case "$spec" in
-        winner) NAME=winner; WVAL="$ROUND_DIR/optimal_mixture_weights.json" ;;
+        winner) NAME=winner; WVAL="$ROUND_DIR/state/optimal_mixture_weights.json" ;;
         random) NAME=random; WVAL="$UNIFORM" ;;
         *)      NAME="${spec%%=*}"; WVAL="${spec#*=}" ;;
     esac
@@ -198,10 +212,10 @@ done
 auto_cp4_report "$ROUND_DIR"
 
 # ── 决策图 (2026-10-10): B 联 winner vs random = 本轮主结果;
-# A/D/E 为来源实验的搜索语境 (轮目录复制了 search_state/cluster 信息);
+# A/D/E 为来源实验的搜索语境 (轮 state/ 复制了 search_state/cluster 信息);
 # 无 climb 族臂 → C 自动跳过。判定块留档 logs/report_charts.log。
-# 注意: 轮目录【不做】深整理 — .done 标记必须留在根层供幂等重入
-# (arm_engine/dispatch 的跳过检查只认根层)。──
+# 轮目录即发布形态 (report + 图表在根层, state 文件在 state/),
+# .done 幂等标记在轮根层 (arm_engine/dispatch 的跳过检查只认根层)。──
 mkdir -p "$ROUND_DIR/logs"
 if python3 scripts/diagnostics/report_charts.py "$ROUND_DIR" \
         > "$ROUND_DIR/logs/report_charts.log" 2>&1; then

@@ -7,7 +7,7 @@
 #
 #  三种用法 (由 ARM_NAME / WEIGHTS 组合决定):
 #    a) 自定义配比臂:  ARM_NAME=fixratio_v1 WEIGHTS="0.2,0.3,..."
-#    b) 赢家重训:      ARM_NAME=winner_v2 WEIGHTS=result/<run>/optimal_mixture_weights.json
+#    b) 赢家重训:      ARM_NAME=winner_v2 WEIGHTS=result/<run>/state/optimal_mixture_weights.json
 #                      + 取消注释训练参数覆盖 (TARGET_TOKENS 等)
 #    c) 已有臂重发:    ARM_NAME=random (WEIGHTS 留空 — 数据已混合,
 #                      失败重试场景; 前次 SUCCEEDED 的臂会被 .done 跳过)
@@ -21,8 +21,9 @@ set -euo pipefail
 RUN_DIR="${RUN_DIR:-result/prod3_current}"        # 主 run 目录
 ARM_NAME="${ARM_NAME:-fixratio_v1}"               # 臂名 [A-Za-z0-9_-]+ (random/climb/自定义)
 WEIGHTS="${WEIGHTS:-}"                            # 空 = 不选点不混合, 直接重发已有臂
-LABEL_SOURCE="${LABEL_SOURCE:-cluster}"           # cluster = 搜索簇(cluster_cache.npz);
-                                                   # domain = 四域(schema domain_names, 配 WEIGHTS 域名键)
+# 标签来源: cluster = 搜索簇 (cluster_cache.npz);
+#           domain = 四域 (schema domain_names, 配 WEIGHTS 域名键)
+LABEL_SOURCE="${LABEL_SOURCE:-cluster}"
 TARGET_TOKENS="${TARGET_TOKENS:-2B}"              # token 预算: 选点大小 + 步数派生的唯一真源
                                                   # (与 run 快照不同时, 下方自动重派生 TARGET_STEPS)
 STEM_RATIO="${STEM_RATIO:-0.7}"
@@ -58,6 +59,15 @@ RUN_DIR="${RUN_DIR#"$CLIMBMIX_DIR"/}"
 
 echo "═══ arm only: ${ARM_NAME} @ ${RUN_DIR} ═══"
 
+# ── 三代布局 (2026-10-10): state/ → 根级 → detail/ — RUN_DIR 可为任意
+#    一代形态的 run (新 run / 平铺旧归档 / traineval 轮) ──
+hrf() {
+    if [ -f "$RUN_DIR/state/$1" ]; then printf '%s\n' "$RUN_DIR/state/$1"
+    elif [ -f "$RUN_DIR/$1" ]; then printf '%s\n' "$RUN_DIR/$1"
+    elif [ -f "$RUN_DIR/detail/$1" ]; then printf '%s\n' "$RUN_DIR/detail/$1"
+    else printf '%s\n' "$RUN_DIR/state/$1"; fi
+}
+
 # ── 校验 ──
 [[ "$ARM_NAME" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "✗ ARM_NAME 必须匹配 [A-Za-z0-9_-]+ (进文件名/tag/OBS 路径)"; exit 1; }
 [ -d "$RUN_DIR" ] || { echo "✗ RUN_DIR 不存在: ${RUN_DIR}"; exit 1; }
@@ -65,10 +75,10 @@ echo "═══ arm only: ${ARM_NAME} @ ${RUN_DIR} ═══"
 # ── HF 镜像防裸壳 (战后清单 #2): mix 拉取 ClimbMix 分片需要 HF_ENDPOINT;
 #    优先级 shell env > run 的 launch_env 快照 > hf-mirror 默认 ──
 if [ -z "${HF_ENDPOINT:-}" ]; then
-    HF_EP_LE="$(python3 - "$RUN_DIR" <<'PY'
-import json, os, sys
+    HF_EP_LE="$(python3 - "$(hrf launch_env.json)" <<'PY'
+import json, sys
 try:
-    print(json.load(open(os.path.join(sys.argv[1], "launch_env.json"))).get("HF_ENDPOINT", ""))
+    print(json.load(open(sys.argv[1])).get("HF_ENDPOINT", ""))
 except (FileNotFoundError, ValueError):
     print("")
 PY
@@ -98,23 +108,23 @@ if [ -n "$WEIGHTS" ]; then
             || { echo "✗ 磁盘预算不足 — 清理 (scripts/clean_derived_data.py) 或 ARM_DISK_CHECK=0 自担风险"; exit 1; }
     fi
 
-    CACHE="$RUN_DIR/cluster_cache.npz"
+    CACHE="$(hrf cluster_cache.npz)"
     DEADLINE=$(( $(date +%s) + WAIT_CACHE_MIN * 60 ))
     while [ ! -f "$CACHE" ]; do
         if [ "$(date +%s)" -ge "$DEADLINE" ]; then
-            echo "✗ ${CACHE} 等待超时 (${WAIT_CACHE_MIN}min) — 主 run 还没到聚类完成?"
+            echo "✗ ${RUN_DIR} 内 cluster_cache.npz 等待超时 (${WAIT_CACHE_MIN}min) — 主 run 还没到聚类完成?"
             exit 1
         fi
         echo "  等待池缓存 (剩余 $(( (DEADLINE - $(date +%s)) / 60 ))min)..."; sleep 30
+        CACHE="$(hrf cluster_cache.npz)"   # 池缓存落点随布局代际而异, 重解析兜住
     done
 
     # 池数据目录: 优先 run 的 launch_env 快照, 其次 env
-    DATA_DIR="$(python3 - "$RUN_DIR" <<'PY'
+    DATA_DIR="$(python3 - "$(hrf launch_env.json)" <<'PY'
 import json, os, sys
-le = os.path.join(sys.argv[1], "launch_env.json")
-if os.path.exists(le):
-    print(json.load(open(le)).get("DATA_DIR", ""))
-else:
+try:
+    print(json.load(open(sys.argv[1])).get("DATA_DIR", ""))
+except (FileNotFoundError, ValueError):
     print(os.environ.get("DATA_DIR", ""))
 PY
 )"
@@ -151,12 +161,12 @@ else
 fi
 
 # ── 步数来源: run 的 launch_env.json; TARGET_TOKENS 覆盖 run 预算时重派生 ──
-LE_INFO="$(python3 - "$RUN_DIR" <<'PY'
-import json, os, sys
+LE_INFO="$(python3 - "$(hrf launch_env.json)" <<'PY'
+import json, sys
 try:
-    with open(os.path.join(sys.argv[1], "launch_env.json")) as f:
+    with open(sys.argv[1]) as f:
         env = json.load(f)
-except FileNotFoundError:
+except (FileNotFoundError, ValueError):
     env = {}
 print(f"{(env.get('TARGET_TOKENS') or '').strip()}\t{(env.get('TARGET_DEPTH') or '').strip() or '28'}")
 PY

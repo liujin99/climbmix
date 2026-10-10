@@ -63,9 +63,6 @@ EXEMPT = [
     # 缓存目录相对路径 (跟随 --cluster-cache-dir, 布局无关)
     (r"src/climbmix/core/discovery\.py", r".*"),
     (r"src/climbmix/core/cluster_merge\.py", r".*"),
-    # traineval 轮目录 = 平铺约定 (自洽小世界, .traineval_round 标记)
-    (r"runs/lib/arm_engine\.sh", r".*"),
-    (r"runs/lib/target_arm\.sh", r".*"),
     # 池级临时文件, 非 run 目录
     (r"runs/preprocess_pool\.sh", r".*"),
     # 测试自建 fixture (各自定义自己的世界; 断言新写位置的测试已同步更新)

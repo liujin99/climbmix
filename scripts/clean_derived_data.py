@@ -22,7 +22,8 @@
 #       的 partial-wipe 逻辑管
 #
 #  删除内容: {arm}_shards/ 与 {arm}_mixed/ 整目录。eval CSV / 审计
-#  台账 / cluster_cache 全部在 run_dir 平级, 不受影响; .done_mid_train
+#  台账 / cluster_cache 全部在 state/ (旧归档: 根级/detail/), 不受影
+#  响; .done_mid_train
 #  语义 (SUCCEEDED 臂重发 = no-op) 也不受影响。
 #
 #  只读+删除, stdlib-only; 默认 dry-run。

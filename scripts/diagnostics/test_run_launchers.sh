@@ -101,11 +101,11 @@ HISTORY_RUN="$HIST" EXP_NAME=ws_test LAUNCH=0 CONFIGS_PER_ITER="6,4" \
     DATA_DIR="$TMP/pool" \
     bash runs/run_extend_experiment.sh > "$TMP/ws_ok.log" 2>&1
 check "warm-start dry-run exit 0" $? "$(tail -3 "$TMP/ws_ok.log")"
-[ -f result/ws_test_current/search_state.json ]
+[ -f result/ws_test_current/state/search_state.json ]
 check "seed injected into result/ws_test_current" $?
 python3 - <<'PY'
 import json, sys
-s = json.load(open("result/ws_test_current/search_state.json"))
+s = json.load(open("result/ws_test_current/state/search_state.json"))
 hs = s.get("history_seed") or {}
 ok = (s["last_completed_iter"] == 1
       and s["realized_configs_per_iter"] == [6]
@@ -115,9 +115,9 @@ ok = (s["last_completed_iter"] == 1
 sys.exit(0 if ok else 1)
 PY
 check "seed shape: iter1=6 points, provenance stamped" $?
-[ -f result/ws_test_current/cluster_cache.npz ]
+[ -f result/ws_test_current/state/cluster_cache.npz ]
 check "pool cache inherited (copied, not regenerated)" $?
-[ -f result/ws_test_current/cluster_info_cache.json ]
+[ -f result/ws_test_current/state/cluster_info_cache.json ]
 check "cluster_info_cache.json inherited too (cache hit needs BOTH files)" $?
 grep -q "✓ 池一致 (key=${POOL_KEY}, 2 个分片)" "$TMP/ws_ok.log"
 check "pool identity: content-level key match" $?
@@ -311,13 +311,13 @@ HISTORY_RUN="$HIST_BAD" EXP_NAME=ws_bad LAUNCH=0 bash runs/run_extend_experiment
     > "$TMP/ws_bad.log" 2>&1
 [ $? -ne 0 ] && grep -q "历史点不可复用" "$TMP/ws_bad.log"
 check "K mismatch refused" $?
-[ ! -e result/ws_bad_current/search_state.json ]
+[ ! -e result/ws_bad_current/state/search_state.json ]
 check "K mismatch: no seed written" $?
 
 # missing source artifacts
 HISTORY_RUN="$TMP/nope" EXP_NAME=ws_missing LAUNCH=0 bash runs/run_extend_experiment.sh \
     > "$TMP/ws_missing.log" 2>&1
-[ $? -ne 0 ] && grep -q "search_state.json 不存在" "$TMP/ws_missing.log"
+[ $? -ne 0 ] && grep -q "历史 run 缺 search_state.json" "$TMP/ws_missing.log"
 check "missing history run refused" $?
 
 # slot1 == history count → read as includes-history form, no double-prepend
@@ -359,23 +359,26 @@ printf '{"obs_prefix":"obs://bucket/a/b/climbmix/prod3"}' > "$TV/remote_config.j
 SRC_RUN_DIR="$TV" SCALE_TOKENS=1B NODES=1 LAUNCH=0 \
     bash runs/run_extend_traineval.sh > "$TMP/tv_dry.log" 2>&1
 check "traineval dry-run exit 0" $? "$(tail -2 "$TMP/tv_dry.log")"
-grep -q "traineval/val1b" "$TMP/tv_dry.log"
-check "round dir inside experiment (traineval/ spelling)" $?
+grep -q "result/tv_src_val1b" "$TMP/tv_dry.log"
+check "round dir = result/<src>_<round> (independent sibling run)" $?
 
 # full-chain skeleton on a broken fixture: setup + obs rewrite + arm engine
 # invocation + failure aggregation + degraded report (arms must fail loudly)
-SRC_RUN_DIR="$TV" SCALE_TOKENS=1B NODES=1 PREFETCH=0 ROUND_NAME=zz_round \
-    TRAINEVAL_LOG_DIR="$TMP/tv_logs" \
+ROUND_DIR="$TMP/tv_round" SRC_RUN_DIR="$TV" SCALE_TOKENS=1B NODES=1 \
+    PREFETCH=0 ROUND_NAME=zz_round TRAINEVAL_LOG_DIR="$TMP/tv_logs" \
     bash runs/run_extend_traineval.sh > "$TMP/tv_full.log" 2>&1
 [ $? -ne 0 ] && grep -q "✗ winner 失败" "$TMP/tv_full.log"
 check "fixture arms fail loudly + nonzero exit (aggregation)" $?
-grep -q "traineval round managed by runs/run_extend_traineval.sh" "$TV/traineval/zz_round/.traineval_round"
+grep -q "traineval round managed by runs/run_extend_traineval.sh" "$TMP/tv_round/.traineval_round"
 check "round marker written with owning script" $?
+test -f "$TMP/tv_round/state/optimal_mixture_weights.json" && \
+    test -f "$TMP/tv_round/state/launch_env.json"
+check "state files copied into state/ (round is a state-form run)" $?
 python3 -c "
 import json, sys
-assert json.load(open('$TV/traineval/zz_round/remote_config.json'))['obs_prefix'] \
-    == 'obs://bucket/a/b/climbmix/prod3/traineval/zz_round', 'obs_prefix not round-scoped'"
-check "obs_prefix rewritten to round scope" $?
+assert json.load(open('$TMP/tv_round/state/remote_config.json'))['obs_prefix'] \
+    == 'obs://bucket/a/b/climbmix/prod3_zz_round', 'obs_prefix not round-scoped'"
+check "obs_prefix rewritten to <src>_<round> scope" $?
 grep -q "跳过自动对比报告" "$TMP/tv_full.log"
 check "report degrades gracefully without eval CSVs" $?
 

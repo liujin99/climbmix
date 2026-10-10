@@ -41,9 +41,8 @@ import sys
 
 EXP_RE = re.compile(r"^exp_\d{4,}$")
 
-    # 深度档的根层保留集: 主报告 + report_charts.py 五张决策图;
-    # 目录保留集含 traineval/ — 验证轮是可重入目录 (.done 标记必须
-    # 留在轮目录根层供 arm_engine/dispatch 幂等跳过), 不可收进 detail/
+    # 深度档的根层保留集: 主报告 + report_charts.py 五张决策图
+    # (traineval 验证轮自 2026-10-10 起为独立平级 run, 不再住进实验目录)
 ROOT_KEEP_FILES = {
     "report.md",
     "search_convergence.png",
@@ -52,7 +51,7 @@ ROOT_KEEP_FILES = {
     "cluster_alpha_vs_score.png",
     "best_vs_worst_heatmap.png",
 }
-ROOT_KEEP_DIRS = {"logs", "exps", "detail", "traineval"}
+ROOT_KEEP_DIRS = {"logs", "exps", "detail"}
 
 
 def _exists_anywhere(rd, name):
