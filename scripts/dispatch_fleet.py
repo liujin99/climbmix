@@ -55,7 +55,7 @@ for _p in ("src", "climbmix-ma"):
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from dispatch_target_arm import (  # noqa: E402
-    load_launch_env, mix_subprocess_env, run_logged)
+    _run_file, load_launch_env, mix_subprocess_env, run_logged)
 from climbmix.utils.io_utils import stage1_pair  # noqa: E402
 
 FLEET_TOKENS = ("climb", "topk", "uniform", "natural", "domainfix", "base")
@@ -495,7 +495,7 @@ def main() -> int:
     launch_env = load_launch_env(output_dir)
     exp_name = launch_env.get("EXP_NAME") or "main"
     climbmix_dir = launch_env.get("CLIMBMIX_DIR") or REPO_ROOT
-    rc_path = os.path.join(output_dir, "remote_config.json")
+    rc_path = _run_file(output_dir, "remote_config.json")
     if not os.path.isfile(rc_path):
         raise SystemExit(
             f"✗ {rc_path} not found — fleet arms are remote-only "
@@ -517,7 +517,7 @@ def main() -> int:
         expected.append("climb")
     expected += [p["arm"] for p in plans
                  if p["arm"] not in ("base_eval_check", "climb")]
-    exp_path = os.path.join(output_dir, "expected_arms.txt")
+    exp_path = _run_file(output_dir, "expected_arms.txt")
     if expected and not args.dry_run:
         if os.path.isfile(exp_path):
             cur = [ln.strip() for ln in open(exp_path) if ln.strip()]

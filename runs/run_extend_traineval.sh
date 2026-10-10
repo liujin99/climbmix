@@ -58,14 +58,21 @@ CLIMBMIX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$CLIMBMIX_DIR"
 source "$CLIMBMIX_DIR/runs/lib/auto_report.sh"
 
+# ── 深整理布局 (2026-10-10): 归档 run 的状态文件在 detail/ — 根级优先,
+#    detail/ 兜底 (SRC_RUN_DIR 常指向已收官深整理的归档目录) ──
+sfile() {
+    if [ -f "$SRC_RUN_DIR/$1" ]; then printf '%s\n' "$SRC_RUN_DIR/$1"
+    else printf '%s\n' "$SRC_RUN_DIR/detail/$1"; fi
+}
+
 # ── 校验 ──
 [[ "$NODES" =~ ^[0-9]+$ ]] && (( NODES >= 1 && (NODES & (NODES-1)) == 0 )) \
     || { echo "✗ NODES=$NODES 非法 — 必须 2 的幂 (1/2/4/8/16): d28 优化器分片约束 (optim.py:499)"; exit 1; }
-WFILE="$SRC_RUN_DIR/optimal_mixture_weights.json"
-[ -f "$WFILE" ] || { echo "✗ $WFILE 不存在 — 需要实验的最终选点 (搜索完成后产出; run 收官改名后把 SRC_RUN_DIR 指向归档目录)"; exit 1; }
-[ -f "$SRC_RUN_DIR/cluster_cache.npz" ] || { echo "✗ $SRC_RUN_DIR/cluster_cache.npz 不存在"; exit 1; }
-[ -f "$SRC_RUN_DIR/launch_env.json" ]  || { echo "✗ $SRC_RUN_DIR/launch_env.json 不存在"; exit 1; }
-[ -f "$SRC_RUN_DIR/remote_config.json" ] || { echo "✗ $SRC_RUN_DIR/remote_config.json 不存在"; exit 1; }
+WFILE="$(sfile optimal_mixture_weights.json)"
+[ -f "$WFILE" ] || { echo "✗ $SRC_RUN_DIR/optimal_mixture_weights.json 不存在 — 需要实验的最终选点 (搜索完成后产出; run 收官改名后把 SRC_RUN_DIR 指向归档目录)"; exit 1; }
+[ -f "$(sfile cluster_cache.npz)" ] || { echo "✗ $SRC_RUN_DIR/cluster_cache.npz 不存在"; exit 1; }
+[ -f "$(sfile launch_env.json)" ]  || { echo "✗ $SRC_RUN_DIR/launch_env.json 不存在"; exit 1; }
+[ -f "$(sfile remote_config.json)" ] || { echo "✗ $SRC_RUN_DIR/remote_config.json 不存在"; exit 1; }
 for spec in $ARMS; do
     case "$spec" in
         winner|random) : ;;
@@ -117,13 +124,15 @@ echo "  disk:    est ${DISK_GB}G, free ${FREE_GB}G"
 
 [ "$LAUNCH" = "1" ] || { echo; echo "[dry-run] LAUNCH=0 — 只打印计划"; exit 0; }
 
-# ── 初始化轮目录 (幂等; 从实验根目录复制数据源, OBS 前缀重写隔离) ──
+# ── 初始化轮目录 (幂等; 从实验根目录复制数据源, OBS 前缀重写隔离;
+#    源文件经 sfile 双布局解析 — 归档 run 的状态文件在 detail/) ──
 mkdir -p "$ROUND_DIR"
 for f in optimal_mixture_weights.json cluster_cache.npz cluster_info_cache.json \
          launch_env.json search_state.json; do
-    [ -f "$SRC_RUN_DIR/$f" ] && { [ -f "$ROUND_DIR/$f" ] || cp "$SRC_RUN_DIR/$f" "$ROUND_DIR/$f"; }
+    src="$(sfile "$f")"
+    [ -f "$src" ] && { [ -f "$ROUND_DIR/$f" ] || cp "$src" "$ROUND_DIR/$f"; }
 done
-[ -f "$ROUND_DIR/remote_config.json" ] || cp "$SRC_RUN_DIR/remote_config.json" "$ROUND_DIR/remote_config.json"
+[ -f "$ROUND_DIR/remote_config.json" ] || cp "$(sfile remote_config.json)" "$ROUND_DIR/remote_config.json"
 python3 - "$ROUND_DIR/remote_config.json" "$ROUND_NAME" <<'PY'
 import json, sys
 p, round_name = sys.argv[1], sys.argv[2]

@@ -59,8 +59,17 @@ def main():
     args = ap.parse_args()
 
     run_dir = os.path.abspath(args.run_dir)
-    rc_path = os.path.join(run_dir, "remote_config.json")
-    le_path = os.path.join(run_dir, "launch_env.json")
+
+    def _rf(name):
+        """双布局 (2026-10-09 深整理): 根级优先, detail/ 兜底。"""
+        p = os.path.join(run_dir, name)
+        if os.path.isfile(p):
+            return p
+        d = os.path.join(run_dir, "detail", name)
+        return d if os.path.isfile(d) else p
+
+    rc_path = _rf("remote_config.json")
+    le_path = _rf("launch_env.json")
     for p in (rc_path, le_path):
         if not os.path.isfile(p):
             raise SystemExit(f"[拒] 缺 {p} — 需要 run 目录里的发射实录")
@@ -71,7 +80,8 @@ def main():
         raise SystemExit(f"[拒] --exp-name {args.exp_name!r} != launch_env "
                          f"EXP_NAME {env_exp!r}")
 
-    if os.path.isfile(os.path.join(run_dir, "optimal_mixture_weights.json")):
+    # 收官安全闩: 深整理后的归档 run 此文件在 detail/ — 两处都要拦
+    if os.path.isfile(_rf("optimal_mixture_weights.json")):
         raise SystemExit(
             "[拒] run 目录已有 optimal_mixture_weights.json (搜索收官产物) — "
             "已收官轮次的 exps 是存档, 本工具不碰")

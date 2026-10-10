@@ -20,7 +20,10 @@ CLIMBMIX_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$CLIMBMIX_DIR"
 RUN_DIR="${RUN_DIR#"$CLIMBMIX_DIR"/}"
 
-[ -f "$RUN_DIR/launch_env.json" ] || { echo "✗ $RUN_DIR/launch_env.json 不存在 — 非 run 目录"; exit 1; }
+# 深整理布局 (2026-10-10): 归档 run 的 launch_env 在 detail/ — 双布局判存
+if [ ! -f "$RUN_DIR/launch_env.json" ] && [ ! -f "$RUN_DIR/detail/launch_env.json" ]; then
+    echo "✗ $RUN_DIR/launch_env.json 不存在 — 非 run 目录"; exit 1
+fi
 
 EXTRA=()
 if [ "$RETRY_FAILED" = "1" ]; then

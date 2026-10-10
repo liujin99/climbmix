@@ -110,8 +110,19 @@ from climbmix.utils.io_utils import shard_content_key  # noqa: E402
 
 # ── helpers ──────────────────────────────────────────────────────────────
 
+def _run_file(output_dir: str, name: str) -> str:
+    """Run-dir 文件, 根级优先, detail/ 兜底 (2026-10-09 深整理布局:
+    归档 run 的状态文件在 detail/ — extend 流程在归档 run 上作业,
+    如 run_extend_eval 补发锚点)。仅用于【读】; 写入仍走根层。"""
+    p = os.path.join(output_dir, name)
+    if os.path.isfile(p):
+        return p
+    d = os.path.join(output_dir, "detail", name)
+    return d if os.path.isfile(d) else p
+
+
 def load_launch_env(output_dir: str) -> Dict[str, str]:
-    path = os.path.join(output_dir, "launch_env.json")
+    path = _run_file(output_dir, "launch_env.json")
     if not os.path.isfile(path):
         raise SystemExit(
             f"✗ launch_env.json not found at {path} — run via run_experiment.sh "
@@ -810,7 +821,7 @@ def main() -> int:
     nanochat_dir = launch_env["NANOCHAT_DIR"]
     target_depth = int(launch_env.get("TARGET_DEPTH") or 28)
 
-    rc_path = args.remote_config or os.path.join(output_dir, "remote_config.json")
+    rc_path = args.remote_config or _run_file(output_dir, "remote_config.json")
     if not os.path.isfile(rc_path):
         raise SystemExit(
             f"✗ remote config not found at {rc_path} (REMOTE_ENABLED=1 run?) — "
