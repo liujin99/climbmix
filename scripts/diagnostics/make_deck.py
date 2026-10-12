@@ -21,6 +21,7 @@ try:
     from pptx import Presentation
     from pptx.dml.color import RGBColor
     from pptx.enum.shapes import MSO_SHAPE
+    from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
     from pptx.util import Emu, Inches, Pt
     from pptx.oxml.ns import qn
 except ImportError:
@@ -40,101 +41,141 @@ CW = PAGE_W - 2 * ML                   # 内容宽
 CHARTS_USED = ["search_convergence.png", "arms_main_results.png",
                "proxy_target_consistency.png", "cluster_alpha_vs_score.png"]
 
-# ── 幻灯片文案 (S1 审稿版; 数字待 S3 与 CP4 判定节核对) ──────────────
+# ── 幻灯片文案 (v2: 每页 1 个核心论点 + 当页举证 — 表/图/数字;
+#    数字已对 CP4 判定节与 experiment_prod5.md 判读记录核对) ──────────
 SLIDES = [
     dict(kind="title",
          title="从 quadmix 到 CLIMB",
          subtitle="数据配比的系统搜索 — prod5 实验结果",
-         meta="数据团队汇报 · 2026-10"),
-    dict(kind="bullets", title="上次与这次", takeaway="同一个池,问法升级了",
-         bullets=[
-             ("quadmix(上次)", "手动设定几组配比做对比 — 验证了『配比有影响』"),
-             ("这次(CLIMB)", "不再手动试:让搜索自动找配比,用全量训练实测裁决"),
-             ("问题升级", "从『有没有差』到『最优配比怎么找、能不能复现』"),
-         ]),
-    dict(kind="stats", title="结论先行",
-         takeaway="搜索找到的配比,显著优于自然配比与均匀配比",
-         stats=[("+0.036~+0.043", "STEM 提升(3 个 CLIMB 配方 vs 均匀)"),
-                ("z = +3.8 / +3.2", "vs 均匀 / vs 自然(实算 SE)"),
-                ("2 次复现", "冷启动与热启动搜索到达同一平台")],
-         note="每臂训练 = 3B tokens(d28,~1.5B 模型);误差棒 = 实算 SE(逐任务分数与题量),非默认值"),
+         meta="数据团队汇报 · 2026-10",
+         stats=[("+0.043", "STEM 提升(z=+3.8)"),
+                ("10.4×", "gsm8k vs base(0.029→0.301)"),
+                ("88.5%", "赢家配方集中于 2 个数学簇")]),
+    dict(kind="table", title="从手调到搜索",
+         takeaway="quadmix 证明了配比有影响;系统搜索给出可复现的量化答案",
+         table=(["配比策略", "STEM", "Δ vs base", "判定(vs 均匀)"],
+                [["base(不继续训练)", "0.1752", "—", "锚点"],
+                 ["均匀(15 簇等权)", "0.1657", "−0.0095", "参考臂"],
+                 ["手调域配比 domainfix(math 0.60)", "0.1773", "+0.0021", "噪声内(z=+1.03)"],
+                 ["系统搜索 climb(终选 cfg#101)", "0.2086", "+0.0334", "WINS**(z=+3.80)"]]),
+         emph=[3], y=2.0, row_h=0.5,
+         widths=[0.37, 0.13, 0.15, 0.35],
+         note="同池 · 同 base(d28,~1.5B)· 每臂同预算 3B tokens — 继续训练本身不涨分,"
+              "增益全部来自数据选择;四代搜索 vs 当轮基线 gap:"
+              "−0.004 → +0.010 → +0.016~0.032 → +0.036~0.043"),
+    dict(kind="table", title="结论先行",
+         takeaway="三个搜索配方全部显著胜出 — 增益来自数据选择,不来自继续训练",
+         table=(["臂", "STEM", "Δ vs 均匀", "z", "判定"],
+                [["climb(终选 cfg#101)", "0.2086", "+0.0429", "+3.80", "WINS**"],
+                 ["climb-cfg90", "0.2078", "+0.0421", "+3.67", "WINS**"],
+                 ["climb-cfg100", "0.2013", "+0.0356", "+3.16", "WINS**"],
+                 ["domainfix(手调域配比)", "0.1773", "+0.0116", "+1.03", "噪声内"],
+                 ["natural(池占比)", "0.1723", "+0.0067", "+0.59", "噪声内"],
+                 ["uniform(等权)", "0.1657", "(ref)", "—", "—"]]),
+         emph=[0], y=1.9, row_h=0.46,
+         widths=[0.32, 0.14, 0.18, 0.12, 0.24],
+         note="符号检验:climb 对 uniform 6/6 benchmark 全胜(exact p=0.016);"
+              "全部非搜索基线 ≈ base(−0.010~+0.002,噪声内)→ 3B 继续训练本身不产生 STEM 增益"),
     dict(kind="image", title="怎么做的",
          takeaway="两层评测:快而糙的代理搜索 + 慢而准的全量裁决",
          bullets=[
-             ("流程", "池 → 聚 15 簇 → 代理搜 115 个配比 → 全量评测 6 臂 + base(3 CLIMB + 均匀 + 自然 + quadmix 式手调域配比)"),
-             ("两层", "代理 = d20 短训练打分(每配比 640M tokens);全量 = d28 完整训练(每臂 3B tokens,~1.5B 模型)"),
-             ("数据量", "每臂 3B tokens = 2.1B 搜索配方 + 0.9B 通用(70/30,单遍);6 臂共 18B"),
+             ("搜索空间", "116M 文档 / ~92B tokens 的 STEM 池 → 15 个宏簇;一个配比 = 15 个簇权重 α"),
+             ("两层", "代理 = d20 短训打分(每配比 640M tokens,SNR 加权目标);"
+                    "全量 = d28 完整训练(每臂 3B tokens = 70% 配方 + 30% 通用,单遍)"),
+             ("本轮规模", "115 个配比实测候选;6 训练臂 + base 锚点(共 18B tokens);"
+                       "9,110 题逐题二值评测"),
          ],
          image="search_convergence.png",
          caption="115 个配比点的搜索轨迹(每轮 best 连线)"),
     dict(kind="image", title="主结果",
          takeaway="3 个 CLIMB 配方全部显著胜出三个基线",
          image="arms_main_results.png",
-         caption="STEM 主指标 + 第二任务;每臂 3B tokens 训练;误差棒 = 每臂实算 SE"),
-    dict(kind="stats", title="提升来自哪里",
-         takeaway="收益集中在生成式数学推理 — 结构性提升,不是全面膨胀",
-         stats=[("2.5–2.9×", "gsm8k 对 uniform 基线"),
-                ("10–11×", "gsm8k 对 base 模型"),
-                ("+0.04", "STEM 宏平均(vs 均匀)")],
-         note="STEM = 6 个 benchmark 宏平均;gsm8k 为生成式数学推理 — 以上 = 每臂 3B tokens 的 mid-training 买到"),
+         caption="STEM 主指标 + 第二任务;每臂 3B tokens;误差棒 = 每臂实算 SE"),
+    dict(kind="table", title="提升来自哪里",
+         takeaway="增益集中在生成式数学推理 — 判别题几乎不动",
+         table=(["benchmark(题量)", "climb", "uniform", "Δ", "倍数"],
+                [["gsm8k_cot(1319,生成)", "0.3010", "0.1054", "+0.196", "2.9×"],
+                 ["math_cot_500(500,生成)", "0.0580", "0.0160", "+0.042", "3.6×"],
+                 ["mmlu_stem(3545,判别)", "0.2920", "0.2872", "+0.005", "1.02×"],
+                 ["arc_easy(2376,判别)", "0.7294", "0.7269", "+0.003", "1.00×"],
+                 ["arc_challenge(1172,判别)", "0.4360", "0.4334", "+0.003", "1.01×"],
+                 ["gpqa_diamond(198,判别)", "0.2121", "0.2071", "+0.005", "1.02×"]]),
+         emph=[0, 1], y=1.9, row_h=0.46,
+         widths=[0.34, 0.16, 0.16, 0.17, 0.17],
+         note="vs base(不训练):gsm8k 0.0288 → 0.3010(10.4×),math 0.0040 → 0.0580(14.5×)"
+              "— 以上为每臂 3B tokens 的 mid-training 买到"),
     dict(kind="image", title="代理模型可信吗",
-         takeaway="代理分数与全量实测一致 — 搜索没有在优化幻觉",
-         bullets=[("复现", "冷启动(prod5)与热启动(prod4)两次独立搜索到达同一平台(~0.21)")],
+         takeaway="代理排序与全量实测一致 — 搜索没有在优化幻觉",
+         bullets=[
+             ("代理→实测一致", "搜索在代理分上选中的配方,d28 实测全部兑现:三臂 WINS**,终选 top-1"),
+             ("独立复现", "冷启动(115 点全新采样)0.2086 vs 热启动(prod4)0.2142,"
+                       "落在种子带 ±0.016~0.032 内 — 两次搜索抵达同一平台"),
+         ],
          image="proxy_target_consistency.png",
          caption="climb 臂:代理分 vs d28 实测"),
-    dict(kind="bullets", title="我们在 CLIMB 上的方法改进",
-         takeaway="论文机制不设防的地方,我们各加了一道闸",
-         bullets=[
-             ("终选守卫", "论文让『外推赢家』直接上位;我们要求其预测优势显著超过噪声才放行,"
-                        "否则回落最佳实测点。prod5 实战:守卫触发,其选点赢了全舰队"),
-             ("宏簇构造重设计", "我们的池在嵌入空间是致密连续流形,论文的距离合并会把 99% tokens "
-                              "塌成一个巨簇;改容量平衡划分后,搜索才真正有 15 个旋钮"),
-             ("SNR 加权目标", "论文优化裸 accuracy — 难 benchmark 上那是抛硬币;"
-                            "信噪比加权让代理模型学信号、不学噪声"),
-         ]),
-    dict(kind="bullets", title="实验关键发现",
-         takeaway="三条用算力换来的发现 — 每条都改变了流程",
-         bullets=[
-             ("剪枝需要单列下限", "只看簇均值会漏检『格式干净但知识贫瘠』的簇;这些簇混进搜索空间后,"
-                               "配比旋钮几乎转不动(prod1 实证,已修复)"),
-             ("评测协议要适配 base 模型", "base 无 EOS,论文惯例的 256 生成预算让答案后的幻觉污染 "
-                                      "math 分(实测 30% 正确答案需要更长);停止串 + 1024 预算后"
-                                      "测到的才是真分数"),
-             ("单遍退火必须是真单遍", "早期轮次混料实测被重复消费 2.5–4 epoch,预算口径失真;"
-                                   "修复后构造性保证单遍"),
-         ]),
+    dict(kind="table", title="我们在 CLIMB 上的方法改进",
+         takeaway="三处修复,每处都对应上一代的实测代价",
+         table=(["修复", "上一代实测代价", "prod5 结果"],
+                [["终选守卫(D19)", "prod4:外推终选 0.1972,输自家实测点 0.2142(−0.017)",
+                  "守卫触发 → 终选 = 实测 top-1(0.2086)"],
+                 ["宏簇平衡划分(D14)", "论文距离合并把 99% tokens 塌成巨簇(K=14 时留 99.0%)",
+                  "恰好 15 簇,簇容量受约束 — 15 个真旋钮"],
+                 ["SNR 加权目标(D8)", "prod1:搜索 0.1623 < 随机 0.1659(−0.004,噪声内)",
+                  "搜索 +0.043 vs 均匀(z=+3.80)"]]),
+         y=1.95, row_h=0.78, size=12, widths=[0.21, 0.43, 0.36],
+         note="四代累计(vs 当轮基线):−0.004 → +0.010 → +0.016~0.032 → +0.043;"
+              "论文机制不设防的地方,各加一道闸"),
+    dict(kind="table", title="实验关键发现",
+         takeaway="三条实测发现 — 每条都改变了流程",
+         table=(["发现", "实测证据", "处置"],
+                [["剪枝要单列下限(D13)",
+                  "69/1000 簇过均值线,但 knowledge_value 1.8–2.0(格式分把知识贫瘠平均掉)",
+                  "任一质量列 < 2.0 即剪(保留均值线 3.0)"],
+                 ["生成评测适配 base(D17)",
+                  "无 EOS:hit_cap 99.85% @256;gold 30% 的答案超 256(p95=643)",
+                  "停止串 + math 预算 1024:18.8% → 25.8%"],
+                 ["单遍必须真单遍(D16)",
+                  "prod1/2 实测混料被重复消费 2.5–4 epoch",
+                  "修复后构造性单遍(epoch ≈ 0.7)"]]),
+         y=1.95, row_h=0.78, size=12, widths=[0.22, 0.44, 0.34],
+         note="三条都来自实测代价,不是理论洁癖 — 修一条,数字才可信一分"),
     dict(kind="image", title="赢家是谁",
-         takeaway="搜索自己找到了 gsm8k 的机制闭环",
+         takeaway="搜索把 80% 预算押在统计练习题簇 — gsm8k 的机制闭环",
          bullets=[
-             ("赢家配方(cfg#101)", "搜索终选,不输同轮任何实测点;给『初等/应用统计练习题与解答体』簇最高权重"),
-             ("簇语义", "统计练习题 = gsm8k 同机制,不是泛泛的『高质量文本』"),
+             ("赢家配方(cfg#101)", "C10『初等/应用统计练习题与解答体』α = 0.80 = 池占比 5.5% 的 14.6×;"
+                                "C0 形式数学解题 0.08;其余 13 簇全压地板(0.009)"),
+             ("收敛稳健", "top-3 配方全部 C10-heavy(α 0.55~0.80)— 搜索结论不是单点运气"),
          ],
          image="cluster_alpha_vs_score.png",
          caption="逐簇 α 与得分(赢家配方的簇权重分布)"),
-    dict(kind="bullets", title="一个尖锐的发现:质量分 ≠ 训练效用",
-         takeaway="现有质量分与下游训练效用不是一回事",
-         bullets=[
-             ("事实", "赢家簇的质量分在宏簇中最低 — 但它的下游 STEM 贡献最大"),
-             ("解释", "质量分衡量『文本像不像好文本』,不衡量『训练有没有用』"),
-             ("含义", "配比的裁判只能是下游实测 — 这正是系统搜索存在的理由;"
-                    "也是质量信号值得一起改进的地方"),
-         ]),
-    dict(kind="bullets", title="怎么保证没骗自己",
-         takeaway="判定先写死,误差实算,结论复现",
-         bullets=[
-             ("判定规则预注册", "判读标准在实验前写死,不是事后找说法"),
-             ("评测管线锚点", "远端复评 base vs 本地基准 |Δ|=0.0014 → PASS,打分管线无系统偏移"),
-             ("误差棒实算", "SE 来自逐任务分数与题量;修正后旧结论 z 值仍然成立"),
-             ("两次独立搜索复现", "冷启动与热启动同平台(~0.21),结果不依赖初始化"),
-         ]),
-    dict(kind="bullets", title="这意味着什么",
+    dict(kind="table", title="一个尖锐的发现:质量分 ≠ 训练效用",
+         takeaway="赢家簇质量分最低、训练贡献最大",
+         table=(["簇", "质量分(stem_rel / knowl.)", "配方角色", "d28 效果"],
+                [["C10 统计练习题(赢家重仓)", "3.88 / 3.65 — 三簇最低", "α = 0.80(14.6× 池占比)",
+                  "gsm8k 2.9× / math 3.6×(vs uniform)"],
+                 ["C0 形式数学解题", "4.33 / 4.12", "α = 0.08", "与 C10 并列的机制解释"],
+                 ["C6 综述长文", "4.45 / 4.07 — 最高", "cfg100 下注 α = 0.16",
+                  "cfg100 math 减半(0.026 vs 0.058)"]]),
+         emph=[0], y=1.95, row_h=0.62, size=12, widths=[0.26, 0.26, 0.23, 0.25],
+         note="形状相近、域不同:C2(化学短练习)vs C10(统计短练习)= 0.1× vs 14.6× 池占比权重 — "
+              "同为短练习,域对了才有用;质量分衡量『像不像好文本』,不衡量『训练有没有用』"),
+    dict(kind="table", title="怎么保证没骗自己",
+         takeaway="四道检查,全部量化、全部在案",
+         table=(["检查", "数值", "判定"],
+                [["评测管线锚点", "远端复评 base 0.1752 vs 本地基准 0.1738(|Δ| = 0.0014)",
+                  "PASS(阈 0.002)"],
+                 ["误差实算", "6/6 臂:SE = 逐题二项(9,110 题),非默认值", "全部结论带 z / p"],
+                 ["独立复现", "冷/热两次搜索:0.2086 vs 0.2142(种子带 ±0.016~0.032)", "同平台"],
+                 ["判定预注册", "V1–V5 判决规则实验前写死(含加冕规则)", "按规则执行,留档可查"]]),
+         y=1.95, row_h=0.62, size=12.5, widths=[0.2, 0.52, 0.28],
+         note="规则先于结果、误差实算、管线锚定、结论复现 — 四者齐备,结论才出手"),
+    dict(kind="stats", title="这意味着什么",
          takeaway="配比是一个可搜索、可复现、可解释的旋钮",
-         bullets=[
-             ("可搜索", "不靠直觉 — 由下游实测驱动迭代"),
-             ("可复现", "两次独立搜索给出同一个答案"),
-             ("可解释", "赢家配方有簇语义,不是黑盒"),
-             ("自然延伸", "更大规模验证(20B,天级);质量信号协作 — 值得一起做"),
-         ]),
+         stats=[("+0.043", "STEM 提升(z=+3.8,6/6 benchmark 全胜)"),
+                ("2 次", "独立搜索同平台(0.209 vs 0.214)"),
+                ("≈3,900 NPU·h", "两轮全量验证 + 一次性全池嵌入")],
+         note="赢家配方可直接复用;自然延伸:更大规模验证(20B,天级)+ 质量信号协作"
+              "(P-3 已预注册)— 值得一起做"),
 ]
 
 
@@ -238,6 +279,51 @@ def _stats(slide, s):
         _run(p, s["note"], 12, color=GRAY)
 
 
+def _cell(cell, text, size, color, fill, bold=False, left=False):
+    cell.fill.solid()
+    cell.fill.fore_color.rgb = fill
+    cell.vertical_anchor = MSO_ANCHOR.MIDDLE
+    cell.margin_left = cell.margin_right = Inches(0.08)
+    cell.margin_top = cell.margin_bottom = Inches(0.02)
+    p = cell.text_frame.paragraphs[0]
+    p.alignment = PP_ALIGN.LEFT if left else PP_ALIGN.CENTER
+    _run(p, text, size, bold=bold, color=color)
+
+
+def _table(slide, s):
+    """举证表: 表头 navy/白字, 首列左对齐, emph 行浅青底加粗, note 为脚注。"""
+    headers, rows = s["table"]
+    emph = set(s.get("emph", []))
+    widths = s.get("widths") or [1.0 / len(headers)] * len(headers)
+    size = s.get("size", 13)
+    row_h = s.get("row_h", 0.46)
+    y = Inches(s.get("y", 1.95))
+    gt = slide.shapes.add_table(len(rows) + 1, len(headers), ML, y, CW,
+                                Inches(0.42 + row_h * len(rows))).table
+    gt.first_row = False
+    gt.horz_banding = False
+    for j, frac in enumerate(widths):
+        gt.columns[j].width = Emu(int(CW * frac))
+    gt.rows[0].height = Inches(0.42)
+    for i in range(1, len(rows) + 1):
+        gt.rows[i].height = Inches(row_h)
+    for j, h in enumerate(headers):
+        _cell(gt.cell(0, j), h, size, WHITE, NAVY, bold=True)
+    for i, row in enumerate(rows):
+        hot = i in emph
+        for j, v in enumerate(row):
+            fill = RGBColor(0xE2, 0xF3, 0xF4) if hot else WHITE
+            _cell(gt.cell(i + 1, j), str(v), size,
+                  NAVY if (hot or j == 0) else DARK, fill,
+                  bold=hot or j == 0, left=(j == 0))
+    if s.get("note"):
+        y_n = y + Inches(0.42 + row_h * len(rows)) + Inches(0.18)
+        tf = _box(slide, ML, y_n, CW, Inches(1.0))
+        p = tf.paragraphs[0]
+        p.line_spacing = 1.25
+        _run(p, s["note"], 11.5, color=GRAY)
+
+
 def _image(slide, s):
     y = Inches(1.72)
     if s.get("bullets"):
@@ -295,6 +381,19 @@ def build(run_dir, out):
             p = tf.paragraphs[0]
             p.alignment = 2
             _run(p, s["subtitle"], 19, color=WHITE)
+            if s.get("stats"):
+                n = len(s["stats"])
+                col_w = (PAGE_W - Inches(2.0)) / n
+                for i, (num, label) in enumerate(s["stats"]):
+                    x = Inches(1.0) + int(col_w) * i
+                    tf = _box(slide, x, Inches(4.95), col_w, Inches(0.7))
+                    p = tf.paragraphs[0]
+                    p.alignment = 2
+                    _run(p, num, 29, bold=True, color=RGBColor(0x6C, 0xD9, 0xDE))
+                    tf = _box(slide, x, Inches(5.7), col_w, Inches(0.55))
+                    p = tf.paragraphs[0]
+                    p.alignment = 2
+                    _run(p, label, 12.5, color=RGBColor(0xBB, 0xC8, 0xD4))
             tf = _box(slide, Inches(1.0), Inches(6.35), PAGE_W - Inches(2.0), Inches(0.5))
             p = tf.paragraphs[0]
             p.alignment = 2
@@ -305,6 +404,8 @@ def build(run_dir, out):
             _bullets(slide, s)
         elif s["kind"] == "stats":
             _stats(slide, s)
+        elif s["kind"] == "table":
+            _table(slide, s)
         elif s["kind"] == "image":
             if s["_path"]:
                 _image(slide, s)
