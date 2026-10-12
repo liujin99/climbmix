@@ -323,6 +323,28 @@ def main():
     out(f"  CP4 report — {args.run_dir}  "
           f"({len(ranked)} arms; ref = {ref})")
     out("═" * 62)
+
+    # ── 0. 训练语境 (2026-10-12 用户裁决: d28 验证的数据量是关键信息,
+    #    判定节不可漏 — "+0.04 是用多少 token 买到的" 必须在场) ──
+    try:
+        with open(resolve_run_file(args.run_dir, "launch_env.json")) as f:
+            le = json.load(f)
+    except (OSError, ValueError):
+        le = {}
+    if le.get("TARGET_TOKENS"):
+        parts = [f"每臂 {le['TARGET_TOKENS']} tokens"]
+        if le.get("TARGET_STEPS"):
+            parts.append(f"{le['TARGET_STEPS']} 步")
+        if le.get("TARGET_DEPTH"):
+            parts.append(f"d{le['TARGET_DEPTH']} 基座")
+        try:
+            sr = float(le.get("STEM_RATIO") or "")
+            if 0 < sr < 1:
+                parts.append(f"混料 {sr:.0%} stem 搜索配方 + {1 - sr:.0%} 通用")
+        except ValueError:
+            pass
+        out(f"  训练语境: {' · '.join(parts)}")
+
     verdict["ref"] = ref
     verdict["arms"] = {a: {"stem": stems[a],
                            "stem_nll": parsed[a]["stem_nll"]}
