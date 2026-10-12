@@ -41,10 +41,10 @@ CW = PAGE_W - 2 * ML                   # 内容宽
 CHARTS_USED = ["search_convergence.png", "arms_main_results.png",
                "proxy_target_consistency.png", "cluster_alpha_vs_score.png"]
 
-# ── 幻灯片文案 (v4: 领导可读 + 证据优先 — p4 CLIMB 流程图; 新增全基准
-#    得分总表(与 report §3 同源); 提升页改对最强基线; 新增逐版增益趋势图;
-#    删除『实测教训』页; **…** = 段内加粗; 数字已对 CP4 判定节与
-#    experiment_prod5.md 判读记录核对) ──────────────────────────────
+# ── 幻灯片文案 (v5: arm 命名全英文对齐图表(climb/domainfix/natural/uniform/
+#    base)+ 脚注说明; CLIMB 流程图加图标(数据池/15 簇/α 配比/d20/d28);
+#    提升页口径改『最强传统方法』; 删逐版趋势页(用结果说话);
+#    **…** = 段内加粗; 数字已对 CP4 判定节与 experiment_prod5.md 核对) ──
 SLIDES = [
     dict(kind="title",
          title="训练数据怎么配?让算法自己搜",
@@ -55,41 +55,42 @@ SLIDES = [
                 ("88.5%", "赢家训练量集中在 2 个数学簇")]),
     dict(kind="table", title="从手调到搜索",
          takeaway="quadmix 已证明配比重要;系统搜索第一次给出可复现、可解释的答案",
-         table=(["配比策略", "STEM", "Δ vs 不训练", "结论(vs 均匀)"],
-                [["不继续训练(底座现状)", "0.1752", "—", "对照锚点"],
-                 ["均匀喂(15 簇等权)", "0.1657", "−0.0095", "参考基准"],
-                 ["手调配比(重仓数学)", "0.1773", "+0.0021", "无显著差异(z=+1.0)"],
-                 ["算法搜索(climb)", "0.2086", "+0.0334", "显著胜出(z=+3.8)"]]),
+         table=(["配比策略", "STEM", "Δ vs 不训练", "结论(vs uniform)"],
+                [["base(不继续训练)", "0.1752", "—", "对照锚点"],
+                 ["uniform(15 簇等权)", "0.1657", "−0.0095", "参考基准"],
+                 ["domainfix(手调域配比)", "0.1773", "+0.0021", "无显著差异(z=+1.0)"],
+                 ["climb(系统搜索)", "0.2086", "+0.0334", "显著胜出(z=+3.8)"]]),
          emph=[3], y=2.0, row_h=0.52,
          widths=[0.34, 0.12, 0.16, 0.38],
-         note="同数据池 · 同底座 · 同预算(每臂 3B tokens)— **增益全部来自『喂哪些数据』,不来自多训练**;"
-              "方法逐版迭代,优势逐版放大(vs 均匀):−0.004 → +0.010 → +0.016~0.032 → **+0.043**"),
+         note="同数据池 · 同底座 · 同预算(每臂 3B tokens)— **增益全部来自『喂哪些数据』,不来自多训练**"),
     dict(kind="table", title="结论先行",
          takeaway="三个搜索配方全部显著胜出 — 只多训练、不挑数据,一分不涨",
-         table=(["配方", "STEM", "Δ vs 均匀", "z", "结论"],
-                [["搜索 · 终选配方", "0.2086", "+0.0429", "+3.80", "显著胜出"],
-                 ["搜索 · 配方 ②", "0.2078", "+0.0421", "+3.67", "**显著胜出**"],
-                 ["搜索 · 配方 ③", "0.2013", "+0.0356", "+3.16", "**显著胜出**"],
-                 ["手调配比(重仓数学)", "0.1773", "+0.0116", "+1.03", "无显著差异"],
-                 ["按池内自然占比", "0.1723", "+0.0067", "+0.59", "无显著差异"],
-                 ["均匀等权(参考)", "0.1657", "(基准)", "—", "—"]]),
+         table=(["配方", "STEM", "Δ vs uniform", "z", "结论"],
+                [["climb(搜索终选)", "0.2086", "+0.0429", "+3.80", "显著胜出"],
+                 ["climb-cfg90", "0.2078", "+0.0421", "+3.67", "**显著胜出**"],
+                 ["climb-cfg100", "0.2013", "+0.0356", "+3.16", "**显著胜出**"],
+                 ["domainfix", "0.1773", "+0.0116", "+1.03", "无显著差异"],
+                 ["natural", "0.1723", "+0.0067", "+0.59", "无显著差异"],
+                 ["uniform(参考)", "0.1657", "(基准)", "—", "—"]]),
          emph=[0], y=1.9, row_h=0.46,
-         widths=[0.32, 0.14, 0.18, 0.12, 0.24],
-         note="配方编号 cfg#101 / #90 / #100 留档可查;climb 对均匀 **6 项基准全胜**"
-              "(符号检验 p=0.016 — 相当于连掷 6 次硬币全是正面);三个非搜索基线都没显著超过『不训练』(0.1752)"),
+         widths=[0.26, 0.14, 0.2, 0.12, 0.28],
+         note="climb = 搜索终选配方(cfg#101);cfg90 / cfg100 = 搜索实测 top-3 的另两个配方;"
+              "domainfix = 手调域配比(数学 0.60);natural = 池自然占比;uniform = 15 簇等权 — 各页同此;"
+              "climb 对 uniform **6 项基准全胜**(符号检验 p=0.016,相当于连掷 6 次硬币全是正面);"
+              "三个非搜索臂都没显著超过 base(0.1752)"),
     dict(kind="flow", title="怎么做的 — CLIMB:把『选数据』变成『搜参数』",
          takeaway="配比不再靠人拍:15 个簇权重当作可搜索的参数,小模型快速试错,学习器指路,逐轮逼近最优",
          steps=[
-             ("① 语义分簇",
+             ("① 语义分簇", "data",
               "1.16 亿篇 STEM 文档按内容自动聚成 15 个主题簇(统计练习题 / 形式数学 / 综述长文…)",
               "『选哪些文档』→ 调 15 个数字"),
-             ("② 小模型当替身",
+             ("② 小模型当替身", "d20",
               "小模型(约为正式模型的 1/3)按候选配比短训,在 6 项基准上打分",
               "每配比 640M tokens ≈ 全量 1/5 · ~4h"),
-             ("③ 学习器指路",
+             ("③ 学习器指路", "lgbm",
               "LightGBM 学『配比 → 得分』规律,下一轮集中测有希望的配比,混入随机点防走偏",
               "3 轮 64/32/16 ≈ 115 个实测配比"),
-             ("④ 正式规模复验",
+             ("④ 正式规模复验", "d28",
               "最优配方交正式模型全量训练,与全部基线同台对比",
               "每臂 3B tokens · 9,110 题"),
          ],
@@ -106,12 +107,12 @@ SLIDES = [
          image="search_convergence.png",
          caption="115 个候选配比的得分轨迹(各轮最佳连成折线)"),
     dict(kind="image", title="主结果",
-         takeaway="三个搜索配方全部显著胜出,最高比均匀配比高 26%(0.209 vs 0.166)",
+         takeaway="三个 CLIMB 配方全部显著胜出,最高比 uniform 高 26%(0.209 vs 0.166)",
          image="arms_main_results.png",
          caption="同预算对比(每臂 3B tokens);误差棒逐题实算(9,110 题)— 臂间间距远大于误差棒"),
     dict(kind="table", title="全基准得分总表",
-         takeaway="搜索配方包揽生成式两项前三;选择题各臂打平(最高分反而是『不训练』)— 净差距全部来自『要写过程』的题",
-         table=(["基准(题量)", "搜索·终选", "搜索②", "搜索③", "手调", "自然", "均匀", "不训练"],
+         takeaway="三个 CLIMB 配方包揽生成式两项前三;选择题各臂打平,最高分反而是 base(不训练)— 净差距全部来自『要写过程』的题",
+         table=(["基准(题量)", "climb", "climb-cfg90", "climb-cfg100", "domainfix", "natural", "uniform", "base"],
                 [["arc_easy(2376·选择)", "0.7294", "0.7247", "0.7214", "0.7273", "0.7210", "0.7269", "**0.7424**"],
                  ["arc_challenge(1172·选择)", "0.4360", "0.4403", "0.4471", "0.4283", "0.4334", "0.4334", "**0.4608**"],
                  ["mmlu_stem(3545·选择)", "0.2920", "0.2905", "**0.3016**", "0.2928", "0.2905", "0.2872", "0.2979"],
@@ -119,23 +120,23 @@ SLIDES = [
                  ["gsm8k(1319·写过程)", "**0.3010**", "0.2593", "0.2654", "0.1281", "0.0948", "0.1054", "0.0288"],
                  ["math(500·写过程)", "**0.0580**", "0.0500", "0.0260", "0.0280", "0.0160", "0.0160", "0.0040"],
                  ["STEM 平均(centered)", "**0.2086**", "0.2078", "0.2013", "0.1773", "0.1723", "0.1657", "0.1752"]]),
-         emph=[6], y=1.85, row_h=0.42, size=11.5,
+         emph=[6], y=1.85, row_h=0.42, size=11,
          widths=[0.26] + [0.1057] * 7,
          note="加粗 = 行最优;数字与 report.md §3 完全同源(逐题 ±SE 明细见 report);"
-              "选择题 4 行的行最优都是『不训练』 — 3B 继续训练的共性回退,全部臂同向,与配方无关"),
-    dict(kind="table", title="提升来自哪里 — 对最强基线",
-         takeaway="逐基准跟最强基线比:大赢的全是『要写过程的数学题』(2×+),选择题全部打平 — 净增益干净落在推理能力",
-         table=(["基准(题量)", "搜索·终选", "最强配比基线", "Δ", "结论"],
-                [["gsm8k 应用数学(1319·写过程)", "0.3010", "0.1281(手调)", "+0.173", "2.3× 大赢"],
-                 ["math 竞赛数学(500·写过程)", "0.0580", "0.0280(手调)", "+0.030", "2.1× 大赢"],
-                 ["mmlu_stem(3545·选择)", "0.2920", "0.2928(手调)", "−0.001", "打平"],
-                 ["arc_easy(2376·选择)", "0.7294", "0.7273(手调)", "+0.002", "打平"],
-                 ["arc_challenge(1172·选择)", "0.4360", "0.4334(均匀)", "+0.003", "打平"],
-                 ["gpqa_diamond(198·选择)", "0.2121", "0.2475(自然)", "−0.035", "打平(噪声内)"]]),
+              "选择题 4 行的行最优都是 base — 3B 继续训练的共性回退,全部臂同向,与配方无关"),
+    dict(kind="table", title="提升来自哪里 — 对最强传统方法",
+         takeaway="逐基准跟最强传统方法比:大赢的全是『要写过程的数学题』(2×+),选择题全部打平 — 净增益干净落在推理能力",
+         table=(["基准(题量)", "climb", "最强传统方法", "Δ", "结论"],
+                [["gsm8k 应用数学(1319·写过程)", "0.3010", "0.1281(domainfix)", "+0.173", "2.3× 大赢"],
+                 ["math 竞赛数学(500·写过程)", "0.0580", "0.0280(domainfix)", "+0.030", "2.1× 大赢"],
+                 ["mmlu_stem(3545·选择)", "0.2920", "0.2928(domainfix)", "−0.001", "打平"],
+                 ["arc_easy(2376·选择)", "0.7294", "0.7273(domainfix)", "+0.002", "打平"],
+                 ["arc_challenge(1172·选择)", "0.4360", "0.4334(uniform)", "+0.003", "打平"],
+                 ["gpqa_diamond(198·选择)", "0.2121", "0.2475(natural)", "−0.035", "打平(噪声内)"]]),
          emph=[0, 1], y=1.9, row_h=0.46,
-         widths=[0.34, 0.13, 0.2, 0.13, 0.2],
-         note="最强配比基线 = 手调 / 自然 / 均匀 逐基准取最强(带名);选择题 Δ 全部 ≪ SE(逐题 SE 见 report §3);"
-              "vs 完全不训练:gsm8k **10.4×**、math **14.5×**"),
+         widths=[0.33, 0.12, 0.24, 0.12, 0.19],
+         note="传统方法 = 非搜索配比:domainfix(手调域配比)/ natural(池自然占比)/ uniform(15 簇等权),"
+              "逐基准取最强;选择题 Δ 全部 ≪ SE(逐题 SE 见 report §3);vs base:gsm8k **10.4×**、math **14.5×**"),
     dict(kind="image", title="小模型替身靠谱吗",
          takeaway="搜索在替身上选中的配方,正式模型全部兑现 — 替身没有骗我们",
          bullets=[
@@ -145,16 +146,6 @@ SLIDES = [
          ],
          image="proxy_target_consistency.png",
          caption="climb 配方:替身分 vs 正式实测"),
-    dict(kind="trend", title="我们的贡献:把方法一版一版做扎实",
-         takeaway="从第一版『输给随机』到 +0.043 — 每一版修掉一处实测缺陷,增益逐版放大",
-         axis="搜索增益 vs 当轮均匀基线(STEM centered Δ)",
-         bars=[("prod1", "−0.0036", -0.0036, "聚类塌缩 + 评分缺陷暴露"),
-               ("prod2", "+0.0102", 0.0102, "簇均衡 15 簇,首次跑赢"),
-               ("prod4", "+0.016~0.032", 0.032, "数据真正单遍 + 评分噪声下限"),
-               ("prod5", "+0.036~0.043", 0.0429, "评测适配 + 终选守卫,冷启动复现")],
-         note="口径 = 每版最优搜索臂 vs 当轮均匀基线;prod3 = 扩点搜索轮(无基线臂),54 个实测点成为 "
-              "prod4 热启动地基;prod4/prod5 柱高取区间上沿(区间 = 该轮全部搜索臂);"
-              "历史轮 math 列因评测协议升级不可直接比"),
     dict(kind="table", title="我们在 CLIMB 上的三处加固",
          takeaway="论文机制不设防的地方,各加一道闸 — 每处都对应上一版实打实的失败",
          table=(["加固", "上一版实测代价", "修复后"],
@@ -184,8 +175,8 @@ SLIDES = [
                 [["统计练习题(赢家重仓)", "3.88 / 3.65 — 三簇最低", "权重 0.80(池占比的 14.6×)",
                   "gsm8k 2.9× / math 3.6×"],
                  ["形式数学解题", "4.33 / 4.12", "权重 0.08", "与赢家并列的机制解释"],
-                 ["综述长文(质量分最高)", "4.45 / 4.07", "第 3 名配方押注(0.16)",
-                  "该配方 math 直接减半(0.026 vs 0.058)"]]),
+                 ["综述长文(质量分最高)", "4.45 / 4.07", "climb-cfg100 押注(0.16)",
+                  "cfg100 的 math 直接减半(0.026 vs 0.058)"]]),
          emph=[0], y=1.95, row_h=0.62, size=12, widths=[0.24, 0.25, 0.24, 0.27],
          note="同样是短练习题:**化学练习没用(权重 0.1×),统计练习大赚(14.6×)— "
               "押对领域,比押『高分文本』重要**"),
@@ -389,16 +380,75 @@ def _image(slide, s):
         _run(p, s["caption"], 11, color=GRAY)
 
 
+def _icon(slide, kind, cx, cy):
+    """步骤图标: data=数据池+15 簇点 / d20,d28=模型方块 / lgbm=递增柱。cx,cy = 中心(int EMU)。"""
+    if kind == "data":
+        can = slide.shapes.add_shape(MSO_SHAPE.CAN, Emu(int(cx - Inches(0.60))),
+                                     Emu(int(cy - Inches(0.21))), Inches(0.36), Inches(0.42))
+        can.fill.solid()
+        can.fill.fore_color.rgb = RGBColor(0xD5, 0xE9, 0xEB)
+        can.line.color.rgb = TEAL
+        can.line.width = Pt(1)
+        can.shadow.inherit = False
+        ar = slide.shapes.add_shape(MSO_SHAPE.RIGHT_ARROW, Emu(int(cx - Inches(0.17))),
+                                    Emu(int(cy - Inches(0.06))), Inches(0.16), Inches(0.12))
+        ar.fill.solid()
+        ar.fill.fore_color.rgb = TEAL
+        ar.line.fill.background()
+        ar.shadow.inherit = False
+        palette = [TEAL, NAVY, RGBColor(0x8A, 0x8A, 0x8A)]
+        for r in range(3):
+            for c in range(5):
+                ov = slide.shapes.add_shape(
+                    MSO_SHAPE.OVAL,
+                    Emu(int(cx + Inches(0.06) + Inches(0.105) * c)),
+                    Emu(int(cy - Inches(0.155) + Inches(0.105) * r)),
+                    Inches(0.075), Inches(0.075))
+                ov.fill.solid()
+                ov.fill.fore_color.rgb = palette[(r * 5 + c) % 3]
+                ov.line.fill.background()
+                ov.shadow.inherit = False
+    elif kind in ("d20", "d28"):
+        big = kind == "d28"
+        w, h = (Inches(0.58), Inches(0.5)) if big else (Inches(0.46), Inches(0.4))
+        cb = slide.shapes.add_shape(MSO_SHAPE.CUBE, Emu(int(cx - w // 2)),
+                                    Emu(int(cy - h // 2)), w, h)
+        cb.fill.solid()
+        cb.fill.fore_color.rgb = (RGBColor(0x6C, 0xD9, 0xDE) if big
+                                  else RGBColor(0xB7, 0xDE, 0xE2))
+        cb.line.color.rgb = NAVY if big else TEAL
+        cb.line.width = Pt(1)
+        cb.shadow.inherit = False
+        tf = cb.text_frame
+        tf.word_wrap = False
+        p = tf.paragraphs[0]
+        p.alignment = 2
+        _run(p, kind, 10.5 if big else 9.5, bold=True, color=NAVY)
+    elif kind == "lgbm":
+        heights = [0.10, 0.17, 0.24, 0.32]
+        base = int(cy + Inches(0.16))
+        x = int(cx) - int(Inches(0.305))
+        for i, hh in enumerate(heights):
+            b = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Emu(x),
+                                       Emu(base - Inches(hh)), Inches(0.11), Inches(hh))
+            b.fill.solid()
+            b.fill.fore_color.rgb = TEAL if i == 3 else RGBColor(0x6E, 0x9E, 0xC4)
+            b.line.fill.background()
+            b.shadow.inherit = False
+            x += int(Inches(0.11)) + int(Inches(0.07))
+
+
 def _flow(slide, s):
-    """算法流程图: ①②③ 搜索层(浅青) + ④ 验证层(navy), 步骤间箭头, ③→② 回环。"""
+    """算法流程图: 图标 + ①②③ 搜索层(浅青) + ④ 验证层(navy); ①→② 之间 α 配比芯片;
+    ③→② 回环箭头。"""
     steps = s["steps"]
     n = len(steps)
-    gap = Inches(0.44)
+    gap = Inches(0.58)
     bw = Emu((int(CW) - int(gap) * (n - 1)) // n)
     by, bh = Inches(2.02), Inches(2.7)
     step = int(bw) + int(gap)
     centers = []
-    for i, (head, body, key) in enumerate(steps):
+    for i, (head, icon, body, key) in enumerate(steps):
         x = ML + Emu(step * i)
         last = i == n - 1
         sp = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, x, by, bw, bh)
@@ -409,25 +459,46 @@ def _flow(slide, s):
         sp.line.width = Pt(1.5 if last else 0.75)
         sp.shadow.inherit = False
         centers.append(int(x) + int(bw) // 2)
-        tf = _box(slide, x + Inches(0.14), by + Inches(0.14), bw - Inches(0.28), Inches(0.42))
+        _icon(slide, icon, centers[-1], int(by) + int(Inches(0.40)))
+        tf = _box(slide, x + Inches(0.14), by + Inches(0.72), bw - Inches(0.28), Inches(0.38))
         _run(tf.paragraphs[0], head, 15, bold=True, color=WHITE if last else NAVY)
-        tf = _box(slide, x + Inches(0.14), by + Inches(0.62), bw - Inches(0.28), Inches(1.42))
+        tf = _box(slide, x + Inches(0.14), by + Inches(1.12), bw - Inches(0.28), Inches(1.0))
         p = tf.paragraphs[0]
-        p.line_spacing = 1.25
+        p.line_spacing = 1.22
         _run(p, body, 11.5, color=WHITE if last else DARK)
-        tf = _box(slide, x + Inches(0.14), by + bh - Inches(0.66), bw - Inches(0.28), Inches(0.58))
+        tf = _box(slide, x + Inches(0.14), by + bh - Inches(0.58), bw - Inches(0.28), Inches(0.52))
         p = tf.paragraphs[0]
         p.line_spacing = 1.18
         _run(p, key, 11, bold=True,
              color=RGBColor(0x9B, 0xE3, 0xE7) if last else TEAL)
         if not last:
             ar = slide.shapes.add_shape(
-                MSO_SHAPE.RIGHT_ARROW, x + bw + Inches(0.05),
-                by + bh // 2 - Inches(0.15), gap - Inches(0.1), Inches(0.3))
+                MSO_SHAPE.RIGHT_ARROW, x + bw + Inches(0.07),
+                by + bh // 2 - Inches(0.15), gap - Inches(0.14), Inches(0.3))
             ar.fill.solid()
             ar.fill.fore_color.rgb = TEAL
             ar.line.fill.background()
             ar.shadow.inherit = False
+    # α 配比芯片 (①→② 之间, 箭头下方): 一个配比 = 15 个簇权重
+    gcx = (centers[0] + centers[1]) // 2
+    chy = by + bh // 2 + Inches(0.24)
+    chip = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE,
+                                  Emu(int(gcx - Inches(0.23))), chy,
+                                  Inches(0.46), Inches(0.32))
+    chip.adjustments[0] = 0.18
+    chip.fill.solid()
+    chip.fill.fore_color.rgb = WHITE
+    chip.line.color.rgb = NAVY
+    chip.line.width = Pt(1.25)
+    chip.shadow.inherit = False
+    p = chip.text_frame.paragraphs[0]
+    p.alignment = 2
+    _run(p, "α", 13, bold=True, color=NAVY)
+    tf = _box(slide, Emu(int(gcx - Inches(0.29))), chy + Inches(0.36), Inches(0.58), Inches(0.24))
+    p = tf.paragraphs[0]
+    p.alignment = 2
+    _run(p, "配比", 9, color=GRAY)
+    # 迭代回环: ③ → ②
     lx, rx = centers[1], centers[2]
     lo = slide.shapes.add_shape(MSO_SHAPE.LEFT_ARROW, Emu(lx),
                                 by + bh + Inches(0.18), Emu(rx - lx), Inches(0.3))
@@ -442,57 +513,6 @@ def _flow(slide, s):
     _run(p, s["loop_label"], 11.5, bold=True, color=TEAL)
     if s.get("note"):
         tf = _box(slide, ML, Inches(5.9), CW, Inches(0.9))
-        p = tf.paragraphs[0]
-        p.line_spacing = 1.25
-        _md(p, s["note"], 11.5, GRAY, bold_color=DARK)
-
-
-def _trend(slide, s):
-    """逐版增益柱状图: 手绘矩形 (红=负增益, navy=正, teal=最新版), 零线 + 区间标签。"""
-    bars = s["bars"]
-    x0, x1 = int(ML), int(ML) + int(CW)
-    top, bot = Inches(2.15), Inches(4.7)
-    vmin, vmax = -0.010, 0.050
-    zero = int(top + (vmax - 0.0) / (vmax - vmin) * (int(bot) - int(top)))
-    _rect(slide, ML, Emu(zero), CW, Pt(1.5), RGBColor(0xC5, 0xCF, 0xD6))
-    tf = _box(slide, ML - Inches(0.38), Emu(zero - Inches(0.13)), Inches(0.32), Inches(0.26))
-    p = tf.paragraphs[0]
-    p.alignment = 2
-    _run(p, "0", 10, color=GRAY)
-    seg = (x1 - x0) // len(bars)
-    bwd = Inches(1.15)
-    for i, (lab, vstr, v, fix) in enumerate(bars):
-        cx = x0 + seg * i + seg // 2
-        y = int(top + (vmax - v) / (vmax - vmin) * (int(bot) - int(top)))
-        h = abs(zero - y) or Pt(2)
-        color = (TEAL if i == len(bars) - 1
-                 else RGBColor(0xC0, 0x39, 0x2B) if v < 0 else NAVY)
-        sp = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE,
-                                    Emu(cx - int(bwd) // 2), Emu(min(y, zero)),
-                                    bwd, Emu(h))
-        sp.fill.solid()
-        sp.fill.fore_color.rgb = color
-        sp.line.fill.background()
-        sp.shadow.inherit = False
-        ly = Emu(y - Inches(0.38)) if v >= 0 else Emu(y + Inches(0.05))
-        tf = _box(slide, Emu(cx - seg // 2), ly, Emu(seg), Inches(0.34))
-        p = tf.paragraphs[0]
-        p.alignment = 2
-        _run(p, vstr, 14.5, bold=True, color=color)
-        tf = _box(slide, Emu(cx - seg // 2), Inches(4.92), Emu(seg), Inches(1.0))
-        p = tf.paragraphs[0]
-        p.alignment = 2
-        _run(p, lab, 14, bold=True, color=NAVY)
-        p2 = tf.add_paragraph()
-        p2.alignment = 2
-        p2.space_before = Pt(3)
-        p2.line_spacing = 1.15
-        _run(p2, fix, 10.5, color=GRAY)
-    if s.get("axis"):
-        tf = _box(slide, ML, Inches(1.8), CW, Inches(0.26))
-        _run(tf.paragraphs[0], s["axis"], 10.5, color=GRAY)
-    if s.get("note"):
-        tf = _box(slide, ML, Inches(6.1), CW, Inches(0.9))
         p = tf.paragraphs[0]
         p.line_spacing = 1.25
         _md(p, s["note"], 11.5, GRAY, bold_color=DARK)
@@ -557,8 +577,6 @@ def build(run_dir, out):
             _table(slide, s)
         elif s["kind"] == "flow":
             _flow(slide, s)
-        elif s["kind"] == "trend":
-            _trend(slide, s)
         elif s["kind"] == "image":
             if s["_path"]:
                 _image(slide, s)
