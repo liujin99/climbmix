@@ -18,8 +18,9 @@
 #    search_state.json           搜索历史 (全部已测配置+分数) → 舰队语境
 #    cluster_info_cache.json     簇标签/规模/token/质量分
 #    cluster_semantics.md        §2b 簇内容速写缓存 (cluster_peek 数据面,
-#                                自动生成; 池目录 = launch_env DATA_DIR 或
-#                                --pool-dir, 缺件优雅跳过)
+#                                自动生成, 住 state/ — 内容全文内嵌 report.md
+#                                §2b, 文件本身纯缓存; 池目录 = launch_env
+#                                DATA_DIR 或 --pool-dir, 缺件优雅跳过)
 #    optimal_mixture_weights.json 设计空间 argmin 权重 (参照线, D19)
 #    --natural-weights           natural 臂权重文件; 缺省按簇 token 占比重算
 #    --arm-weights NAME=PATH     其他自定义臂 (如 domainfix) 的权重, 可多次
@@ -184,15 +185,18 @@ def _cluster_semantics(run_dir, pool_dir):
 
     返回 (block, note): block = 渲染文本 (None = 跳过), note = 跳过原因。
     池+簇缓存在运行期不可变 → cluster_semantics.md 生成一次即复用
-    (cluster_cache.npz 更新时按 mtime 重生成)。缺件优雅跳过, 报告其余
-    部分照常 — 手工深挖 (多样本/指定簇) 仍走 cluster_peek.py CLI。"""
+    (cluster_cache.npz 更新时按 mtime 重生成)。读 = 三代解析 (state/ →
+    根层 → detail/, 旧归档的根层/detail 副本直接复用); 写 = 恒 state/
+    (canonical 机器层 — 内容全文内嵌 report.md §2b, 文件本身只是缓存,
+    2026-10-12 裁决不入读者层)。缺件优雅跳过, 报告其余部分照常 —
+    手工深挖 (多样本/指定簇) 仍走 cluster_peek.py CLI。"""
     if not pool_dir or not os.path.isdir(pool_dir):
         return None, (f"pool dir 不可解析 "
                       f"({pool_dir or 'launch_env DATA_DIR 缺失'})")
     cache_npz = resolve_run_file(run_dir, "cluster_cache.npz")
     if not os.path.isfile(cache_npz):
         return None, "cluster_cache.npz 缺失"
-    sem_path = os.path.join(run_dir, "cluster_semantics.md")
+    sem_path = resolve_run_file(run_dir, "cluster_semantics.md")
     if (not os.path.isfile(sem_path)
             or os.path.getmtime(cache_npz) > os.path.getmtime(sem_path)):
         try:
@@ -202,10 +206,15 @@ def _cluster_semantics(run_dir, pool_dir):
             body = cp.render_brief(profs)
         except (Exception, SystemExit) as e:
             return None, f"簇语义生成失败 ({e})"
-        tmp = sem_path + ".tmp"
+        # 写恒走 state/, 不回写旧位置 (根层/detail 的过期副本留原地,
+        # 下一轮 hrf 自然命中 state/ 新档)
+        sem_write = os.path.join(run_dir, "state", "cluster_semantics.md")
+        os.makedirs(os.path.dirname(sem_write), exist_ok=True)
+        tmp = sem_write + ".tmp"
         with open(tmp, "w") as f:
             f.write(body + "\n")
-        os.replace(tmp, sem_path)
+        os.replace(tmp, sem_write)
+        sem_path = sem_write
     with open(sem_path) as f:
         return f.read(), None
 

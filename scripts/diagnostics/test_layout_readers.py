@@ -32,6 +32,9 @@ STATE_NAMES = [
     "prune_profile.json", "launch_env.json", "remote_config.json",
     "expected_arms.txt", "archive_meta.json", "sampled_dataset.parquet",
     "eval_base_remote.csv",
+    # §2b 速写缓存 (2026-10-12 起写恒 state/, 内容内嵌 report.md —
+    # recipe_report 三代读/规范写; 见 NON_READER_MDS 裁决)
+    "cluster_semantics.md",
 ]
 STATE_PATTERNS = [r"eval_[A-Za-z0-9_\-{}$]*\.csv",
                   r"target_arm_[A-Za-z0-9_\-{}`$]*\.json",

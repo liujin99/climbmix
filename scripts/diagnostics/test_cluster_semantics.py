@@ -119,11 +119,11 @@ def main():
     with open(os.path.join(run_dir, "launch_env.json"), "w") as f:
         json.dump({"DATA_DIR": pool_dir}, f)
 
-    sem_path = os.path.join(run_dir, "cluster_semantics.md")
+    sem_path = os.path.join(run_dir, "state", "cluster_semantics.md")
     block, note = rr._cluster_semantics(run_dir, pool_dir)
     assert block and note is None
     assert "| C0 | 4 | 35.4% |" in block and "- **C1**" in block
-    assert os.path.isfile(sem_path)
+    assert os.path.isfile(sem_path)            # 新缓存恒写 state/ (机器层)
     mtime = os.path.getmtime(sem_path)
     # 二次调用走缓存 (不重生成 — mtime 不变)
     block2, note2 = rr._cluster_semantics(run_dir, pool_dir)
@@ -135,7 +135,18 @@ def main():
     block3, _ = rr._cluster_semantics(run_dir, pool_dir)
     assert block3 == block                        # 内容确定性 (同 seed)
     assert os.path.getmtime(sem_path) > mtime
-    print("PASS  _cluster_semantics: generate / cache reuse / mtime refresh")
+    # 旧归档的根层副本 (hrf 命中) 新于 cache → 直接复用, 不在 state/ 另写
+    run_dir2 = os.path.join(tmp, "run_legacy")
+    os.makedirs(run_dir2)
+    np.savez(os.path.join(run_dir2, "cluster_cache.npz"),
+             final_labels=np.array([0, 0, 0, 0, 1, 1, 1, 1]))
+    with open(os.path.join(run_dir2, "cluster_semantics.md"), "w") as f:
+        f.write("LEGACY\n")
+    block4, note4 = rr._cluster_semantics(run_dir2, pool_dir)
+    assert block4 == "LEGACY\n" and note4 is None
+    assert not os.path.exists(os.path.join(run_dir2, "state"))
+    print("PASS  _cluster_semantics: generate (state/) / cache reuse / "
+          "mtime refresh / legacy root copy reused via hrf")
 
     # 缺件优雅跳过
     b, n = rr._cluster_semantics(run_dir, "/nonexistent/pool")

@@ -3,9 +3,13 @@
 """tidy_result_dir.py — 【legacy 工具】2026-10-09 深整理一代的归档整理。
 
 2026-10-10 起写入端统一 state/ 布局 (utils/paths.py), 新 run 的根层
-出生即发布形态 — 不再需要本工具。保留它只为服务存量归档:
+出生即发布形态 — 不再需要本工具 (旧注"mark_completed 归档时自动追加深
+整理"已随 state/ 迁移移除, 现无自动调用方)。保留它服务两类手工场景:
   - 2026-10 前的平铺归档 (prod1-4): --deep --apply 可整理成 9 项形态
     (该代形态的根层保留集与本工具一致)
+  - 任意形态 (含 state/ 形态): NON_READER_MDS 扫收纳 — 搜索期管线
+    (validation_report.md) 与判读工具 (cluster_peek.md) 落在根层的
+    非读者 md 归位 detail/
   - 读取端 (cp4_report.resolve_run_file 三代链) 对新旧形态通吃,
     整理与否不影响任何工具
 
@@ -26,7 +30,7 @@
 只匹配裸文件名 — 已带 detail/ 前缀的不会二次改写)。
 
 注: 2026-10-09 起写入端已改 (日志进 logs/, 搜索工件进 exps/) — 新 run
-出生即整洁; mark_completed 归档时自动追加深整理 (--deep --apply)。
+出生即整洁 (自动深整理已移除, 见上)。
 
 用法:
     python3 scripts/diagnostics/tidy_result_dir.py result/prod5_xxx            # dry-run
@@ -48,12 +52,30 @@ EXP_RE = re.compile(r"^exp_\d{4,}$")
     # MD 全扫进了 detail/ — 违反 "根层 = 发布形态" 裁决 (prod5 归档实锤,
     # 用 --restore-reader-layer 恢复)。
 ROOT_KEEP_SUFFIXES = (".png", ".md")
-ROOT_KEEP_DIRS = {"logs", "exps", "detail"}
+# state/ = 2026-10-10 后的机器层目录, 整体保留 (扫进 detail/state/ 会让
+# 三代解析 state/ 代整层失效 — fixture 实锤)
+ROOT_KEEP_DIRS = {"state", "logs", "exps", "detail"}
+
+# 后缀规则的显式例外 (2026-10-12 裁决: 根层 = 纯读者层, report.md +
+# 决策图): 这三个 md 不是读者层 — report.md 不链接它们, 内容已内嵌或
+# 被覆盖。深度档扫入 detail/, restore 不再拉回:
+#   cluster_semantics.md  §2b 生成缓存 — 全文内嵌 report.md §2b, 对读者
+#                          纯冗余; recipe_report 读三代/写恒 state/
+#   cluster_peek.md       判读深潜全量版 (每簇 40 样本; §2b 为其紧凑版),
+#                          手工 CLI 产物, 结论已回填 docs/report.md
+#   validation_report.md  搜索期双臂中间视图 (climb vs uniform, 只落盘
+#                          不上屏 — 2026-09-29 裁决, 终报 = report.md)
+NON_READER_MDS = ("cluster_semantics.md", "cluster_peek.md",
+                  "validation_report.md")
 
 
 def _exists_anywhere(rd, name):
+    # 三代全查 (state/ → 根层 → detail/): 入口守卫对 2026-10-10 后的
+    # state/ 形态 run 同样放行 — NON_READER_MDS 扫收纳靠手工跑本工具,
+    # 新形态 run 不能被挡在门外 (fixture 实锤: search_state.json 在
+    # state/ 时旧版只查根层/detail 误拒)
     return any(os.path.exists(os.path.join(rd, sub, name))
-               for sub in ("", "detail"))
+               for sub in ("state", "", "detail"))
 
 
 def plan_deep(rd, claimed):
@@ -70,7 +92,8 @@ def plan_deep(rd, claimed):
             continue
         if e in ROOT_KEEP_DIRS and os.path.isdir(os.path.join(rd, e)):
             continue
-        if e.endswith(ROOT_KEEP_SUFFIXES) and os.path.isfile(os.path.join(rd, e)):
+        if (e.endswith(ROOT_KEEP_SUFFIXES) and e not in NON_READER_MDS
+                and os.path.isfile(os.path.join(rd, e))):
             continue
         moves.append(e)
     return moves
@@ -100,12 +123,14 @@ def rewrite_report_links(rd, moved):
 
 def plan_restore_reader(rd):
     """恢复计划: detail/ 内的读者层文件 (*.png / *.md) 搬回根层 —
-    修正 2026-10-12 前深度档的误收纳 (见 ROOT_KEEP_SUFFIXES 注释)。"""
+    修正 2026-10-12 前深度档的误收纳 (见 ROOT_KEEP_SUFFIXES 注释)。
+    非读者 md (NON_READER_MDS) 不拉回 — 它们留在 detail/ 是归位而非误收。"""
     dpath = os.path.join(rd, "detail")
     if not os.path.isdir(dpath):
         return []
     return [e for e in sorted(os.listdir(dpath))
             if e.endswith(ROOT_KEEP_SUFFIXES)
+            and e not in NON_READER_MDS
             and os.path.isfile(os.path.join(dpath, e))]
 
 
@@ -133,13 +158,14 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description="整理已收官的搜索结果目录: 基础档 *.log -> logs/, "
                     "exp_NNNN/ -> exps/; 深度档 --deep 再收 detail/, "
-                    "根层只留读者层 (全部 *.png / *.md)")
+                    "根层只留读者层 (全部 *.png / *.md, 非读者 md 除外)")
     ap.add_argument("run_dir", help="结果目录 (如 result/prod5_20260929_201108)")
     ap.add_argument("--apply", action="store_true",
                     help="实际移动 (缺省只打印计划)")
     ap.add_argument("--deep", action="store_true",
-                    help="深度档: 根层只留读者层 (*.png/*.md) + logs/ + "
-                         "exps/ + detail/, 其余进 detail/")
+                    help="深度档: 根层只留读者层 (*.png/*.md, "
+                         "NON_READER_MDS 除外) + logs/ + exps/ + detail/, "
+                         "其余进 detail/")
     ap.add_argument("--restore-reader-layer", action="store_true",
                     help="恢复模式: detail/ 内的 *.png/*.md 搬回根层 + "
                          "report.md 链接归位 (修正旧深度档误收纳)")
