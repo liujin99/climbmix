@@ -34,19 +34,20 @@ TEAL = RGBColor(0x0E, 0x7C, 0x86)
 DARK = RGBColor(0x33, 0x33, 0x33)
 GRAY = RGBColor(0x8A, 0x8A, 0x8A)
 WHITE = RGBColor(0xFF, 0xFF, 0xFF)
-BAD = RGBColor(0xC0, 0x39, 0x2B)      # 问题 / 失败
-MUT = RGBColor(0xB9, 0xC4, 0xCC)      # 弱化
-LTEAL = RGBColor(0x6C, 0xD9, 0xDE)    # 浅青
 PAGE_W, PAGE_H = Inches(13.333), Inches(7.5)
 ML = Inches(0.6)                       # 左右页边距
 CW = PAGE_W - 2 * ML                   # 内容宽
 
 CHARTS_USED = ["search_convergence.png", "arms_main_results.png",
-               "proxy_target_consistency.png", "cluster_alpha_vs_score.png"]
+               "proxy_target_consistency.png", "cluster_alpha_vs_score.png",
+               "reinforcement_d14_cluster_balance.png",
+               "reinforcement_d8_scoring_snr.png",
+               "reinforcement_d19_final_selection.png"]
 
-# ── 幻灯片文案 (v7: 『三处加固』三页改原生图形 — ① 簇占比 100% 构成条对比
-#    ② 逐基准 SNR 条形(噪声地板线)+ prod3 事故对决条形 ③ 外推 vs 实测条形赛
-#    + KPI 行; 每页一图一结论, 文字只留机理脚注; arm 命名全英文对齐图表;
+# ── 幻灯片文案 (v8: 『三处加固』三页 = 真·数据图 (reinforcement_charts.py
+#    生成): ① 簇份额双环形图(巨簇 vs 15 簇真实份额) ② 信号 vs 噪声条形 +
+#    prod3 事故逐基准 Δ ③ prod4 实测 vs 外推对决 + uniform 家族带;
+#    页面 = bullets(讲机理)+ 图(举证)+ caption; arm 命名全英文对齐图表;
 #    **…** = 段内加粗; 数字已对 experiment_prod2/prod4/prod5.md、
 #    scoring_metric_design.md、paper_deviations.md D8/D14/D19) ──
 SLIDES = [
@@ -150,23 +151,43 @@ SLIDES = [
          ],
          image="proxy_target_consistency.png",
          caption="climb 配方:替身分 vs 正式实测"),
-    dict(kind="viz", viz="balance",
-         title="三处加固 ①:簇大小强制均衡",
+    dict(kind="image", title="三处加固 ①:簇大小强制均衡",
          takeaway="论文的合并把 99% 数据塌进一个巨簇,配比只剩 1 个真旋钮 — 强制均衡后 15 个旋钮全部可用",
-         note="论文的合并在它自己的 800B 通用语料上合理;我们的池(stella 嵌入后)是单一致密连续流形,没有主题分界。"
-              "修复 = 细簇 k-means++ 锚点 + 容量约束分配(不切文档);代价:宏簇是容量切片而非纯主题 — "
-              "**搜索需要的是可区分,不是纯净**(决策留档 D14)"),
-    dict(kind="viz", viz="scoring",
-         title="三处加固 ②:评分按信噪比加权",
+         bullets=[
+             ("为什么翻车", "我们的池是一整块连续流形,论文的『相近合并』链式塌缩 — "
+                        "**巨簇吃掉 99.05%,全部 35 个候选配方被钉死,配比只剩 1 个真旋钮**"
+                        "(调 K=14/21/24/32 巨簇都 ≥97.5%,怎么调都无解)"),
+             ("怎么修", "细簇 k-means++ 锚点 + 容量约束:恰好 15 簇、单簇 ≤8.8% — "
+                     "**搜索从 prod1 −0.0036(输)翻到 prod2 +0.0102(首次转正)**;"
+                     "prod5 赢家更把 C10 重仓到 80%(池占比的 14.6×)"),
+         ],
+         image="reinforcement_d14_cluster_balance.png",
+         caption="左:论文距离合并的实测构成(巨簇 99.05% + 13 个孤岛 0.95%);"
+                 "右:均衡划分后的真实簇份额(读自 run 目录);决策留档 D14"),
+    dict(kind="image", title="三处加固 ②:评分按信噪比加权",
          takeaway="评分错一位,方向错一片:搜索会押『好预测的文本』而非『会做题』 — 信噪比定话语权,NLL 只补位",
-         note="机理:噪声地板高估 20× → 最强真信号 gsm8k 权重归零 → 目标静默变成纯 NLL 排名(r=−0.95,偏好『可预测文本』)。"
-              "修复:实测 p̂ 定噪声地板 + **w_floor=0.5(NLL 只补位、永不接管)** → gsm8k 权重 0→0.93,"
-              "搜索选中的配方把 gsm8k 做到 **0.301(base 的 10.4×)**(决策留档 D8)"),
-    dict(kind="viz", viz="guard",
-         title="三处加固 ③:终选守卫",
+         bullets=[
+             ("为什么加权", "题量与难度不同 → 抽样噪声不同:math 的候选间真信号只有噪声的 1/11 — "
+                        "**信号小于噪声的基准,accuracy 纯属瞎猜;按信噪比给每个基准定话语权**"),
+             ("不加权会怎样", "prod3 评分 bug 把最强真信号的权重归零,搜索转而讨好『好预测的文本』 — "
+                        "**赢家把 gsm8k 砍半(−56%,z=−6.2)、math −78%,选择题却持平:平均分掩盖了方向性塌方**;"
+                        "修复 = 实测噪声地板 + w_floor=0.5(NLL 只补位)→ gsm8k 做到 0.301"),
+         ],
+         image="reinforcement_d8_scoring_snr.png",
+         caption="左:逐基准『真信号 vs 抽样噪声』(prod2 · 30 候选实测,SNR = 信号/噪声);"
+                 "右:prod3 搜索赢家 vs 对照臂的逐基准变化;决策留档 D8"),
+    dict(kind="image", title="三处加固 ③:终选守卫",
          takeaway="外推的冠军不可信:上版实测反输自家实测点 0.017 — 终选必须是实测第一,外推须大幅领先才许上场",
-         note="守卫规则:外推照跑(留审计),预测领先 ≤ max(0.30, 留出残差 σ) 时自动降级实测最优 — "
-              "prod4 式反例在守卫路径下**构造性不可复现**;三处加固全部落地:搜索 **+0.043、6/6 全胜**(决策留档 D19)"),
+         bullets=[
+             ("为什么翻车", "论文让预测器外推选冠军 — prod4 同轮实测:"
+                        "**从未训练过的『外推冠军』(0.1972)输给自家实测点 cfg72(0.2142)0.017(z≈2.0)**,热区垫底"),
+             ("怎么修", "外推照跑留审计,但预测领先 ≤ max(0.30, 留出残差 σ) 就自动降级实测第一 — "
+                     "**prod5:climb = cfg#101 = 实测第一,0.2086、6/6 全胜,top-3 全部显著胜出,"
+                     "prod4 式反例构造性不可复现**"),
+         ],
+         image="reinforcement_d19_final_selection.png",
+         caption="prod4 同轮对决(d28 正式规模):两个实测点 vs 两个从未训练的外推点;"
+                 "灰带 = uniform 家族(.1647~.1833);决策留档 D19"),
     dict(kind="image", title="赢家是谁",
          takeaway="搜索把 80% 训练量押给一个簇:统计练习题 — 全池仅占 5.5%,相当于 14.6 倍浓缩",
          bullets=[
@@ -368,7 +389,7 @@ def _image(slide, s):
         _bullets(slide, s, y=y, size=14, gap=6)
         y = Inches(2.95)
     path = s["_path"]
-    box_w, box_h = CW, Inches(6.82) - y
+    box_w, box_h = CW, Inches(6.72) - y
     size = png_size(path) or (1500, 900)
     scale = min(int(box_w) / size[0], int(box_h) / size[1])
     w, h = Emu(int(size[0] * scale)), Emu(int(size[1] * scale))
@@ -525,178 +546,6 @@ def _flow(slide, s):
         _md(p, s["note"], 11.5, GRAY, bold_color=DARK)
 
 
-def _ptitle(slide, x, y, w, text):
-    tf = _box(slide, x, y, Emu(int(w)), Inches(0.3))
-    _run(tf.paragraphs[0], text, 13.5, bold=True, color=NAVY)
-
-
-def _cap(slide, x, y, w, text):
-    tf = _box(slide, x, y, Emu(int(w)), Inches(0.42))
-    p = tf.paragraphs[0]
-    p.line_spacing = 1.2
-    _md(p, text, 10.5, GRAY, bold_color=DARK)
-
-
-def _kpis(slide, y, items):
-    n = len(items)
-    col = int(CW) // n
-    for i, (num, lab) in enumerate(items):
-        x = ML + col * i
-        tf = _box(slide, Emu(x), y, Emu(col), Inches(0.48))
-        p = tf.paragraphs[0]
-        p.alignment = 2
-        _run(p, num, 21, bold=True, color=TEAL)
-        tf = _box(slide, Emu(x), Emu(int(y) + Inches(0.50)), Emu(col), Inches(0.3))
-        p = tf.paragraphs[0]
-        p.alignment = 2
-        _run(p, lab, 11.5, color=DARK)
-
-
-def _note(slide, s, y):
-    if s.get("note"):
-        tf = _box(slide, ML, y, CW, Inches(0.8))
-        p = tf.paragraphs[0]
-        p.line_spacing = 1.25
-        _md(p, s["note"], 11.5, GRAY, bold_color=DARK)
-
-
-def _hbars(slide, x, y, w, h, items, vmin, vmax, label_w=2.3,
-           val_w=1.7, thresh=None, thresh_label=""):
-    """横向条形组: items = (标签, 值, 值注, kind); kind = good/bad/muted/hot。
-    vmin/vmax 定条长映射, thresh 画噪声地板竖线。"""
-    n = len(items)
-    row_h = int(h) // n
-    bar_h = min(int(Inches(0.32)), row_h - int(Inches(0.14)))
-    bx = int(x) + int(Inches(label_w))
-    bw = int(w) - int(Inches(label_w)) - int(Inches(val_w))
-    for i, (lab, val, vt, kind) in enumerate(items):
-        cy = int(y) + row_h * i + row_h // 2
-        tf = _box(slide, x, Emu(cy - Inches(0.11)), Inches(label_w - 0.14), Inches(0.26))
-        p = tf.paragraphs[0]
-        p.alignment = 2
-        _run(p, lab, 11, color=DARK)
-        frac = max(0.0, min(1.0, (val - vmin) / (vmax - vmin)))
-        seg = max(int(bw * frac), int(Inches(0.03)))
-        color = {"good": TEAL, "bad": BAD, "muted": MUT, "hot": NAVY}[kind]
-        _rect(slide, Emu(bx), Emu(cy - bar_h // 2), Emu(seg), Emu(bar_h), color)
-        tf = _box(slide, Emu(bx + seg + Inches(0.08)), Emu(cy - Inches(0.13)),
-                  Inches(val_w - 0.12), Inches(0.3))
-        p = tf.paragraphs[0]
-        _md(p, vt, 11, GRAY if kind == "muted" else DARK,
-            base_bold=kind != "muted", bold_color=BAD if kind == "bad" else NAVY)
-    if thresh is not None:
-        frac = (thresh - vmin) / (vmax - vmin)
-        tx = bx + int(bw * frac)
-        ln = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Emu(tx), Emu(int(y)),
-                                    Inches(0.02), Emu(int(h)))
-        ln.fill.solid()
-        ln.fill.fore_color.rgb = DARK
-        ln.line.fill.background()
-        ln.shadow.inherit = False
-        tf = _box(slide, Emu(tx - Inches(1.55)), Emu(int(y) + int(h) + Inches(0.02)),
-                  Inches(1.5), Inches(0.24))
-        p = tf.paragraphs[0]
-        p.alignment = 2
-        _run(p, thresh_label, 10, bold=True, color=DARK)
-
-
-def _strip(slide, x, y, w, h, segments, gap=0.014):
-    """100% 构成条: segments = (frac, color, 内嵌标签 or None)。"""
-    cx = int(x)
-    for frac, color, lab in segments:
-        sw = max(int(int(w) * frac) - int(Inches(gap)), int(Inches(0.02)))
-        sp = _rect(slide, Emu(cx), y, Emu(sw), h, color)
-        if lab and sw > int(Inches(1.2)):
-            tf = sp.text_frame
-            tf.word_wrap = False
-            tf.vertical_anchor = MSO_ANCHOR.MIDDLE
-            p = tf.paragraphs[0]
-            p.alignment = 2
-            _run(p, lab, 12, bold=True, color=WHITE)
-        cx += sw + int(Inches(gap))
-
-
-def _viz_balance(slide, s):
-    """① 簇均衡: 两条 100% 构成条(1 巨簇 vs 15 均衡簇)+ KPI 行。"""
-
-    def trow(y, left, right, rc):
-        tf = _box(slide, ML, y, CW - Inches(3.1), Inches(0.3))
-        _run(tf.paragraphs[0], left, 13.5, bold=True, color=NAVY)
-        tf = _box(slide, PAGE_W - ML - Inches(3.05), y, Inches(3.05), Inches(0.3))
-        p = tf.paragraphs[0]
-        p.alignment = 2
-        _run(p, right, 13.5, bold=True, color=rc)
-
-    trow(Inches(1.80), "论文的距离合并(实测)", "→ 1 个真旋钮", BAD)
-    _strip(slide, ML, Inches(2.12), CW, Inches(0.52),
-           [(0.9905, BAD, "巨簇 99.05%"), (0.0095, MUT, None)])
-    _cap(slide, ML, Inches(2.74), CW,
-         "13 个孤岛簇合计 0.95%;调 K=14/21/24/32:巨簇 97.5~99.0%,去掉下限吞到 3 簇(99.9%)— "
-         "**怎么调都无解**;99% 同簇 → 35 个候选配方全被钉死,predictor 无信号(R²≤0)")
-    trow(Inches(3.44), "均衡划分(我们的修复)", "→ 15 个旋钮全部可用", TEAL)
-    segs = [(1 / 15, NAVY if i == 9 else (TEAL if i % 2 == 0 else LTEAL),
-             "C10" if i == 9 else None) for i in range(15)]
-    _strip(slide, ML, Inches(3.76), CW, Inches(0.52), segs)
-    _cap(slide, ML, Inches(4.38), CW,
-         "每簇 ≈6.7%(C10 实际 5.5%),构造上限 ≤8.8%(示意);『单簇 >50% 即 abort』闸门全程在岗 — "
-         "赢家后来把 C10 重仓到 80%(池占比的 14.6×)")
-    _kpis(slide, Inches(5.14), [("≈1 → 15", "可用的配比旋钮"),
-                                ("99.05% → ≤8.8%", "最大簇份额(构造性上限)"),
-                                ("−0.0036 → +0.0102", "搜索 vs uniform(prod1 → prod2)")])
-    _note(slide, s, Inches(6.22))
-
-
-def _viz_scoring(slide, s):
-    """② 评分: 左 = 逐基准 SNR 条形(噪声地板线), 右 = prod3 事故对决条形。"""
-    pw = Emu((int(CW) - int(Inches(0.35))) // 2)
-    x2 = ML + Emu(int(pw) + int(Inches(0.35)))
-    _ptitle(slide, ML, Inches(1.85), pw, "accuracy 的信噪比(prod2 · 30 候选实测)")
-    _hbars(slide, ML, Inches(2.32), pw, Inches(2.58),
-           [("arc_easy", 1.77, "1.77", "good"),
-            ("mmlu_stem", 1.00, "1.00", "good"),
-            ("arc_challenge", 0.82, "0.82", "bad"),
-            ("gpqa_diamond", 0.69, "0.69", "bad"),
-            ("gsm8k", 0.29, "0.29", "bad"),
-            ("math", 0.09, "0.09", "bad")],
-           vmin=0.0, vmax=2.0, label_w=1.5, val_w=0.85,
-           thresh=1.0, thresh_label="噪声地板 = 1")
-    _cap(slide, ML, Inches(5.36), pw,
-         "线下 = 分数与瞎猜无法区分 — **数学题的 accuracy 是纯噪声**")
-    _ptitle(slide, x2, Inches(1.85), pw, "prod3 事故:误判权重选出的赢家(同轮对决)")
-    _hbars(slide, x2, Inches(2.32), pw, Inches(2.58),
-           [("gsm8k · 对照臂", 0.119, "0.119", "good"),
-            ("gsm8k · 搜索赢家", 0.052, "0.052 · 腰斩", "bad"),
-            ("math · 对照臂", 0.018, "0.018", "good"),
-            ("math · 搜索赢家", 0.004, "0.004 · 近乎清零", "bad")],
-           vmin=0.0, vmax=0.135, label_w=1.8, val_w=1.5)
-    _cap(slide, x2, Inches(5.36), pw,
-         "选择题持平(arc_challenge +0.030),总分看着只差噪声 — **平均掩盖了方向性塌方**;"
-         "赢家 = 百科/散文簇(推理簇清零)")
-    _note(slide, s, Inches(6.02))
-
-
-def _viz_guard(slide, s):
-    """③ 终选守卫: prod4 同轮对决条形 + prod5 KPI。"""
-    _ptitle(slide, ML, Inches(1.85), CW,
-            "prod4 同轮对决:『外推冠军』从未实测过(d28 正式规模)")
-    _hbars(slide, ML, Inches(2.32), CW, Inches(2.15),
-           [("cfg72 · 实测点", 0.2142, "0.2142 · 全场最佳", "good"),
-            ("cfg25 · 实测点", 0.2066, "0.2066 · 次席", "good"),
-            ("外推-rep · 从未训练", 0.1990, "0.1990", "muted"),
-            ("外推 · 论文方法的终选", 0.1972, "0.1972 · 热区垫底", "bad")],
-           vmin=0.19, vmax=0.218, label_w=2.5, val_w=2.0)
-    _cap(slide, ML, Inches(4.62), CW,
-         "横轴从 0.19 起(放大差距)— 实测最佳比『外推冠军』高 **0.017(z≈2.0)**;"
-         "外推的领先低于噪声地板 = 拟合噪声,不是信号")
-    _kpis(slide, Inches(5.32), [("0.2086", "climb = cfg#101 · 实测第一"),
-                                ("6 / 6", "全基准获胜(符号检验 p=0.016)"),
-                                ("+3.8 / +3.7 / +3.2", "top-3 射门全部显著胜出")])
-    _note(slide, s, Inches(6.35))
-
-
-_VIZ = {"balance": _viz_balance, "scoring": _viz_scoring, "guard": _viz_guard}
-
-
 def build(run_dir, out):
     run_name = os.path.basename(os.path.normpath(run_dir))
     missing = []
@@ -708,7 +557,8 @@ def build(run_dir, out):
             s["_path"] = p
     if missing:
         print(f"✗ 缺图 {len(missing)} 张: {', '.join(missing)}")
-        print("  (run 目录根层/state//detail/ 都没有; 先跑 report_charts.py)")
+        print("  (run 目录根层/state//detail/ 都没有; 先跑 report_charts.py"
+              " + reinforcement_charts.py)")
         if os.environ.get("DECK_STRICT", "1") == "1":
             return 1
     prs = Presentation()
@@ -756,8 +606,6 @@ def build(run_dir, out):
             _table(slide, s)
         elif s["kind"] == "flow":
             _flow(slide, s)
-        elif s["kind"] == "viz":
-            _VIZ[s["viz"]](slide, s)
         elif s["kind"] == "image":
             if s["_path"]:
                 _image(slide, s)
