@@ -51,7 +51,7 @@ EXP_RE = re.compile(r"^exp_\d{4,}$")
     # recipe_report (recipe_winner_vs_baselines) 的根层图表和次级报告
     # MD 全扫进了 detail/ — 违反 "根层 = 发布形态" 裁决 (prod5 归档实锤,
     # 用 --restore-reader-layer 恢复)。
-ROOT_KEEP_SUFFIXES = (".png", ".md")
+ROOT_KEEP_SUFFIXES = (".png", ".md", ".pptx")   # pptx = make_deck 发布物
 # state/ = 2026-10-10 后的机器层目录, 整体保留 (扫进 detail/state/ 会让
 # 三代解析 state/ 代整层失效 — fixture 实锤)
 ROOT_KEEP_DIRS = {"state", "logs", "exps", "detail"}
