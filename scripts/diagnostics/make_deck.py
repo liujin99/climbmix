@@ -44,10 +44,11 @@ CHARTS_USED = ["search_convergence.png", "arms_main_results.png",
                "reinforcement_d8_scoring_snr.png",
                "reinforcement_d19_final_selection.png"]
 
-# ── 幻灯片文案 (v8: 『三处加固』三页 = 真·数据图 (reinforcement_charts.py
-#    生成): ① 簇份额双环形图(巨簇 vs 15 簇真实份额) ② 信号 vs 噪声条形 +
-#    prod3 事故逐基准 Δ ③ prod4 实测 vs 外推对决 + uniform 家族带;
-#    页面 = bullets(讲机理)+ 图(举证)+ caption; arm 命名全英文对齐图表;
+# ── 幻灯片文案 (v9: 『三处加固』三页 = 真·数据图 (reinforcement_charts.py
+#    生成, 图内标签中文 + 标签重叠自检): ① 簇份额双环形图(巨簇 vs 15 簇
+#    真实份额) ② 信号 vs 噪声条形 + prod3 事故逐基准 Δ ③ prod4 实测 vs
+#    外推对决 + uniform 家族带; 页面 = bullets(讲机理)+ 图(举证)+ caption;
+#    arm 名保留原文, 其余图内文字中文;
 #    **…** = 段内加粗; 数字已对 experiment_prod2/prod4/prod5.md、
 #    scoring_metric_design.md、paper_deviations.md D8/D14/D19) ──
 SLIDES = [
