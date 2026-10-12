@@ -22,7 +22,8 @@
 #    1. 锚点校验: |远端 base stem − 本地期望| 分级 (PASS≤0.002 / WARN≤SE / FAIL)
 #       — FAIL 说明远端评测管线有偏, 臂间对比不可信, 优先排查
 #    2. 主指标: 所有臂的 stem_metric (centered, 搜索目标), 按分数排序;
-#       各臂 vs ref: Δ ± √2·SE (SE=0.006 为 prod1 经验单次评测噪声), z + 单侧 p
+#       各臂 vs ref: Δ + z/单侧 p (SE 每臂实算: per-task raw+题量;
+#       缺数据回退 --se; SE_Δ = √(se_a²+se_ref²))
 #    3. 每基准表: 所有臂 raw acc ± 二项 SE (BENCHMARK_SIZES) 并排
 #    4. 聚合 + 符号检验: 各臂 vs ref 的 raw 均值 Δ + z; 赢几个基准, 精确二项 p
 #    5. 判定: 排名 + 各臂 vs ref 分级 (WINS significant≥95% / likely≥90% /
@@ -267,7 +268,8 @@ def main():
                          "PASS/FAIL 判定 (自动刷新场景不做误导性判定, "
                          "人工判读时显式传入本轮校准值)")
     ap.add_argument("--se", type=float, default=0.006,
-                    help="单次评测 stem_metric 经验 SE (prod1 噪声地板)")
+                    help="回退 SE — 仅当某臂缺 per-task 数据无法实算时使用 "
+                         "(prod1 噪声地板; 正常全量评测臂走 stem_se 实算)")
     ap.add_argument("--anchor-pass", type=float, default=0.002,
                     help="锚点 |Δ| PASS 阈值")
     ap.add_argument("--json", default="", help="可选: 机读 verdict 输出路径")
@@ -317,7 +319,10 @@ def main():
 
     ranked = sorted(stems, key=lambda a: -stems[a])          # 分数降序
     others = [a for a in ranked if a != ref]                 # vs ref 的臂
-    se_delta = math.sqrt(2.0) * args.se
+    # 每臂实算评测抽样 SE (per-task raw acc + 题量, stem_se); 缺数据的臂
+    # 回退 --se 经验值 — 与 report_charts 同源 (2026-10-12: 判定节不再吃
+    # 旧常数, 重生成归档即得真误差棒)
+    se_map = {a: stem_se(parsed[a]) for a in parsed}
 
     out("═" * 62)
     out(f"  CP4 report — {args.run_dir}  "
@@ -369,17 +374,18 @@ def main():
                 f"--base-expected)")
             verdict["anchor"] = {"stem": base["stem"], "tag": "UNJUDGED"}
         else:
+            se_base = stem_se(base) or args.se
             d = base["stem"] - args.base_expected
             ad = abs(d)
             if ad <= args.anchor_pass:
                 tag, sym = "PASS", "✓"
-            elif ad <= args.se:
+            elif ad <= se_base:
                 tag, sym = "WARN", "·"
             else:
                 tag, sym = "FAIL", "✗"
             out(f"  [{sym}] remote base stem = {base['stem']:.4f} vs local "
                   f"{args.base_expected:.4f}  |Δ|={ad:.4f} → {tag}")
-            out(f"      (PASS ≤ {args.anchor_pass}, WARN ≤ SE={args.se}, "
+            out(f"      (PASS ≤ {args.anchor_pass}, WARN ≤ SE={se_base:.4f}, "
                   f"FAIL above — FAIL means the remote eval pipeline is")
             out(f"       biased; investigate BEFORE trusting the arm "
                   f"comparison below)")
@@ -394,17 +400,27 @@ def main():
             out(f"  {a:<14} {stems[a]:>7.4f}  {'(ref)':>8}")
             continue
         delta = stems[a] - stems[ref]
-        z = delta / se_delta if se_delta > 0 else 0.0
+        sa = se_map.get(a) or args.se
+        sr = se_map.get(ref) or args.se
+        se_pair = math.sqrt(sa * sa + sr * sr)
+        z = delta / se_pair if se_pair > 0 else 0.0
         p = norm_sf(z)
         out(f"  {a:<14} {stems[a]:>7.4f}  {delta:>+8.4f}  {z:>+6.2f}  "
               f"{p:>5.3f}  {_tag(z)}")
-        pw[a] = {"delta": delta, "z": z, "p_one_sided": p, "tag": _tag(z)}
+        pw[a] = {"delta": delta, "z": z, "p_one_sided": p, "tag": _tag(z),
+                 "se_pair": se_pair}
     if not others:
         out("  (only the ref arm has a usable score — nothing to compare yet)")
-    out(f"  (SE_Δ = √2×{args.se:.3f} = {se_delta:.4f}; "
+    n_real = sum(1 for a in ranked if se_map.get(a))
+    se_note = (f"SE 实算 {n_real}/{len(ranked)} 臂 (per-task raw + 题量)"
+               if n_real else f"SE 全回退 --se={args.se:.3f}")
+    if 0 < n_real < len(ranked):
+        se_note += f"; 回退: {', '.join(a for a in ranked if not se_map.get(a))}"
+    out(f"  ({se_note}; SE_Δ = √(se_a²+se_ref²); "
           f"tags: WINS** z≥2 (~95% one-sided), WINS* z≥1.65 (~90%), "
           f"· noise; LOSES* / LOSES** mirror)")
     verdict["pairwise_vs_ref"] = pw
+    verdict["se_measured"] = {a: se_map[a] for a in ranked if se_map.get(a)}
 
     # ── 3. 每基准表 (所有臂 raw acc ± 二项 SE) ─────────────────────
     out("── 3. per-benchmark (raw accuracy ± binomial SE) ──")

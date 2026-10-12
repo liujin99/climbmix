@@ -41,16 +41,13 @@ import sys
 
 EXP_RE = re.compile(r"^exp_\d{4,}$")
 
-    # 深度档的根层保留集: 主报告 + report_charts.py 五张决策图
-    # (traineval 验证轮自 2026-10-10 起为独立平级 run, 不再住进实验目录)
-ROOT_KEEP_FILES = {
-    "report.md",
-    "search_convergence.png",
-    "arms_main_results.png",
-    "proxy_target_consistency.png",
-    "cluster_alpha_vs_score.png",
-    "best_vs_worst_heatmap.png",
-}
+    # 深度档的根层保留集 = 读者层 (2026-10-12 修正): 全部图表 (*.png) +
+    # 全部报告 (*.md)。旧版固定集只保 report.md + 5 张决策图, 把
+    # report_generator (domain_distribution / predictor_scatter) 与
+    # recipe_report (recipe_winner_vs_baselines) 的根层图表和次级报告
+    # MD 全扫进了 detail/ — 违反 "根层 = 发布形态" 裁决 (prod5 归档实锤,
+    # 用 --restore-reader-layer 恢复)。
+ROOT_KEEP_SUFFIXES = (".png", ".md")
 ROOT_KEEP_DIRS = {"logs", "exps", "detail"}
 
 
@@ -73,7 +70,7 @@ def plan_deep(rd, claimed):
             continue
         if e in ROOT_KEEP_DIRS and os.path.isdir(os.path.join(rd, e)):
             continue
-        if e in ROOT_KEEP_FILES and os.path.isfile(os.path.join(rd, e)):
+        if e.endswith(ROOT_KEEP_SUFFIXES) and os.path.isfile(os.path.join(rd, e)):
             continue
         moves.append(e)
     return moves
@@ -101,17 +98,51 @@ def rewrite_report_links(rd, moved):
     return n
 
 
+def plan_restore_reader(rd):
+    """恢复计划: detail/ 内的读者层文件 (*.png / *.md) 搬回根层 —
+    修正 2026-10-12 前深度档的误收纳 (见 ROOT_KEEP_SUFFIXES 注释)。"""
+    dpath = os.path.join(rd, "detail")
+    if not os.path.isdir(dpath):
+        return []
+    return [e for e in sorted(os.listdir(dpath))
+            if e.endswith(ROOT_KEEP_SUFFIXES)
+            and os.path.isfile(os.path.join(dpath, e))]
+
+
+def rewrite_report_links_back(rd, restored):
+    """report.md 内被深度档改写成 detail/ 前缀的链接改回根层相对
+    路径 (只针对本次真正搬回的文件名; 幂等)。返回改写处数。"""
+    rp = os.path.join(rd, "report.md")
+    if not os.path.isfile(rp):
+        return 0
+    with open(rp, encoding="utf-8", errors="replace") as f:
+        txt = f.read()
+    n = 0
+    for name in restored:
+        old, new = f"](detail/{name})", f"]({name})"
+        if old in txt:
+            n += txt.count(old)
+            txt = txt.replace(old, new)
+    if n:
+        with open(rp, "w", encoding="utf-8") as f:
+            f.write(txt)
+    return n
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="整理已收官的搜索结果目录: 基础档 *.log -> logs/, "
                     "exp_NNNN/ -> exps/; 深度档 --deep 再收 detail/, "
-                    "根层只留 report.md + 决策图")
+                    "根层只留读者层 (全部 *.png / *.md)")
     ap.add_argument("run_dir", help="结果目录 (如 result/prod5_20260929_201108)")
     ap.add_argument("--apply", action="store_true",
                     help="实际移动 (缺省只打印计划)")
     ap.add_argument("--deep", action="store_true",
-                    help="深度档: 根层只留 report.md + 5 张决策图 + "
-                         "logs/ + exps/ + detail/, 其余进 detail/")
+                    help="深度档: 根层只留读者层 (*.png/*.md) + logs/ + "
+                         "exps/ + detail/, 其余进 detail/")
+    ap.add_argument("--restore-reader-layer", action="store_true",
+                    help="恢复模式: detail/ 内的 *.png/*.md 搬回根层 + "
+                         "report.md 链接归位 (修正旧深度档误收纳)")
     ap.add_argument("--force", action="store_true",
                     help="目录无 archive_meta.json (未归档) 时仍执行")
     args = ap.parse_args()
@@ -127,6 +158,29 @@ def main() -> int:
         print("refuse: 无 archive_meta.json (未收官归档) — 收官后再整理, "
               "确认无碍用 --force")
         return 2
+
+    if args.restore_reader_layer:
+        names = plan_restore_reader(rd)
+        if not names:
+            print("  detail/ 内无 *.png / *.md — 无可恢复项")
+            return 0
+        clash = [e for e in names if os.path.exists(os.path.join(rd, e))]
+        if clash:
+            print(f"  ⚠ 根层已存在同名项, 跳过: {', '.join(clash)}")
+            names = [e for e in names if e not in clash]
+        if not names:
+            return 0
+        print(f"  恢复读者层: {len(names)} 项 detail/ -> 根层:")
+        for e in names:
+            print(f"    {e}")
+        if not args.apply:
+            print("  (dry-run: 加 --apply 执行移动)")
+            return 0
+        for e in names:
+            os.replace(os.path.join(rd, "detail", e), os.path.join(rd, e))
+        n = rewrite_report_links_back(rd, names)
+        print(f"  ✓ 搬回 {len(names)} 项; report.md 链接归位 {n} 处")
+        return 0
 
     entries = sorted(os.listdir(rd))
     logs = [e for e in entries
