@@ -35,6 +35,7 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
 
 # 基准题量 (与 src/climbmix/core/types.py BENCHMARK_SIZES 一致;
@@ -350,6 +351,22 @@ def main():
             pass
         out(f"  训练语境: {' · '.join(parts)}")
 
+    # ── 0b. base-expected 沿用 (2026-10-12): 刷新归档判定时未传值 →
+    #    从现存判定节解析上次校准值 — 否则刷新会把锚点 PASS/FAIL 记录
+    #    洗成 UNJUDGED (服务器无 rg/取值摩擦的根除) ──
+    base_expected = args.base_expected
+    if base_expected is None:
+        rp = os.path.join(args.run_dir, "report.md")
+        prev = None
+        if os.path.isfile(rp):
+            with open(rp, encoding="utf-8", errors="replace") as f:
+                m = re.search(r"vs local ([0-9]*\.?[0-9]+)", f.read())
+            if m:
+                prev = float(m.group(1))
+        if prev is not None:
+            base_expected = prev
+            out(f"  (base-expected 未传, 沿用上次判定校准值: {prev})")
+
     verdict["ref"] = ref
     verdict["arms"] = {a: {"stem": stems[a],
                            "stem_nll": parsed[a]["stem_nll"]}
@@ -368,14 +385,14 @@ def main():
         if base["stem"] is None:
             out("  [!] base CSV has no STEM row — unreadable")
             verdict["anchor"] = "UNREADABLE"
-        elif args.base_expected is None:
+        elif base_expected is None:
             out(f"  [·] remote base stem = {base['stem']:.4f} "
                 f"(预期值未提供 — 跳过 PASS/FAIL 判定; 人工判读时传 "
                 f"--base-expected)")
             verdict["anchor"] = {"stem": base["stem"], "tag": "UNJUDGED"}
         else:
             se_base = stem_se(base) or args.se
-            d = base["stem"] - args.base_expected
+            d = base["stem"] - base_expected
             ad = abs(d)
             if ad <= args.anchor_pass:
                 tag, sym = "PASS", "✓"
@@ -384,7 +401,7 @@ def main():
             else:
                 tag, sym = "FAIL", "✗"
             out(f"  [{sym}] remote base stem = {base['stem']:.4f} vs local "
-                  f"{args.base_expected:.4f}  |Δ|={ad:.4f} → {tag}")
+                  f"{base_expected:.4f}  |Δ|={ad:.4f} → {tag}")
             out(f"      (PASS ≤ {args.anchor_pass}, WARN ≤ SE={se_base:.4f}, "
                   f"FAIL above — FAIL means the remote eval pipeline is")
             out(f"       biased; investigate BEFORE trusting the arm "
