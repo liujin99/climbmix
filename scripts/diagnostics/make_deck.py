@@ -11,10 +11,10 @@
 --break-system-packages 或用 venv)。图表按三代布局解析 (root → state/
 → detail/)。文案 = 本文件 SLIDES 常量 (审稿在对话里, 落地在这里)。
 
-输出 (v10.2 实验结果/汇报分离): 汇报包 = run 目录的兄弟目录
-<basename>_deck/ — pptx + 全部 7 张图都在里面 (4 张实验结果图每次
-构建时从 run 目录复制进来, 包自含、可整目录打包外发); run 目录只留
-实验结果, 不再混入汇报产物。16:9, 中文字体 Microsoft YaHei。
+输出 (v10.2 实验结果/汇报分离): 汇报包 = run 目录下的 deck/ 子目录 —
+pptx + 全部 7 张图都在里面 (4 张实验结果图每次构建时从 run 目录复制
+进来, 包自含、可整目录打包外发); run 目录根层只留实验结果。
+16:9, 中文字体 Microsoft YaHei。
 """
 import argparse
 import os
@@ -58,11 +58,11 @@ DECK_OWNED = {"reinforcement_d14_cluster_balance.png",
 
 
 def deck_dir_for(run_dir):
-    """汇报包目录 = run 目录的兄弟目录 <run>_deck (v10.2 分离实验结果与
-    汇报产物)。reinforcement_charts.py 有同名同实现副本 — 不互相 import,
-    免得把 numpy/matplotlib/pptx 依赖拉进对方的裸跑路径。"""
-    p = os.path.normpath(os.path.abspath(run_dir))
-    return os.path.join(os.path.dirname(p), os.path.basename(p) + "_deck")
+    """汇报包目录 = run 目录下的 deck/ 子目录 (v10.2 分离实验结果与汇报
+    产物; 用户裁决: deck 跟着 run 走)。reinforcement_charts.py 有同名同
+    实现副本 — 不互相 import, 免得把 numpy/matplotlib/pptx 依赖拉进
+    对方的裸跑路径。"""
+    return os.path.join(os.path.normpath(run_dir), "deck")
 
 
 def resolve_chart(dirs, name):

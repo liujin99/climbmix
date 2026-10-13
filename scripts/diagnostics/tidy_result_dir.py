@@ -53,8 +53,9 @@ EXP_RE = re.compile(r"^exp_\d{4,}$")
     # 用 --restore-reader-layer 恢复)。
 ROOT_KEEP_SUFFIXES = (".png", ".md", ".pptx")   # pptx = make_deck 发布物
 # state/ = 2026-10-10 后的机器层目录, 整体保留 (扫进 detail/state/ 会让
-# 三代解析 state/ 代整层失效 — fixture 实锤)
-ROOT_KEEP_DIRS = {"state", "logs", "exps", "detail"}
+# 三代解析 state/ 代整层失效 — fixture 实锤); deck/ = v10.2 汇报包
+# (pptx + deck 专属图, make_deck/reinforcement_charts 的固定落点)
+ROOT_KEEP_DIRS = {"state", "logs", "exps", "detail", "deck"}
 
 # 后缀规则的显式例外 (2026-10-12 裁决: 根层 = 纯读者层, report.md +
 # 决策图): 这三个 md 不是读者层 — report.md 不链接它们, 内容已内嵌或

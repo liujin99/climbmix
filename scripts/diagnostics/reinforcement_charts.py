@@ -7,8 +7,8 @@
 #    python3 scripts/diagnostics/reinforcement_charts.py result/prod5_20260929_201108
 #    # 服务器若无中文字体: --font /path/to/cjk.ttf, 或安装 fonts-noto-cjk
 #
-#  输出 (v10.2: 汇报包目录 RUN_DIR 兄弟层 <RUN_DIR 名>_deck/, 与实验结
-#  果分离; make_deck.py 在同目录引用; -o 可覆盖):
+#  输出 (v10.2: 汇报包目录 RUN_DIR/deck/ 子目录, 与实验结果分离;
+#  make_deck.py 在同目录引用; -o 可覆盖):
 #    reinforcement_d14_cluster_balance.png  ① 左 as-is(论文距离合并, 为什么
 #                                           翻车)vs 右 to-be(强制均衡, 改进
 #                                           后), 双环形图 + 两侧实验佐证
@@ -482,20 +482,19 @@ def chart_d19(out_dir):
 
 
 def deck_dir_for(run_dir):
-    """汇报包目录 = run 目录的兄弟目录 <run>_deck (v10.2 实验结果/汇报
-    分离)。make_deck.py 有同名同实现副本 — 不互相 import, 免得把
-    numpy/matplotlib/pptx 依赖拉进对方的裸跑路径。"""
-    p = os.path.normpath(os.path.abspath(run_dir))
-    return os.path.join(os.path.dirname(p), os.path.basename(p) + "_deck")
+    """汇报包目录 = run 目录下的 deck/ 子目录 (v10.2 实验结果/汇报
+    分离; 用户裁决: deck 跟着 run 走)。make_deck.py 有同名同实现副本 —
+    不互相 import, 免得把 numpy/matplotlib/pptx 依赖拉进对方的裸跑路径。"""
+    return os.path.join(os.path.normpath(run_dir), "deck")
 
 
 def main():
     ap = argparse.ArgumentParser(
-        description="『三处加固』举证图 (D14/D8/D19) → 汇报包目录 <run>_deck")
+        description="『三处加固』举证图 (D14/D8/D19) → 汇报包目录 <run>/deck")
     ap.add_argument("run_dir", help="run 目录 (prod5 归档; 读取其中的 "
-                    "macro_info.json 等, 图输出到其兄弟汇报包目录)")
+                    "macro_info.json 等, 图输出到其 deck/ 子目录)")
     ap.add_argument("-o", "--out-dir", default=None,
-                    help="输出目录 (默认 = 汇报包目录 <run_dir>_deck)")
+                    help="输出目录 (默认 = <run_dir>/deck)")
     ap.add_argument("--font", default=None,
                     help="显式指定中文字体文件 (.ttf/.ttc/.otf), 覆盖自动检测")
     args = ap.parse_args()
