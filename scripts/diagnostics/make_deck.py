@@ -9,11 +9,16 @@
 
 依赖: python-pptx (pip install python-pptx; 若报 PEP 668 加
 --break-system-packages 或用 venv)。图表按三代布局解析 (root → state/
-→ detail/); 文案 = 本文件 SLIDES 常量 (审稿在对话里, 落地在这里)。
-输出默认 <run_dir>/<basename>_deck.pptx, 16:9, 中文字体 Microsoft YaHei。
+→ detail/)。文案 = 本文件 SLIDES 常量 (审稿在对话里, 落地在这里)。
+
+输出 (v10.2 实验结果/汇报分离): 汇报包 = run 目录的兄弟目录
+<basename>_deck/ — pptx + 全部 7 张图都在里面 (4 张实验结果图每次
+构建时从 run 目录复制进来, 包自含、可整目录打包外发); run 目录只留
+实验结果, 不再混入汇报产物。16:9, 中文字体 Microsoft YaHei。
 """
 import argparse
 import os
+import shutil
 import struct
 import sys
 
@@ -43,6 +48,31 @@ CHARTS_USED = ["search_convergence.png", "arms_main_results.png",
                "reinforcement_d14_cluster_balance.png",
                "reinforcement_d8_scoring_snr.png",
                "reinforcement_d19_extrapolation.png"]
+
+# deck 专属 (reinforcement 三图, 中文, 由 reinforcement_charts.py 写进
+# 汇报包目录); 其余 4 张 = report_charts 实验结果图 (英文, 住 run 目录,
+# 权威源在 run 目录 — 每次构建重新复制进汇报包, 不会用到旧副本)
+DECK_OWNED = {"reinforcement_d14_cluster_balance.png",
+              "reinforcement_d8_scoring_snr.png",
+              "reinforcement_d19_extrapolation.png"}
+
+
+def deck_dir_for(run_dir):
+    """汇报包目录 = run 目录的兄弟目录 <run>_deck (v10.2 分离实验结果与
+    汇报产物)。reinforcement_charts.py 有同名同实现副本 — 不互相 import,
+    免得把 numpy/matplotlib/pptx 依赖拉进对方的裸跑路径。"""
+    p = os.path.normpath(os.path.abspath(run_dir))
+    return os.path.join(os.path.dirname(p), os.path.basename(p) + "_deck")
+
+
+def resolve_chart(dirs, name):
+    """按优先级在目录列表里找图 (各自含 根层/state//detail/ 三代布局)。"""
+    for d in dirs:
+        for sub in ("", "state/", "detail/"):
+            p = os.path.join(d, sub, name)
+            if os.path.isfile(p):
+                return p
+    return None
 
 # ── 幻灯片文案 (v10: 『三处加固』= 四页 — ① 簇均衡 as-is/to-be 双环 +
 #    实验佐证 ② SNR 加权 原因/结果/做法 ③ 外推概念示意图 + ④ prod4
@@ -248,15 +278,6 @@ SLIDES = [
                 ("≈3,900 NPU·h", "全部实验总开销(约 163 张卡 · 天)")],
          note="赢家配方可直接复用到下一版训练;自然延伸:更大规模验证 + 质量信号协作 — 值得一起做"),
 ]
-
-
-def resolve_chart(run_dir, name):
-    """三代布局: root → state/ → detail/ (图表历史上一直住根层, 兼容为主)。"""
-    for sub in ("", "state/", "detail/"):
-        p = os.path.join(run_dir, sub, name)
-        if os.path.isfile(p):
-            return p
-    return None
 
 
 def png_size(path):
@@ -568,17 +589,31 @@ def _flow(slide, s):
 
 def build(run_dir, out):
     run_name = os.path.basename(os.path.normpath(run_dir))
+    ddir = deck_dir_for(run_dir)
+    os.makedirs(ddir, exist_ok=True)
     missing = []
+    n_img = 0
     for s in SLIDES:
-        if s.get("image"):
-            p = resolve_chart(run_dir, s["image"])
-            if p is None:
-                missing.append(s["image"])
-            s["_path"] = p
+        img = s.get("image")
+        if not img:
+            continue
+        n_img += 1
+        # deck 专属图先找汇报包 (旧布局曾写 run 根层, 兜底兼容并迁移);
+        # 实验结果图只认 run 目录 (权威源, 防止用到汇报包里的旧副本)
+        p = resolve_chart([ddir, run_dir] if img in DECK_OWNED else [run_dir],
+                          img)
+        s["_path"] = p
+        if p is None:
+            missing.append(img)
+            continue
+        dst = os.path.join(ddir, img)
+        if os.path.abspath(p) != os.path.abspath(dst):
+            shutil.copy2(p, dst)      # 复制进汇报包 → 包自含可整目录外发
+            s["_path"] = dst
     if missing:
         print(f"✗ 缺图 {len(missing)} 张: {', '.join(missing)}")
-        print("  (run 目录根层/state//detail/ 都没有; 先跑 report_charts.py"
-              " + reinforcement_charts.py)")
+        print("  (实验结果图应在 run 目录、deck 专属图应在汇报包目录;"
+              " 先跑 report_charts.py + reinforcement_charts.py)")
         if os.environ.get("DECK_STRICT", "1") == "1":
             return 1
     prs = Presentation()
@@ -638,6 +673,8 @@ def build(run_dir, out):
         _footer(slide, idx, total, run_name)
     prs.save(out)
     print(f"✓ {total} 页 → {out}")
+    print(f"  汇报包: {ddir}/ (pptx + {n_img} 张图, 与实验结果目录分离,"
+          "可整目录打包外发)")
     return 1 if missing else 0
 
 
@@ -651,14 +688,16 @@ def main():
     if not os.path.isdir(args.run_dir):
         sys.exit(f"✗ 目录不存在: {args.run_dir}")
     if args.check:
+        ddir = deck_dir_for(args.run_dir)
         ok = True
         for name in CHARTS_USED:
-            p = resolve_chart(args.run_dir, name)
+            p = resolve_chart([ddir, args.run_dir], name)
             print(f"  {'✓' if p else '✗'} {name}" + (f" → {p}" if p else ""))
             ok = ok and bool(p)
         sys.exit(0 if ok else 1)
     out = args.output or os.path.join(
-        args.run_dir, f"{os.path.basename(os.path.normpath(args.run_dir))}_deck.pptx")
+        deck_dir_for(args.run_dir),
+        f"{os.path.basename(os.path.normpath(args.run_dir))}_deck.pptx")
     sys.exit(build(args.run_dir, out))
 
 

@@ -7,7 +7,8 @@
 #    python3 scripts/diagnostics/reinforcement_charts.py result/prod5_20260929_201108
 #    # 服务器若无中文字体: --font /path/to/cjk.ttf, 或安装 fonts-noto-cjk
 #
-#  输出 (RUN_DIR 根, 与 report_charts.py 的 PNG 同层; make_deck.py 自动引用):
+#  输出 (v10.2: 汇报包目录 RUN_DIR 兄弟层 <RUN_DIR 名>_deck/, 与实验结
+#  果分离; make_deck.py 在同目录引用; -o 可覆盖):
 #    reinforcement_d14_cluster_balance.png  ① 左 as-is(论文距离合并, 为什么
 #                                           翻车)vs 右 to-be(强制均衡, 改进
 #                                           后), 双环形图 + 两侧实验佐证
@@ -480,12 +481,21 @@ def chart_d19(out_dir):
     return ok
 
 
+def deck_dir_for(run_dir):
+    """汇报包目录 = run 目录的兄弟目录 <run>_deck (v10.2 实验结果/汇报
+    分离)。make_deck.py 有同名同实现副本 — 不互相 import, 免得把
+    numpy/matplotlib/pptx 依赖拉进对方的裸跑路径。"""
+    p = os.path.normpath(os.path.abspath(run_dir))
+    return os.path.join(os.path.dirname(p), os.path.basename(p) + "_deck")
+
+
 def main():
     ap = argparse.ArgumentParser(
-        description="『三处加固』举证图 (D14/D8/D19) → run 目录根层 3 张 PNG")
-    ap.add_argument("run_dir", help="run 目录 (prod5 归档; 图输出到其根层)")
+        description="『三处加固』举证图 (D14/D8/D19) → 汇报包目录 <run>_deck")
+    ap.add_argument("run_dir", help="run 目录 (prod5 归档; 读取其中的 "
+                    "macro_info.json 等, 图输出到其兄弟汇报包目录)")
     ap.add_argument("-o", "--out-dir", default=None,
-                    help="输出目录 (默认 = run_dir)")
+                    help="输出目录 (默认 = 汇报包目录 <run_dir>_deck)")
     ap.add_argument("--font", default=None,
                     help="显式指定中文字体文件 (.ttf/.ttc/.otf), 覆盖自动检测")
     args = ap.parse_args()
@@ -505,8 +515,9 @@ def main():
             "  3) 把任一 CJK 字体文件拷到 ~/.fonts/ (自动扫描)\n"
             "  4) 有 root 的话: sudo apt-get install -y fonts-noto-cjk")
     print(f"✓ 中文字体: {name}")
-    out_dir = args.out_dir or args.run_dir
-    print(f"『三处加固』举证图 → {out_dir}")
+    out_dir = args.out_dir or deck_dir_for(args.run_dir)
+    os.makedirs(out_dir, exist_ok=True)
+    print(f"『三处加固』举证图 → {out_dir} (汇报包, 与实验结果目录分离)")
     print("  数据出处: paper_deviations.md D14 / experiment_prod2_k15bal.md "
           "§4.2 / TODO.md prod3 记录 / experiment_prod5.md §3b / "
           "experiment_prod4.md §3d")
