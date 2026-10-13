@@ -122,24 +122,46 @@ def cluster_token_shares(run_dir):
 
 
 # ── 中文字体 (report_charts.py 复用) ─────────────────────────────────
+# 仓库内置子集字体优先 (服务器无 root / 无系统 CJK 字体也能出图);
+# fonts/wqy-zenhei-deck.ttf = 文泉驿正黑子集 (GPL + 字体例外), 覆盖
+# 本目录两个图表脚本的全部图内文案 — 改文案后跑 fonts/make_font_subset.py
+BUNDLED_FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "fonts")
+
+
 def _apply_font(name):
     matplotlib.rcParams["font.sans-serif"] = [name, "DejaVu Sans"]
     matplotlib.rcParams["font.family"] = "sans-serif"
     matplotlib.rcParams["axes.unicode_minus"] = False
 
 
+def _register(path):
+    try:
+        fm.fontManager.addfont(path)
+        return fm.FontProperties(fname=path).get_name()
+    except Exception:
+        return None
+
+
 def setup_cjk_font(font_path=None):
-    """返回可用中文字体名并写入 rcParams; 找不到返回 None。"""
+    """返回可用中文字体名并写入 rcParams; 找不到返回 None。
+
+    优先级: --font 显式指定 > 仓库内置子集字体 (fonts/) > matplotlib
+    注册表 (系统已装) > 文件系统扫描 (~/.fonts/ 等)。"""
     if font_path:
         if not os.path.isfile(font_path):
             sys.exit(f"✗ --font 指定的文件不存在: {font_path}")
-        try:
-            fm.fontManager.addfont(font_path)
-            name = fm.FontProperties(fname=font_path).get_name()
-        except Exception as e:
-            sys.exit(f"✗ 注册字体失败 {font_path}: {e}")
+        name = _register(font_path)
+        if name is None:
+            sys.exit(f"✗ 注册字体失败: {font_path}")
         _apply_font(name)
         return name
+    for pat in ("*.ttf", "*.ttc", "*.otf"):
+        for p in sorted(glob.glob(os.path.join(BUNDLED_FONT_DIR, pat))):
+            name = _register(p)
+            if name:
+                _apply_font(name)
+                return name
     names = [f.name for f in fm.fontManager.ttflist
              if any(k in f.name.lower() or k in f.fname.lower()
                     for k in CJK_KEYS)]
@@ -159,11 +181,9 @@ def setup_cjk_font(font_path=None):
                                         for k in CJK_KEYS):
                     continue
                 seen.add(p)
-                try:
-                    fm.fontManager.addfont(p)
-                    names.append(fm.FontProperties(fname=p).get_name())
-                except Exception:
-                    pass
+                name = _register(p)
+                if name:
+                    names.append(name)
     if not names:
         return None
     _apply_font(names[0])
@@ -464,14 +484,16 @@ def main():
     name = setup_cjk_font(args.font)
     if name is None:
         sys.exit(
-            "✗ 未找到中文字体, 无法生成中文标签图。任选其一后重跑:\n"
-            "  1) sudo apt-get install -y fonts-noto-cjk\n"
-            "  2) 找服务器现成字体并显式指定:\n"
-            "       find /usr/share/fonts /opt ~/.fonts \\\n"
-            "         \\( -name '*.ttf' -o -name '*.ttc' -o -name '*.otf' \\) 2>/dev/null\n"
-            "     python3 scripts/diagnostics/reinforcement_charts.py <run_dir> \\\n"
-            "       --font /path/to/font.ttf\n"
-            "  3) 把任一 CJK 字体文件拷到 ~/.fonts/ (自动扫描)")
+            "✗ 未找到中文字体 — 仓库内置字体 (scripts/diagnostics/fonts/) "
+            "也没找到, 无法生成中文标签图。任选其一后重跑:\n"
+            "  1) git pull 更新代码 — 内置字体随仓库分发, 通常 pull 一次即好\n"
+            "     (若 pull 后仍报此错, 把 git pull 的输出贴回)\n"
+            "  2) 显式指定: python3 scripts/diagnostics/reinforcement_charts.py "
+            "<run_dir> --font /path/to/font.ttf\n"
+            "     (找字体: find /usr/share/fonts /opt ~/.fonts -name '*.tt[fc]' "
+            "-o -name '*.otf' 2>/dev/null)\n"
+            "  3) 把任一 CJK 字体文件拷到 ~/.fonts/ (自动扫描)\n"
+            "  4) 有 root 的话: sudo apt-get install -y fonts-noto-cjk")
     print(f"✓ 中文字体: {name}")
     out_dir = args.out_dir or args.run_dir
     print(f"『三处加固』举证图 → {out_dir}")

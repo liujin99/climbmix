@@ -874,9 +874,9 @@ def main():
     if HAS_MPL:
         if setup_cjk_font() is None:
             print("[!] 未找到中文字体 — 图表降级为文字版。"
-                  "修复: sudo apt-get install -y fonts-noto-cjk,"
-                  "或把 CJK 字体放入 ~/.fonts/,或参照 "
-                  "reinforcement_charts.py 报错信息里的 find 命令")
+                  "修复: git pull (仓库内置字体 scripts/diagnostics/fonts/),"
+                  "或 --font 指定 / ~/.fonts/ 放 CJK 字体,"
+                  "或 sudo apt-get install -y fonts-noto-cjk")
             HAS_MPL = False
 
     fleet = load_fleet(run_dir)
