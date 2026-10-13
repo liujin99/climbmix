@@ -121,10 +121,11 @@ def cluster_token_shares(run_dir):
     return None, None
 
 
-# ── 中文字体 (report_charts.py 复用) ─────────────────────────────────
+# ── 中文字体 (v10.1: 仅本脚本三张 deck 专用图用中文; report_charts 的
+#    实验结果图保持英文, 不经此处) ────────────────────────────────────
 # 仓库内置子集字体优先 (服务器无 root / 无系统 CJK 字体也能出图);
 # fonts/wqy-zenhei-deck.ttf = 文泉驿正黑子集 (GPL + 字体例外), 覆盖
-# 本目录两个图表脚本的全部图内文案 — 改文案后跑 fonts/make_font_subset.py
+# 本脚本全部图内文案 — 改文案后跑 fonts/make_font_subset.py
 BUNDLED_FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "fonts")
 
@@ -236,8 +237,17 @@ def verify_layout(fig, name):
     w, h = fig.canvas.get_width_height()
     bad = []
     for i, (s1, b1) in enumerate(items):
-        if b1.x0 < -2 or b1.y0 < -2 or b1.x1 > w + 2 or b1.y1 > h + 2:
-            bad.append(f"越界:『{s1[:14]}』")
+        edges = []
+        if b1.x0 < -2:
+            edges.append("左")
+        if b1.y0 < -2:
+            edges.append("下")
+        if b1.x1 > w + 2:
+            edges.append("右")
+        if b1.y1 > h + 2:
+            edges.append("上")
+        if edges:
+            bad.append(f"越界[{'+'.join(edges)}]:『{s1[:14]}』")
         for s2, b2 in items[i + 1:]:
             if b1.overlaps(b2):
                 bad.append(f"重叠:『{s1[:10]}』×『{s2[:10]}』")
