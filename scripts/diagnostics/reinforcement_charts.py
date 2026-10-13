@@ -19,6 +19,16 @@
 #                                           预测器在实测区内贴合, 在无数据
 #                                           区冲上虚假高峰(『外推最优点』=
 #                                           拟合噪声), 该点正式实测打回原形
+#    recipe_distribution.png       ④ 配比全景对比(v10.4): 赢家/cfg90/cfg100/
+#                                  uniform/池自然占比 在 15 语义簇上的 100%
+#                                  堆叠 + domainfix 域标签配比单列(域空间,
+#                                  无簇 α 向量); 配方读 run 目录 optimal_
+#                                  mixture_weights / topk / search_state
+#
+#  v10.4 (评审反馈): ① d8 三联重排为 问题(左)· 做法(中, 公式卡)· 结果
+#  (右), 与 deck 加固页的『问题→做法→结果』三短点同构; ② 新增配比全景
+#  对比图 (用户: 最终配比的分布对比漏了; domainfix 用域标签, 不能直接用
+#  语义簇表示 — 单列右图)。
 #
 #  v10.3 (评审反馈): ① d19 极性修复 — 原图把『实测最优』『外推最优点』
 #  都标在曲线最低点(得分极性反了), 改为: 实测最优 = 最高实测点, 外推
@@ -66,7 +76,7 @@ try:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib import font_manager as fm
-    from matplotlib.patches import Patch
+    from matplotlib.patches import FancyBboxPatch, Patch
 except ImportError:
     sys.exit("✗ 缺 matplotlib — pip install matplotlib (PEP 668 环境加 "
              "--break-system-packages), 装好后重跑本脚本")
@@ -97,10 +107,16 @@ D8_GSM8K = [  # (标签, 赢家分, 对照 uniform 分, 赢家颜色) — gsm8k 
     ("prod3 · 误加权", 0.052, 0.119, RED),
     ("prod5 · 修复后", 0.3010, 0.1054, TEAL),
 ]
-D8_HOW = ("做法:各基准按信噪比(SNR)定话语权 w;噪声地板按任务实测比例计算"
-          "(prod3 曾把 CoT 按 4 选 1 硬算,高估约 20 倍);w_floor = 0.5,NLL 只补位")
 D8_AFTER = ("修复后(prod5):赢家 gsm8k 30.1% = uniform 的 2.9×、base 的 10.4×;"
             "三臂全胜 uniform(+3.6 ~ +4.3pt)")
+
+# 配比全景对比 (v10.4) — 语义名/域配比出处:
+CLUSTER_NAMES = {  # experiment_prod5.md §4c (cluster_peek 鉴定 2026-09-30)
+    "C10": "统计练习题", "C0": "形式数学解题", "C6": "综述长文",
+}
+DOMAINFIX_DOMAINS = [  # experiment_prod4.md §4e — 域标签空间, 无簇 α 向量
+    ("数学", 60.0), ("物理", 15.0), ("化学", 12.5), ("生物", 12.5),
+]
 
 
 def load_json(path):
@@ -344,12 +360,12 @@ def chart_d14(out_dir, run_dir):
     return ok
 
 
-# ── ② D8: 原因(左)· 结果(右)· 做法(下) ─────────────────────────────
+# ── ② D8: 问题(左)· 做法(中, 公式)· 结果(右) ────────────────────────
 def chart_d8(out_dir):
     fig = plt.figure(figsize=(13, 5.0))
 
-    # 左 原因: 逐基准 真信号 vs 抽样噪声 (SNR 降序, 上=响)
-    ax = fig.add_axes([0.075, 0.40, 0.36, 0.43])
+    # 左 问题: 逐基准 真信号 vs 抽样噪声 (SNR 降序, 上=响)
+    ax = fig.add_axes([0.08, 0.40, 0.23, 0.43])
     n = len(D8_SNR)
     for i, (bench, sig, noi, snr) in enumerate(D8_SNR):
         y = n - 1 - i
@@ -365,21 +381,35 @@ def chart_d8(out_dir):
     ax.axvline(0.0495, color=GRAY, lw=0.7, ls="--", zorder=1)
     ax.text(0.0508, n - 1 + 0.66, "信噪比", ha="left", va="center",
             fontsize=9, fontweight="bold", color=DGRAY, zorder=4)
-    ax.text(0.033, -0.33, "信号 < 噪声 = 瞎猜", ha="left", va="center",
-            fontsize=9, style="italic", color=DGRAY, zorder=4)
     ax.set_xlim(0, 0.062)
     ax.set_ylim(-0.55, n - 1 + 0.95)
     ax.set_yticks(range(n - 1, -1, -1), [r[0] for r in D8_SNR], fontsize=10)
     ax.set_xticks([])
-    ax.set_title("原因:各基准的真信号 vs 抽样噪声", fontsize=11.5,
+    ax.set_title("问题:各基准的真信号 vs 抽样噪声", fontsize=11.5,
                  fontweight="bold")
     ax.legend(handles=[Patch(color=TEAL, label="真信号:候选间真实差异"),
                        Patch(color=RED, label="抽样噪声:题量决定的标准误")],
               loc="upper center", bbox_to_anchor=(0.5, -0.135), ncol=2,
               fontsize=8.5, frameon=False)
 
+    # 中 做法: 公式卡 (话语权按信噪比分配)
+    ax = fig.add_axes([0.335, 0.40, 0.185, 0.43])
+    ax.set_axis_off()
+    ax.add_patch(FancyBboxPatch(
+        (0.02, 0.03), 0.96, 0.94, transform=ax.transAxes,
+        boxstyle="round,pad=0.02,rounding_size=0.04",
+        facecolor="#EDF5F6", edgecolor="#9DC8CC", lw=1.0, zorder=1))
+    ax.text(0.5, 0.88, "做法:话语权按信噪比", ha="center", va="center",
+            fontsize=12, fontweight="bold", color=NAVY, zorder=3)
+    ax.text(0.5, 0.63, "w ∝ 真信号 ÷ 抽样噪声", ha="center", va="center",
+            fontsize=12, fontweight="bold", color=NAVY, zorder=3)
+    ax.text(0.5, 0.30, "噪声地板按任务实测 · w_floor=0.5\n"
+            "NLL 只补位(prod3 曾把噪声高估 20 倍)",
+            ha="center", va="center", fontsize=10.5, color=DGRAY,
+            linespacing=1.8, zorder=3)
+
     # 右 结果: gsm8k — prod3 误加权 vs prod5 修复后 (赢家 vs uniform)
-    ax = fig.add_axes([0.565, 0.40, 0.36, 0.43])
+    ax = fig.add_axes([0.565, 0.40, 0.365, 0.43])
     for gi, (glab, win, uni, wc) in enumerate(D8_GSM8K):
         gx = 1.0 + 1.55 * gi
         ax.bar(gx - 0.17, win, width=0.30, color=wc, zorder=3)
@@ -406,10 +436,10 @@ def chart_d8(out_dir):
               loc="upper center", bbox_to_anchor=(0.5, -0.135), ncol=3,
               fontsize=8.5, frameon=False)
 
-    fig.text(0.5, 0.955, "评分按信噪比(SNR)加权:原因(左)、结果(右)、做法(下)",
+    fig.text(0.5, 0.955, "评分按信噪比(SNR)加权:问题(左)· 做法(中)· 结果(右)",
              ha="center", va="center", fontsize=13, fontweight="bold")
-    fig.text(0.5, 0.185, D8_HOW, ha="center", va="center", fontsize=10,
-             color=DGRAY)
+    fig.text(0.195, 0.215, "信号 < 噪声 = 瞎猜(SNR < 1)", ha="center",
+             va="center", fontsize=9, style="italic", color=DGRAY)
     fig.text(0.5, 0.105, D8_AFTER, ha="center", va="center", fontsize=9.5,
              color=DGRAY)
     ok = verify_layout(fig, "d8")
@@ -498,10 +528,155 @@ def chart_d19(out_dir):
     return ok
 
 
+# ── ④ 配比全景对比: 赢家 vs 传统方法 vs 池 (v10.4) ───────────────────
+def find_run_file(run_dir, name):
+    for sub in ("", "state/", "detail/"):
+        p = os.path.join(run_dir, sub, name)
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def _weights_vec(payload, labels):
+    """权重载荷 (标签键 dict | list | {"weights": …}) → 按 labels 的向量。"""
+    if isinstance(payload, dict):
+        payload = payload.get("weights", payload)
+    if isinstance(payload, dict):
+        try:
+            return np.array([float(payload[l]) for l in labels])
+        except (KeyError, TypeError, ValueError):
+            return None
+    if isinstance(payload, list) and len(payload) == len(labels):
+        return np.array(payload, dtype=float)
+    return None
+
+
+def load_recipes(run_dir, labels):
+    """臂 → 15 簇权重向量: climb(终选) ← optimal_mixture_weights.json
+    (兜底 topk rank-1);cfg90 / cfg100 ← topk_mixture_candidates.json
+    (config_id 90/100, 兜底 search_state.accumulated_configs)。"""
+    out = {}
+    topk = load_json(find_run_file(run_dir,
+                                   "topk_mixture_candidates.json")) or {}
+    by_id = {int(c["config_id"]): c for c in topk.get("candidates") or []
+             if c.get("config_id") is not None}
+    v = _weights_vec(load_json(find_run_file(
+        run_dir, "optimal_mixture_weights.json")), labels)
+    if v is None:
+        r1 = next((c for c in topk.get("candidates") or []
+                   if c.get("rank") == 1), None)
+        v = _weights_vec((r1 or {}).get("weights"), labels)
+    if v is not None and v.sum() > 0:
+        out["climb(终选)"] = v / v.sum()
+    state_by_id = {}
+    state = load_json(find_run_file(run_dir, "search_state.json")) or {}
+    for c in state.get("accumulated_configs") or []:
+        if c.get("config_id") is not None:
+            state_by_id[int(c["config_id"])] = c.get("weights")
+    for cid, name in ((90, "climb-cfg90"), (100, "climb-cfg100")):
+        v = _weights_vec((by_id.get(cid) or {}).get("weights"), labels)
+        if v is None:
+            v = _weights_vec(state_by_id.get(cid), labels)
+        if v is not None and v.sum() > 0:
+            out[name] = v / v.sum()
+    return out
+
+
+def chart_recipe(out_dir, run_dir):
+    labels, shares = cluster_token_shares(run_dir)
+    if labels is None:
+        print("  [!] 无 macro_info.json — 配比全景图跳过")
+        return False
+    K = len(labels)
+    recipes = load_recipes(run_dir, labels)
+    if not recipes:
+        print("  [!] optimal_mixture_weights / topk / search_state 均无配方"
+              " — 配比全景图跳过")
+        return False
+    climb_w = recipes.get("climb(终选)")
+    order = sorted(range(K),
+                   key=lambda i: -(climb_w[i] if climb_w is not None
+                                   else shares[i] / 100.0))
+    # 语义簇高亮色, 其余统一浅灰蓝 (小份额 floor, 同色不抢焦点)
+    hi = {"C10": ORANGE, "C0": TEAL, "C6": BLUE}
+    colors = [hi.get(labels[i], "#B9C6D1") for i in range(K)]
+
+    rows = [(name, recipes[name]) for name in
+            ("climb(终选)", "climb-cfg90", "climb-cfg100")
+            if name in recipes]
+    rows.append(("uniform(等权)", np.full(K, 1.0 / K)))
+    rows.append(("池自然占比", shares / 100.0))
+    n = len(rows)
+
+    fig = plt.figure(figsize=(13, 4.8))
+    ax = fig.add_axes([0.105, 0.30, 0.545, 0.52])
+    for r, (name, w) in enumerate(rows):
+        left = 0.0
+        y = n - 1 - r
+        for i in order:
+            seg = w[i] * 100.0
+            if seg <= 0:
+                continue
+            ax.barh(y, seg, left=left, height=0.62, color=colors[i],
+                    edgecolor="white", linewidth=0.4, zorder=3)
+            if seg >= 10.0:
+                lbl = f"{CLUSTER_NAMES.get(labels[i], labels[i])} {seg:.0f}%"
+            elif seg >= 8.0:
+                lbl = f"{seg:.0f}%"
+            else:
+                lbl = None
+            if lbl:
+                ax.text(left + seg / 2.0, y, lbl, ha="center", va="center",
+                        fontsize=7.5, fontweight="bold", color="white",
+                        zorder=4)
+            left += seg
+    ax.set_yticks(range(n - 1, -1, -1), [r[0] for r in rows], fontsize=9.5)
+    ax.set_xlim(0, 100)
+    ax.set_ylim(-0.55, n - 0.45)
+    ax.set_xticks([0, 25, 50, 75, 100], ["0", "25", "50", "75", "100%"],
+                  fontsize=8.5)
+    ax.set_title("各策略 token 配比(15 个语义簇,按赢家 α 降序)",
+                 fontsize=11, fontweight="bold")
+
+    # 右: domainfix — 域标签空间, 不在语义簇空间 (无法映射, 单列)
+    ax = fig.add_axes([0.735, 0.30, 0.20, 0.52])
+    dc = [ORANGE, BLUE, TEAL, GRAY]
+    for j, ((dom, pct), c) in enumerate(zip(DOMAINFIX_DOMAINS, dc)):
+        y = len(DOMAINFIX_DOMAINS) - 1 - j
+        ax.barh(y, pct, height=0.55, color=c, zorder=3)
+        ax.text(pct + 1.5, y, f"{pct:.1f}%".rstrip("0").rstrip("."),
+                va="center", ha="left", fontsize=9, fontweight="bold",
+                color=DGRAY, zorder=4)
+    ax.set_yticks(range(len(DOMAINFIX_DOMAINS) - 1, -1, -1),
+                  [d[0] for d in DOMAINFIX_DOMAINS], fontsize=9.5)
+    ax.set_xlim(0, 100)
+    ax.set_ylim(-0.6, len(DOMAINFIX_DOMAINS) - 0.4)
+    ax.set_xticks([])
+    ax.set_title("domainfix:域标签配比\n(不在语义簇空间)", fontsize=9.5,
+                 fontweight="bold")
+
+    fig.text(0.5, 0.955, "最终配比长什么样:赢家 vs 传统方法 vs 池自然分布",
+             ha="center", va="center", fontsize=13, fontweight="bold")
+    fig.text(0.5, 0.10,
+             "赢家把 C10『统计练习题』押到 80%(池占比 5.5%,14.6× 浓缩);"
+             "top-3 配方全部 C10-heavy(0.55~0.80)\n"
+             "domainfix 定义在域标签空间(数学 0.60),无簇空间 α 向量,"
+             "不能与语义簇直接对比 — 右图单列;natural 臂 ≡ 池自然占比",
+             ha="center", va="center", fontsize=9.5, color=DGRAY,
+             linespacing=1.7)
+    ok = verify_layout(fig, "recipe")
+    path = os.path.join(out_dir, "recipe_distribution.png")
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    print(f"  ✓ {path}")
+    return ok
+
+
 def deck_dir_for(run_dir):
-    """汇报包目录 = run 目录下的 deck/ 子目录 (v10.2 实验结果/汇报
-    分离; 用户裁决: deck 跟着 run 走)。make_deck.py 有同名同实现副本 —
-    不互相 import, 免得把 numpy/matplotlib/pptx 依赖拉进对方的裸跑路径。"""
+    """汇报包目录 = run 目录下的 deck/ 子目录 (v10.2 分离实验结果与汇报
+    产物; 用户裁决: deck 跟着 run 走)。make_deck.py 有同名同实现副本 —
+    不互相 import, 免得把 numpy/matplotlib/pptx 依赖拉进
+    对方的裸跑路径。"""
     return os.path.join(os.path.normpath(run_dir), "deck")
 
 
@@ -533,13 +708,15 @@ def main():
     print(f"✓ 中文字体: {name}")
     out_dir = args.out_dir or deck_dir_for(args.run_dir)
     os.makedirs(out_dir, exist_ok=True)
-    print(f"『三处加固』举证图 → {out_dir} (汇报包, 与实验结果目录分离)")
+    print(f"『三处加固』举证图 + 配比全景 → {out_dir} "
+          "(汇报包, 与实验结果目录分离)")
     print("  数据出处: paper_deviations.md D14 / experiment_prod2_k15bal.md "
-          "§4.2 / TODO.md prod3 记录 / experiment_prod5.md §3b / "
-          "experiment_prod4.md §3d")
+          "§4.2 / TODO.md prod3 记录 / experiment_prod5.md §3b·§4c / "
+          "experiment_prod4.md §3d·§4e")
     oks = [chart_d14(out_dir, args.run_dir),
            chart_d8(out_dir),
-           chart_d19(out_dir)]
+           chart_d19(out_dir),
+           chart_recipe(out_dir, args.run_dir)]
     if not all(oks):
         sys.exit("✗ 有图未通过标签重叠自检 — 请把上面的『重叠/越界』行贴回来")
     print("下一步: python3 scripts/diagnostics/make_deck.py <run_dir>")

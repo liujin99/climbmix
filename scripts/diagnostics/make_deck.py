@@ -17,6 +17,7 @@ pptx + 全部 7 张图都在里面 (4 张实验结果图每次构建时从 run �
 16:9, 中文字体 Microsoft YaHei。
 """
 import argparse
+import glob
 import os
 import shutil
 import struct
@@ -43,18 +44,28 @@ PAGE_W, PAGE_H = Inches(13.333), Inches(7.5)
 ML = Inches(0.6)                       # 左右页边距
 CW = PAGE_W - 2 * ML                   # 内容宽
 
-CHARTS_USED = ["search_convergence.png", "arms_main_results.png",
-               "proxy_target_consistency.png", "cluster_alpha_vs_score.png",
+CHARTS_USED = ["search_convergence.png", "proxy_target_consistency.png",
+               "recipe_distribution.png",
                "reinforcement_d14_cluster_balance.png",
                "reinforcement_d8_scoring_snr.png",
                "reinforcement_d19_extrapolation.png"]
 
-# deck 专属 (reinforcement 三图, 中文, 由 reinforcement_charts.py 写进
-# 汇报包目录); 其余 4 张 = report_charts 实验结果图 (英文, 住 run 目录,
-# 权威源在 run 目录 — 每次构建重新复制进汇报包, 不会用到旧副本)
+# deck 专属 (reinforcement 系图, 中文, 由 reinforcement_charts.py 写进
+# 汇报包目录); 其余 2 张 = report_charts 实验结果图 (英文, 住 run 目录,
+# 权威源在 run 目录 — 每次构建重新复制进汇报包, 不会用到旧副本)。
+# v10.4: arms_main_results(主结果页删, 数字全在结论先行表+总表) 与
+# cluster_alpha_vs_score(专业向小倍数图, 换成领导友好的配比全景) 不再
+# 进汇报包, 仍是 run 目录的实验产物
 DECK_OWNED = {"reinforcement_d14_cluster_balance.png",
               "reinforcement_d8_scoring_snr.png",
-              "reinforcement_d19_extrapolation.png"}
+              "reinforcement_d19_extrapolation.png",
+              "recipe_distribution.png"}
+
+# 流程页小插图 (deck_assets/, 无文字的意象图; 缺件回退矢量图标)
+ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "deck_assets")
+FLOW_ICON_IMG = {"data": "flow_cluster.png", "d20": "flow_proxy.png",
+                 "lgbm": "flow_learner.png", "d28": "flow_final.png"}
 
 
 def deck_dir_for(run_dir):
@@ -74,7 +85,14 @@ def resolve_chart(dirs, name):
                 return p
     return None
 
-# ── 幻灯片文案 (v10.3 评审反馈: ① 原第 2/3 页同为得分表、数字重复,
+# ── 幻灯片文案 (v10.4 评审反馈: ① 结论先行表以 base 为基准(Δ/相对全 vs
+#    base), 三个 climb 臂整组底色标出; ② 主结果页删除 — 数字与结论先行
+#    表/总表完全重复; ③ 三处加固三页改『问题 → 做法 → 结果』三短点, 图
+#    d8 同构重排(问题/做法公式/结果); ④ 新增配比全景对比页
+#    (recipe_distribution.png: 赢家 vs 传统方法 vs 池, domainfix 域空间
+#    单列), 替换原『赢家是谁』的专业向小倍数图; ⑤ 流程页换 deck_assets/
+#    意象小图。
+#    v10.3 评审反馈: ① 原第 2/3 页同为得分表、数字重复,
 #    合并为单页『结论先行』(全 7 臂 + Δ + 相对提升 + z), 17 页 → 16 页;
 #    ② 全部表格得分改百分点口径 xx.xx%, 绝对 Δ(pt) 与相对提升(%)
 #    并列, 页内大数字同步; ③ d19 示意图极性修复 — 见
@@ -91,36 +109,33 @@ SLIDES = [
          title="训练数据怎么配?让算法自己搜",
          subtitle="CLIMB 数据配比搜索 · prod5 实验结果",
          meta="数据团队汇报 · 2026-10",
-         stats=[("+25.9%", "STEM 平均分相对提升(vs uniform,6 项基准全胜)"),
+         stats=[("+19.1%", "STEM 平均分相对提升(vs base;对 uniform 6 项全胜)"),
                 ("10.4×", "数学应用题 gsm8k:2.9% → 30.1%"),
                 ("88.5%", "赢家训练量集中在 2 个数学簇")]),
     dict(kind="table", title="结论先行",
-         takeaway="三个搜索配方全部显著胜出,最高比 uniform 高 26% — 只多训练、不挑数据,一分不涨",
-         table=(["配方", "STEM", "Δ vs uniform", "相对提升", "z", "结论"],
-                [["climb(搜索终选)", "**20.86%**", "+4.29pt", "**+25.9%**",
-                  "+3.80", "显著胜出"],
-                 ["climb-cfg90", "20.78%", "+4.21pt", "+25.4%", "+3.67",
+         takeaway="三个搜索配方全部显著胜出(vs base 最高 +19.1%)— 只多训练、不挑数据,一分不涨",
+         table=(["配方", "STEM", "Δ vs base", "相对提升", "结论"],
+                [["climb(搜索终选)", "**20.86%**", "+3.34pt", "**+19.1%**",
                   "显著胜出"],
-                 ["climb-cfg100", "20.13%", "+3.56pt", "+21.5%", "+3.16",
-                  "显著胜出"],
-                 ["domainfix(手调域配比)", "17.73%", "+1.16pt", "+7.0%",
-                  "+1.03", "无显著差异"],
-                 ["natural(池自然占比)", "17.23%", "+0.67pt", "+4.0%",
-                  "+0.59", "无显著差异"],
-                 ["base(不继续训练)", "17.52%", "+0.95pt", "+5.7%",
-                  "—", "对照锚点"],
-                 ["uniform(15 簇等权)", "16.57%", "(基准)", "—", "—",
-                  "参考基准"]]),
-         emph=[0], y=1.9, row_h=0.46, size=12.5,
-         widths=[0.26, 0.12, 0.16, 0.13, 0.10, 0.23],
-         note="climb = 搜索终选(cfg#101);cfg90 / cfg100 = 搜索实测 top-3 的另两个;"
-              "domainfix = 手调域配比;natural = 池自然占比;uniform = 15 簇等权;"
-              "base = 不继续训练 — 各页同此;"
-              "climb 对 uniform **6 项基准全胜**(符号检验 p=0.016);"
-              "三个非搜索臂都没显著超过 base — 手调到头了,增益全部来自『喂哪些数据』,"
+                 ["climb-cfg90", "20.78%", "+3.26pt", "+18.6%", "显著胜出"],
+                 ["climb-cfg100", "20.13%", "+2.61pt", "+14.9%", "显著胜出"],
+                 ["domainfix(手调域配比)", "17.73%", "+0.21pt", "+1.2%",
+                  "无显著差异"],
+                 ["natural(池自然占比)", "17.23%", "−0.29pt", "−1.7%",
+                  "无显著差异"],
+                 ["uniform(15 簇等权)", "16.57%", "−0.95pt", "−5.4%",
+                  "无显著差异"],
+                 ["base(不继续训练)", "17.52%", "(基准)", "—", "对照锚点"]]),
+         emph=[0, 1, 2], y=1.9, row_h=0.46, size=12.5,
+         widths=[0.28, 0.12, 0.15, 0.13, 0.32],
+         note="Δ 与相对提升均 vs base(不继续训练)— 回答『继续训练到底带来什么』:"
+              "三个传统配比臂全都没超过 base(等权甚至 −0.95pt),增益全部来自『喂哪些数据』,"
               "不来自多训练(同数据池·同底座·同预算,每臂 3B tokens);"
-              "前序 quadmix 实验已证明配比重要,系统搜索第一次给出可复现、可解释的答案;"
-              "得分 = Centered×100,Δ(pt)与相对提升均 vs uniform"),
+              "显著性(vs uniform,逐题二项 SE 实算):三个搜索臂 z = **+3.80 / +3.67 / +3.16**,"
+              "全部显著;climb 对 uniform **6 项基准全胜**(符号检验 p=0.016);"
+              "climb = 搜索终选(cfg#101);cfg90 / cfg100 = 搜索实测 top-3 的另两个;"
+              "domainfix / natural / uniform = 三种传统配比 — 各页同此;"
+              "得分 = Centered×100,pt = 百分点"),
     dict(kind="flow", title="怎么做的 — CLIMB:把『选数据』变成『搜参数』",
          takeaway="配比不再靠人拍:15 个簇权重当作可搜索的参数,小模型快速试错,学习器指路,逐轮逼近最优",
          steps=[
@@ -147,12 +162,8 @@ SLIDES = [
              ("验证规模", "正式规模只跑 **6 个训练臂(共 18B tokens)+ 1 个不训练锚点** — "
                        "海量试错不烧大模型的钱"),
          ],
-         image="search_convergence.png",
-         caption="115 个候选配比的得分轨迹(各轮最佳连成折线)"),
-    dict(kind="image", title="主结果",
-         takeaway="三个 CLIMB 配方全部显著胜出,最高比 uniform 高 26%(20.86% vs 16.57%)",
-         image="arms_main_results.png",
-         caption="同预算对比(每臂 3B tokens);误差棒逐题实算(9,110 题)— 臂间间距远大于误差棒"),
+          image="search_convergence.png",
+          caption="115 个候选配比的得分轨迹(各轮最佳连成折线)"),
     dict(kind="table", title="全基准得分总表",
          takeaway="三个 CLIMB 配方包揽生成式两项前三;选择题各臂打平,最高分反而是 base(不训练)— 净差距全部来自『要写过程』的题",
          table=(["基准(题量)", "climb", "climb-cfg90", "climb-cfg100", "domainfix", "natural", "uniform", "base"],
@@ -170,7 +181,8 @@ SLIDES = [
               "CLIMB 论文同口径,我们沿用;② 公式:Centered = (准确率 − chance) ÷ (1 − chance),"
               "选择题 chance = 0.25(4 选 1)、写过程题 chance ≈ 0(精确匹配),"
               "『STEM 平均』= 6 任务 Centered 的算术平均。加粗 = 行最优;数字与 report.md §3 完全同源"
-              "(逐题 ±SE 明细见 report);选择题 4 行的行最优都是 base — 3B 继续训练的共性回退,与配方无关"),
+              "(逐题 ±SE 明细见 report,臂间间距远大于误差棒 — 9,110 题逐题实算);"
+              "选择题 4 行的行最优都是 base — 3B 继续训练的共性回退,与配方无关"),
     dict(kind="table", title="提升来自哪里 — 对最强传统方法",
          takeaway="逐基准跟最强传统方法比:大赢的全是『要写过程的数学题』(2×+),选择题全部打平 — 净增益干净落在推理能力",
          table=(["基准(题量)", "climb", "最强传统方法", "Δ", "结论"],
@@ -196,41 +208,41 @@ SLIDES = [
     dict(kind="image", title="三处加固 ①:簇大小强制均衡",
          takeaway="论文的合并把 99% 数据塌进一个巨簇,配比只剩 1 个真旋钮 — 强制均衡后 15 个旋钮全部可用",
          bullets=[
-             ("为什么翻车", "我们的池是一整块连续流形,论文的『相近合并』链式塌缩 — "
-                        "**巨簇吃掉 99.05%,全部 35 个候选配方被钉死,配比只剩 1 个真旋钮**"
-                        "(调 K=14/21/24/32 巨簇都 ≥97.5%,怎么调都无解)"),
-              ("怎么修", "细簇 k-means++ 锚点 + 容量约束:恰好 15 簇、单簇 ≤8.8% — "
-                      "**搜索从 prod1 −0.36pt(输)翻到 prod2 +1.02pt(首次转正)**;"
-                      "prod5 赢家更把 C10 重仓到 80%(池占比的 14.6×)"),
+              ("问题", "论文式『相近合并』链式塌缩:巨簇吃掉 **99.05%**,15 个旋钮只剩 1 个 — "
+                     "调 K=14/21/24/32,巨簇都 ≥97.5%,怎么调都无解"),
+              ("做法", "细簇 k-means++ 锚点 + 容量约束:恰好 15 簇,单簇 ≤ 8.8%"),
+              ("结果", "prod1 −0.36pt(输)→ prod2 **+1.02pt(首次转正)**→ "
+                     "prod5 赢家把 C10 押到 80%(池占比的 14.6×)"),
          ],
          image="reinforcement_d14_cluster_balance.png",
-         caption="左:as-is — 论文距离合并(巨簇 99.05% + 13 个孤岛 0.95%,为什么翻车);"
-                 "右:to-be — 强制均衡(15 簇真实份额,读自 run 目录);决策留档 D14"),
+         caption="左:问题 — as-is 论文距离合并(巨簇 99.05% + 13 个孤岛 0.95%);"
+                 "右:做法+结果 — to-be 强制均衡(15 簇真实份额,读自 run 目录);决策留档 D14"),
     dict(kind="image", title="三处加固 ②:评分按信噪比加权",
          takeaway="评分错一位,方向错一片:搜索会押『好预测的文本』而非『会做题』 — 信噪比定话语权,NLL 只补位",
          bullets=[
-              ("为什么加权", "题量与难度不同 → 抽样噪声不同:math 的候选间真信号只有噪声的 1/11 — "
-                         "**信号小于噪声的基准,accuracy 纯属瞎猜,等权平均让它们瞎指挥**"),
-              ("怎么做", "每个基准按信噪比定话语权 w;噪声地板按任务实测比例计算;"
-                       "w_floor=0.5,NLL 只补位 — **prod3 误加权反例:最强真信号 gsm8k 的权重被归零,"
-                       "赢家把 gsm8k 砍半(−56%)、math −78%,选择题却持平,平均分掩盖了方向性塌方**;"
-                       "修复后 prod5:gsm8k 30.1%(uniform 的 2.9×、base 的 10.4×)"),
+              ("问题", "各基准抽样噪声差 40 倍:math 的真信号只有噪声的 **1/11** — "
+                     "等权平均让噪声基准瞎指挥;prod3 实锤:gsm8k 权重被归零,赢家 gsm8k −56%、math −78%"),
+              ("做法", "话语权按信噪比分配:**w ∝ 真信号 ÷ 抽样噪声**;"
+                     "噪声地板按任务实测,w_floor = 0.5,NLL 只补位"),
+              ("结果", "修复后 prod5:gsm8k **30.1%**(uniform 的 2.9×、base 的 10.4×),"
+                     "三臂全胜 uniform(+3.6~+4.3pt)"),
          ],
          image="reinforcement_d8_scoring_snr.png",
-         caption="左:原因 — 逐基准『真信号 vs 抽样噪声』(prod2 · 30 候选实测);"
-                 "右:结果 — gsm8k 上误加权(prod3)vs 修复后(prod5);下:做法;决策留档 D8"),
+         caption="左:问题 — 逐基准『真信号 vs 抽样噪声』(prod2 · 30 候选实测);中:做法;右:结果 — "
+                 "gsm8k 上误加权(prod3)vs 修复后(prod5);决策留档 D8"),
     dict(kind="image", title="三处加固 ③:终选守卫 — 『外推』的问题",
          takeaway="拟合模型只对实测过的配比区域负责;从未训练过的『外推最优点』是拟合噪声,不是信号",
          bullets=[
-              ("什么是外推", "预测器在实测点围成的区域内做内插,可信;"
-                         "**跑到从未训练过的角落挑『最优点』= 外推 — 那里的预测值没有任何数据支撑**"),
-               ("为什么翻车", "论文式终选就是外推:prod4 的『外推冠军』从未训练,正式实测 19.72% — "
-                          "**输给同一搜索里实测过的 cfg72(21.42%)1.70pt(z≈2.0)**,热区垫底"
-                          "(全部数字见下一页)"),
-          ],
-          image="reinforcement_d19_extrapolation.png",
-          caption="示意图(非真实数据):预测器在实测区内贴合,在无数据区冲上虚假高峰;"
-                  "空心红点 = 外推点正式实测,打回原形 — prod4 式翻车的机制;决策留档 D19"),
+              ("问题", "prod4『外推冠军』从未训练:正式实测 **19.72%**,输给同搜索实测过的 "
+                     "cfg72(21.42%)1.70pt(z≈2.0),热区垫底"),
+              ("做法", "终选守卫:终选必须是**实测第一**;外推点须领先 > max(0.30, 留出残差 σ) "
+                     "才许上场,否则自动降级实测第一"),
+              ("结果", "prod5 终选 = 实测第一(cfg#101):**20.86%、6 项全胜** — "
+                     "prod4 式反例构造性不可复现(全部数字见下一页)"),
+         ],
+         image="reinforcement_d19_extrapolation.png",
+         caption="示意图(非真实数据):预测器在实测区内贴合,在无数据区冲上虚假高峰;"
+                 "空心红点 = 外推点正式实测,打回原形 — prod4 式翻车的机制;决策留档 D19"),
     dict(kind="table", title="终选守卫:prod4 同轮对决(全部数字)",
          takeaway="从未训练的外推『终选』输给自家实测点 — 终选必须是实测第一,外推须大幅领先才许上场",
          table=(["臂(同一 CLIMB 搜索的输出)", "d28 得分", "实测过吗", "判决"],
@@ -246,15 +258,19 @@ SLIDES = [
          note="怎么修:外推照跑留审计,但预测领先 ≤ max(0.30, 留出残差 σ) 就自动降级实测第一 — "
               "prod5:climb = cfg#101 = 实测第一,20.86%、6/6 全胜,top-3 全部显著胜出,"
               "prod4 式反例构造性不可复现;prod4 分数为旧协议口径(gsm8k 逐位可比);决策留档 D19"),
-    dict(kind="image", title="赢家是谁",
-         takeaway="搜索把 80% 训练量押给一个簇:统计练习题 — 全池仅占 5.5%,相当于 14.6 倍浓缩",
+    dict(kind="image", title="赢家是谁:配比全景对比",
+         takeaway="搜索给出的答案与任何人工先验都不同 — 80% 押一个池占比仅 5.5% 的簇",
          bullets=[
-             ("赢家配方", "80% 给『统计练习题』簇 + 8% 给『形式数学解题』簇,其余 13 簇全压保底"
-                       "(每簇 ≈ 0.9%)— **两个簇占 88.5%**"),
-             ("结论稳健", "排名前 3 的配方全都重仓同一簇(权重 0.55~0.80)— **不是单点运气**"),
+              ("赢家配方", "climb:80% 给『统计练习题』(C10,池占比 5.5% 的 **14.6×**)"
+                        " + 8% 给『形式数学解题』— **两个簇占 88.5%**"),
+              ("不是单点运气", "top-3 配方全部 C10-heavy(0.55~0.80);cfg100 另押『综述长文』"
+                            "16% — 质量分最高,math 反而减半"),
+              ("对照组", "uniform = 15 簇等权;池自然占比 = 数据本来的样子(= natural 臂);"
+                       "domainfix 是域标签配比(数学 60%),**不在语义簇空间,右图单列**"),
          ],
-         image="cluster_alpha_vs_score.png",
-         caption="赢家配方的簇权重分布(逐簇 α 与得分)"),
+         image="recipe_distribution.png",
+         caption="各策略 token 预算在 15 个语义簇上的分配(100% 堆叠,按赢家 α 降序,仅标注 ≥8% 的段);"
+                 "数据:optimal_mixture_weights.json / topk_mixture_candidates.json / macro_info.json"),
     dict(kind="table", title="尖锐发现:文本质量分 ≠ 训练价值",
          takeaway="赢家重仓的簇质量分反而最低 — 质量分衡量『像不像好文本』,不衡量『喂了有没有用』",
          table=(["簇", "质量分(相关性 / 知识性)", "在配方中的角色", "实测效果"],
@@ -281,7 +297,7 @@ SLIDES = [
          note="四者齐备,结论才出手;原始数据与判决记录全部在案,可复查"),
     dict(kind="stats", title="这意味着什么",
          takeaway="配比是一个可搜索、可复现、可解释的旋钮 — 这次把它拧对了",
-         stats=[("+25.9%", "STEM 平均分相对提升(vs uniform,6 项基准全胜)"),
+         stats=[("+19.1%", "STEM 平均分相对提升(vs base;对 uniform 6 项全胜)"),
                 ("2 次", "独立搜索同水平复现(20.9% / 21.4%)"),
                 ("≈3,900 NPU·h", "全部实验总开销(约 163 张卡 · 天)")],
          note="赢家配方可直接复用到下一版训练;自然延伸:更大规模验证 + 质量信号协作 — 值得一起做"),
@@ -434,9 +450,13 @@ def _table(slide, s):
 
 def _image(slide, s):
     y = Inches(1.72)
-    if s.get("bullets"):
-        _bullets(slide, s, y=y, size=14, gap=6)
-        y = Inches(2.95)
+    nb = len(s.get("bullets") or [])
+    if nb:
+        # 三点式 (问题/做法/结果) 行数多 → 字号小一档、图下移一档
+        three = nb >= 3
+        _bullets(slide, s, y=y, size=13 if three else 14,
+                 gap=5 if three else 6)
+        y = Inches(3.18) if three else Inches(2.95)
     path = s["_path"]
     box_w, box_h = CW, Inches(6.72) - y
     size = png_size(path) or (1500, 900)
@@ -536,7 +556,15 @@ def _flow(slide, s):
         sp.line.width = Pt(1.5 if last else 0.75)
         sp.shadow.inherit = False
         centers.append(int(x) + int(bw) // 2)
-        _icon(slide, icon, centers[-1], int(by) + int(Inches(0.40)))
+        # 意象小图优先 (deck_assets/, 无文字); 缺件回退矢量图标
+        icon_img = os.path.join(ASSET_DIR, FLOW_ICON_IMG.get(icon, ""))
+        if os.path.isfile(icon_img):
+            iw, ih = Inches(2.1), Inches(0.66)
+            slide.shapes.add_picture(
+                icon_img, Emu(int(centers[-1]) - int(iw) // 2),
+                Emu(int(by) + int(Inches(0.36)) - int(ih) // 2), iw, ih)
+        else:
+            _icon(slide, icon, centers[-1], int(by) + int(Inches(0.40)))
         tf = _box(slide, x + Inches(0.14), by + Inches(0.72), bw - Inches(0.28), Inches(0.38))
         _run(tf.paragraphs[0], head, 15, bold=True, color=WHITE if last else NAVY)
         tf = _box(slide, x + Inches(0.14), by + Inches(1.12), bw - Inches(0.28), Inches(1.0))
@@ -618,6 +646,11 @@ def build(run_dir, out):
         if os.path.abspath(p) != os.path.abspath(dst):
             shutil.copy2(p, dst)      # 复制进汇报包 → 包自含可整目录外发
             s["_path"] = dst
+    # 清掉汇报包里已退出 CHARTS_USED 的旧图 (历史构建产物, 留着会让人
+    # 误以为 pptx 用到; 只动本脚本管理的 *.png)
+    for f in glob.glob(os.path.join(ddir, "*.png")):
+        if os.path.basename(f) not in CHARTS_USED:
+            os.remove(f)
     if missing:
         print(f"✗ 缺图 {len(missing)} 张: {', '.join(missing)}")
         print("  (实验结果图应在 run 目录、deck 专属图应在汇报包目录;"
