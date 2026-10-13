@@ -24,6 +24,16 @@
 #                                  堆叠 + domainfix 域标签配比单列(域空间,
 #                                  无簇 α 向量); 配方读 run 目录 optimal_
 #                                  mixture_weights / topk / search_state
+#    cluster_content_map.png       ⑤ 簇内容分析(v10.5): 15 个语义簇逐簇
+#                                  池 token 占比(按域配色)+ 赢家 α 列;
+#                                  内容速写(域构成/中位长度)解析 run 目录
+#                                  cluster_semantics.md (recipe_report §2b
+#                                  生成), 缺件回退域分组常量
+#
+#  v10.5 (评审反馈): ① d14/d8/d19 底部文字佐证块删除(数字改由 deck 页
+#  表格承载, 图只管机理) + 图幅压扁适配『表 + 图』同页; ② d8 删底部小
+#  结行与口语注释; ③ d19 删 prod4 数字行(进表格), 『打回原形』改专业
+#  表述; ④ 新增簇内容分析图 (用户: 缺一页表示每个簇分别是什么)。
 #
 #  v10.4 (评审反馈): ① d8 三联重排为 问题(左)· 做法(中, 公式卡)· 结果
 #  (右), 与 deck 加固页的『问题→做法→结果』三短点同构; ② 新增配比全景
@@ -67,6 +77,7 @@ import glob
 import json
 import math
 import os
+import re
 import sys
 
 import numpy as np
@@ -107,16 +118,27 @@ D8_GSM8K = [  # (标签, 赢家分, 对照 uniform 分, 赢家颜色) — gsm8k 
     ("prod3 · 误加权", 0.052, 0.119, RED),
     ("prod5 · 修复后", 0.3010, 0.1054, TEAL),
 ]
-D8_AFTER = ("修复后(prod5):赢家 gsm8k 30.1% = uniform 的 2.9×、base 的 10.4×;"
-            "三臂全胜 uniform(+3.6 ~ +4.3pt)")
 
 # 配比全景对比 (v10.4) — 语义名/域配比出处:
 CLUSTER_NAMES = {  # experiment_prod5.md §4c (cluster_peek 鉴定 2026-09-30)
     "C10": "统计练习题", "C0": "形式数学解题", "C6": "综述长文",
+    "C2": "化学·数学混合短题",
 }
 DOMAINFIX_DOMAINS = [  # experiment_prod4.md §4e — 域标签空间, 无簇 α 向量
     ("数学", 60.0), ("物理", 15.0), ("化学", 12.5), ("生物", 12.5),
 ]
+
+# 簇内容分析 (v10.5) — 域分组出处 experiment_prod5.md §4c v1.0.3
+# (§2b 全簇速写读数: 数学 ×5 / 生物 ×3 / 化学 ×2 / 物理 ×2 / 混合 ×3)
+CLUSTER_DOMAIN = {
+    "C0": "数学", "C6": "数学", "C8": "数学", "C9": "数学", "C10": "数学",
+    "C1": "生物", "C3": "生物", "C14": "生物",
+    "C4": "化学", "C7": "化学",
+    "C5": "物理", "C12": "物理",
+    "C2": "混合", "C11": "混合", "C13": "混合",
+}
+DOMAIN_COLORS = {"数学": BLUE, "生物": "#7FB77E", "化学": "#C9A66B",
+                 "物理": "#A88BC4", "混合": "#B9C6D1"}
 
 
 def load_json(path):
@@ -282,7 +304,8 @@ def verify_layout(fig, name):
     return True
 
 
-# ── ① D14: as-is vs to-be 双环形图 + 实验佐证 ────────────────────────
+# ── ① D14: as-is vs to-be 双环形图 (v10.5: 佐证数字移入 deck 表格,
+#    图只管机理, 图幅压扁适配『表 + 图』同页) ────────────────────────
 def chart_d14(out_dir, run_dir):
     labels, shares = cluster_token_shares(run_dir)
     real = shares is not None
@@ -290,10 +313,10 @@ def chart_d14(out_dir, run_dir):
         labels = [f"C{i}" for i in range(15)]
         shares = np.full(15, 100.0 / 15)
     hi = labels.index("C10") if "C10" in labels else 9
-    fig = plt.figure(figsize=(13, 5.0))
+    fig = plt.figure(figsize=(13, 3.9))
 
-    # 左 as-is: 论文距离合并 — 1 巨簇 + 13 孤岛 (为什么翻车)
-    ax = fig.add_axes([0.045, 0.37, 0.42, 0.46])
+    # 左 as-is: 论文距离合并 — 1 巨簇 + 13 孤岛 (失效机理: 塌缩)
+    ax = fig.add_axes([0.045, 0.14, 0.42, 0.70])
     wedges, _ = ax.pie([D14_GIANT, D14_ISLANDS], colors=[RED, GRAY],
                        startangle=90, counterclock=False,
                        wedgeprops=dict(width=0.42, edgecolor="white"))
@@ -304,13 +327,13 @@ def chart_d14(out_dir, run_dir):
     ax.text(0.79 * math.cos(th), 0.79 * math.sin(th), "巨簇\n99.05%",
             ha="center", va="center", fontsize=10.5, fontweight="bold",
             color="white")
-    ax.set_title("As-is:论文式距离合并(为什么翻车)", fontsize=12,
+    ax.set_title("As-is:论文式距离合并(链式塌缩)", fontsize=12,
                  fontweight="bold")
     ax.set_xticks([])
     ax.set_yticks([])
 
     # 右 to-be: 均衡划分 — 15 簇真实份额, C10 高亮 (改进后)
-    ax = fig.add_axes([0.545, 0.37, 0.42, 0.46])
+    ax = fig.add_axes([0.545, 0.14, 0.42, 0.70])
     colors = [ORANGE if i == hi else BLUE for i in range(len(shares))]
     explode = [0.05 if i == hi else 0.0 for i in range(len(shares))]
     wedges, _ = ax.pie(shares, colors=colors, explode=explode,
@@ -326,31 +349,13 @@ def chart_d14(out_dir, run_dir):
                 color="white")
     ax.text(0, 0, "15 个\n可用旋钮", ha="center", va="center",
             fontsize=15, fontweight="bold", color=NAVY)
-    ax.set_title("To-be:强制簇大小均衡(改进后)", fontsize=12,
+    ax.set_title("To-be:强制簇大小均衡(容量约束)", fontsize=12,
                  fontweight="bold")
     ax.set_xticks([])
     ax.set_yticks([])
 
-    fig.text(0.5, 0.96, "同一个数据池,两种簇划分:各簇分到的 token 份额",
+    fig.text(0.5, 0.95, "同一个数据池,两种簇划分:各簇分到的 token 份额",
              ha="center", va="center", fontsize=13, fontweight="bold")
-    fig.text(0.045, 0.30,
-              "实验佐证(prod1):\n"
-              "· K=14/21/24/32:巨簇都 ≥97.5%,怎么调都无解\n"
-              "· 其余 13 个孤岛簇合计 0.95%(图中灰缝)\n"
-              "· 35 个候选配方全被钉死 → prod1 输 uniform 0.36pt",
-              ha="left", va="top", fontsize=9.5, color=DGRAY, linespacing=1.55)
-    if real:
-        right_note = ("实验佐证(prod2 / prod5):\n"
-                      "· 单簇 ≤ 8.8%,15 个旋钮全部可用\n"
-                      "· prod2 首次转正:+1.02pt(17.52% vs 16.50%)\n"
-                      "· prod5 赢家把 C10 押到 80%(池占比 5.5% 的 14.6 倍)")
-    else:
-        right_note = ("实验佐证(prod2):\n"
-                      "· 单簇 ≤ 8.8%,15 个旋钮全部可用\n"
-                      "· prod2 首次转正:+1.02pt(17.52% vs 16.50%)\n"
-                      "· 未找到 macro_info.json — 图为等分示意")
-    fig.text(0.545, 0.30, right_note, ha="left", va="top", fontsize=9.5,
-             color=DGRAY, linespacing=1.55)
     ok = verify_layout(fig, "d14")
     path = os.path.join(out_dir, "reinforcement_d14_cluster_balance.png")
     fig.savefig(path, dpi=150)
@@ -360,12 +365,13 @@ def chart_d14(out_dir, run_dir):
     return ok
 
 
-# ── ② D8: 问题(左)· 做法(中, 公式)· 结果(右) ────────────────────────
+# ── ② D8: 问题(左)· 做法(中, 公式)· 结果(右) (v10.5: 删底部小结行,
+#    数字进 deck 表格; 图幅压扁) ────────────────────────────────────
 def chart_d8(out_dir):
-    fig = plt.figure(figsize=(13, 5.0))
+    fig = plt.figure(figsize=(13, 4.2))
 
     # 左 问题: 逐基准 真信号 vs 抽样噪声 (SNR 降序, 上=响)
-    ax = fig.add_axes([0.08, 0.40, 0.23, 0.43])
+    ax = fig.add_axes([0.08, 0.32, 0.23, 0.48])
     n = len(D8_SNR)
     for i, (bench, sig, noi, snr) in enumerate(D8_SNR):
         y = n - 1 - i
@@ -388,12 +394,12 @@ def chart_d8(out_dir):
     ax.set_title("问题:各基准的真信号 vs 抽样噪声", fontsize=11.5,
                  fontweight="bold")
     ax.legend(handles=[Patch(color=TEAL, label="真信号:候选间真实差异"),
-                       Patch(color=RED, label="抽样噪声:题量决定的标准误")],
-              loc="upper center", bbox_to_anchor=(0.5, -0.135), ncol=2,
-              fontsize=8.5, frameon=False)
+                        Patch(color=RED, label="抽样噪声:题量决定的标准误")],
+               loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=2,
+               fontsize=8.5, frameon=False)
 
     # 中 做法: 公式卡 (话语权按信噪比分配)
-    ax = fig.add_axes([0.335, 0.40, 0.185, 0.43])
+    ax = fig.add_axes([0.335, 0.32, 0.185, 0.48])
     ax.set_axis_off()
     ax.add_patch(FancyBboxPatch(
         (0.02, 0.03), 0.96, 0.94, transform=ax.transAxes,
@@ -404,12 +410,12 @@ def chart_d8(out_dir):
     ax.text(0.5, 0.63, "w ∝ 真信号 ÷ 抽样噪声", ha="center", va="center",
             fontsize=12, fontweight="bold", color=NAVY, zorder=3)
     ax.text(0.5, 0.30, "噪声地板按任务实测 · w_floor=0.5\n"
-            "NLL 只补位(prod3 曾把噪声高估 20 倍)",
+            "NLL 只补位, 永不接管话语权",
             ha="center", va="center", fontsize=10.5, color=DGRAY,
             linespacing=1.8, zorder=3)
 
     # 右 结果: gsm8k — prod3 误加权 vs prod5 修复后 (赢家 vs uniform)
-    ax = fig.add_axes([0.565, 0.40, 0.365, 0.43])
+    ax = fig.add_axes([0.565, 0.32, 0.365, 0.48])
     for gi, (glab, win, uni, wc) in enumerate(D8_GSM8K):
         gx = 1.0 + 1.55 * gi
         ax.bar(gx - 0.17, win, width=0.30, color=wc, zorder=3)
@@ -431,17 +437,13 @@ def chart_d8(out_dir):
     ax.set_title("结果:gsm8k — 赢家 vs uniform", fontsize=11.5,
                  fontweight="bold")
     ax.legend(handles=[Patch(color=RED, label="prod3 赢家(误加权)"),
-                       Patch(color=TEAL, label="prod5 赢家(修复后)"),
-                       Patch(color=GRAY, label="uniform 对照")],
-              loc="upper center", bbox_to_anchor=(0.5, -0.135), ncol=3,
-              fontsize=8.5, frameon=False)
+                        Patch(color=TEAL, label="prod5 赢家(修复后)"),
+                        Patch(color=GRAY, label="uniform 对照")],
+               loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=3,
+               fontsize=8.5, frameon=False)
 
-    fig.text(0.5, 0.955, "评分按信噪比(SNR)加权:问题(左)· 做法(中)· 结果(右)",
-             ha="center", va="center", fontsize=13, fontweight="bold")
-    fig.text(0.195, 0.215, "信号 < 噪声 = 瞎猜(SNR < 1)", ha="center",
-             va="center", fontsize=9, style="italic", color=DGRAY)
-    fig.text(0.5, 0.105, D8_AFTER, ha="center", va="center", fontsize=9.5,
-             color=DGRAY)
+    fig.text(0.5, 0.95, "评分按信噪比(SNR)加权:问题(左)· 做法(中)· 结果(右)",
+              ha="center", va="center", fontsize=13, fontweight="bold")
     ok = verify_layout(fig, "d8")
     path = os.path.join(out_dir, "reinforcement_d8_scoring_snr.png")
     fig.savefig(path, dpi=150)
@@ -450,10 +452,11 @@ def chart_d8(out_dir):
     return ok
 
 
-# ── ③ D19: 外推问题示意图 (非真实数据) ───────────────────────────────
+# ── ③ D19: 外推问题示意图 (非真实数据; v10.5: prod4 数字移入 deck
+#    表格, 图幅压扁, 口语标注改专业表述) ─────────────────────────────
 def chart_d19(out_dir):
-    fig = plt.figure(figsize=(13, 4.4))
-    ax = fig.add_axes([0.06, 0.15, 0.90, 0.66])
+    fig = plt.figure(figsize=(13, 3.9))
+    ax = fig.add_axes([0.055, 0.12, 0.91, 0.72])
 
     def true_trend(x):
         # 真实得分: 缓升、见顶、回落 (示意; 纵轴得分, 越高越好)
@@ -491,7 +494,7 @@ def chart_d19(out_dir):
                edgecolors="white", linewidth=1.5, zorder=6)
     ax.scatter([xstar], [ystar], s=170, color=RED,
                edgecolors="white", linewidth=1.5, zorder=6)
-    # 外推点正式实测: 预测虚高的落差 (prod4 式翻车)
+    # 外推点正式实测: 预测虚高的落差 (prod4 式失败)
     ax.plot([xstar, xstar], [yreal, ystar], ":", color=RED, lw=1.6,
             zorder=5)
     ax.scatter([xstar], [yreal], s=150, facecolors="none", edgecolors=RED,
@@ -501,16 +504,13 @@ def chart_d19(out_dir):
     ax.text(xstar + 0.15, 0.687, "外推『最优点』= 拟合噪声", ha="center",
             va="center", fontsize=10, fontweight="bold", color=RED,
             zorder=7)
-    ax.text(xstar, 0.345, "正式实测:打回原形", ha="center", va="center",
+    ax.text(xstar, 0.335, "正式实测:大幅低于预测", ha="center", va="center",
             fontsize=10, fontweight="bold", color=RED, zorder=7)
     ax.text(4.3, 0.62, "实测过的区域(预测可信)", ha="center", va="center",
             fontsize=10.5, fontweight="bold", color=DGRAY, zorder=7)
-    ax.text(9.0, 0.24, "从未实测 = 外推(预测不可信)", ha="center",
+    ax.text(9.0, 0.22, "从未实测 = 外推(预测不可信)", ha="center",
             va="center", fontsize=10.5, fontweight="bold", color=RED,
             zorder=7)
-    ax.text(0.9, 0.05, "prod4 实况:外推『终选』19.72%,输给实测最优 "
-            "cfg72 的 21.42%(差 1.70pt,z≈2.0)— 全部数字见下一页",
-            ha="left", va="center", fontsize=9.5, color=DGRAY, zorder=7)
     ax.set_xlim(0.8, 11.0)
     ax.set_ylim(0.0, 0.72)
     ax.set_xticks([])
@@ -655,8 +655,8 @@ def chart_recipe(out_dir, run_dir):
     ax.set_title("domainfix:域标签配比\n(不在语义簇空间)", fontsize=9.5,
                  fontweight="bold")
 
-    fig.text(0.5, 0.955, "最终配比长什么样:赢家 vs 传统方法 vs 池自然分布",
-             ha="center", va="center", fontsize=13, fontweight="bold")
+    fig.text(0.5, 0.955, "最终配比:赢家 vs 传统方法 vs 池自然分布",
+              ha="center", va="center", fontsize=13, fontweight="bold")
     fig.text(0.5, 0.10,
              "赢家把 C10『统计练习题』押到 80%(池占比 5.5%,14.6× 浓缩);"
              "top-3 配方全部 C10-heavy(0.55~0.80)\n"
@@ -672,6 +672,105 @@ def chart_recipe(out_dir, run_dir):
     return ok
 
 
+# ── ⑤ 簇内容分析: 每个簇分别是什么 (v10.5) ───────────────────────────
+# 数据面: 池份额 = macro_info.json; 内容速写 = cluster_semantics.md
+# (recipe_report §2b 生成, cluster_peek 抽样: 域构成前2 / 中位 ch),
+# 三代解析, 缺件回退域分组常量; 赢家 α = load_recipes 的 climb(终选)。
+SEM_ROW = re.compile(
+    r"^\|\s*(C\d+)\s*\|\s*[\d,]+\s*\|[^|]*\|\s*([^|]*?)\s*\|"
+    r"\s*(\d+)\s*\|")
+
+
+def parse_cluster_semantics(run_dir):
+    """cluster_semantics.md (render_brief 表) → {label: {dom1, med}}。
+    dom1 = 域构成第 1 名(如『数学 95.7%』); 缺件/坏行容错。"""
+    path = find_run_file(run_dir, "cluster_semantics.md")
+    if not path:
+        return {}
+    out = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                m = SEM_ROW.match(line.strip())
+                if not m:
+                    continue
+                out[m.group(1)] = {"dom1": m.group(2).split("/")[0].strip(),
+                                   "med": int(m.group(3))}
+    except (OSError, ValueError):
+        return {}
+    return out
+
+
+def chart_cluster_content(out_dir, run_dir):
+    labels, shares = cluster_token_shares(run_dir)
+    if labels is None:
+        print("  [!] 无 macro_info.json — 簇内容图跳过")
+        return False
+    K = len(labels)
+    sem = parse_cluster_semantics(run_dir)
+    alpha = load_recipes(run_dir, labels).get("climb(终选)")
+    # 行序: 赢家 α 降序 (无 α 按池份额) — 搜索判决权重高的簇排上面
+    order = sorted(range(K),
+                   key=lambda i: (-(alpha[i] if alpha is not None else 0.0),
+                                  -shares[i]))
+    xmax = max(float(shares.max()) * 1.22, 4.0)
+    fig = plt.figure(figsize=(13, 6.0))
+    ax = fig.add_axes([0.365, 0.07, 0.415, 0.76])
+    ylabels = []
+    for r, i in enumerate(order):
+        y = K - 1 - r
+        lab = labels[i]
+        dom = CLUSTER_DOMAIN.get(lab)
+        si = sem.get(lab)
+        desc = (si["dom1"] if si and si["dom1"] not in ("", "—")
+                else f"{dom or '未知'}域")
+        med = f" · 中位 {si['med']:,} ch" if si else ""
+        name = CLUSTER_NAMES.get(lab) or (f"{dom}簇" if dom else "")
+        ylabels.append(f"{lab} {name} · {desc}{med}")
+        ax.barh(y, shares[i], height=0.62,
+                color=DOMAIN_COLORS.get(dom, GRAY), zorder=3)
+        ax.text(shares[i] + xmax * 0.012, y, f"{shares[i]:.1f}%",
+                va="center", fontsize=8.5, color=DGRAY, zorder=4)
+    ax.set_yticks(range(K - 1, -1, -1), ylabels, fontsize=8.5)
+    ax.set_xlim(0, xmax)
+    ax.set_ylim(-0.7, K - 0.1)
+    ax.set_xticks([])
+    ax.set_xlabel("池 token 占比(%)", fontsize=9.5)
+    ax.set_title(f"搜索空间:{K} 个语义簇 — 内容构成与体量", fontsize=12.5,
+                 fontweight="bold", pad=30)
+    ax.legend(handles=[Patch(color=c, label=f"{d}簇")
+                       for d, c in DOMAIN_COLORS.items()],
+              loc="lower center", bbox_to_anchor=(0.5, 1.01), ncol=5,
+              fontsize=9, frameon=False)
+    # 右列: 赢家配方权重 α (= 搜索对每个簇的判决)
+    if alpha is not None:
+        tr = ax.get_yaxis_transform()
+        ax.text(1.045, K - 0.42, "赢家 α", transform=tr, ha="left",
+                va="center", fontsize=9.5, fontweight="bold", color=NAVY)
+        for r, i in enumerate(order):
+            y = K - 1 - r
+            lab = labels[i]
+            hot = lab in ("C10", "C0", "C6")
+            ax.text(1.045, y, f"{alpha[i]:.3f}", transform=tr, ha="left",
+                    va="center", fontsize=9.5 if hot else 8,
+                    fontweight="bold" if hot else "normal",
+                    color={"C10": ORANGE, "C0": TEAL,
+                           "C6": BLUE}.get(lab, GRAY))
+    src = ("内容速写:cluster_semantics.md(§2b,cluster_peek 抽样鉴定)"
+           if sem else "未找到 cluster_semantics.md — 域构成按 §4c 常量回退")
+    fig.text(0.5, 0.012,
+             f"{src};α = climb 终选配方权重(optimal_mixture_weights.json);"
+             "域分组出处 experiment_prod5.md §4c",
+             ha="center", va="bottom", fontsize=8.5, color=DGRAY)
+    ok = verify_layout(fig, "cluster_content")
+    path = os.path.join(out_dir, "cluster_content_map.png")
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    print(f"  ✓ {path}" + (f"  [内容速写: {len(sem)}/{K} 簇]"
+                           if sem else "  [回退: 无 cluster_semantics.md]"))
+    return ok
+
+
 def deck_dir_for(run_dir):
     """汇报包目录 = run 目录下的 deck/ 子目录 (v10.2 分离实验结果与汇报
     产物; 用户裁决: deck 跟着 run 走)。make_deck.py 有同名同实现副本 —
@@ -682,7 +781,8 @@ def deck_dir_for(run_dir):
 
 def main():
     ap = argparse.ArgumentParser(
-        description="『三处加固』举证图 (D14/D8/D19) → 汇报包目录 <run>/deck")
+        description="『三处加固』举证图 (D14/D8/D19) + 配比全景 + 簇内容"
+                    " → 汇报包目录 <run>/deck")
     ap.add_argument("run_dir", help="run 目录 (prod5 归档; 读取其中的 "
                     "macro_info.json 等, 图输出到其 deck/ 子目录)")
     ap.add_argument("-o", "--out-dir", default=None,
@@ -708,15 +808,16 @@ def main():
     print(f"✓ 中文字体: {name}")
     out_dir = args.out_dir or deck_dir_for(args.run_dir)
     os.makedirs(out_dir, exist_ok=True)
-    print(f"『三处加固』举证图 + 配比全景 → {out_dir} "
+    print(f"『三处加固』举证图 + 配比全景 + 簇内容 → {out_dir} "
           "(汇报包, 与实验结果目录分离)")
     print("  数据出处: paper_deviations.md D14 / experiment_prod2_k15bal.md "
           "§4.2 / TODO.md prod3 记录 / experiment_prod5.md §3b·§4c / "
-          "experiment_prod4.md §3d·§4e")
+          "experiment_prod4.md §3d·§4e / cluster_semantics.md (§2b)")
     oks = [chart_d14(out_dir, args.run_dir),
            chart_d8(out_dir),
            chart_d19(out_dir),
-           chart_recipe(out_dir, args.run_dir)]
+           chart_recipe(out_dir, args.run_dir),
+           chart_cluster_content(out_dir, args.run_dir)]
     if not all(oks):
         sys.exit("✗ 有图未通过标签重叠自检 — 请把上面的『重叠/越界』行贴回来")
     print("下一步: python3 scripts/diagnostics/make_deck.py <run_dir>")
