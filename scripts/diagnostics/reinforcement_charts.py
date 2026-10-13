@@ -16,8 +16,15 @@
 #                                           噪声), 右=结果(gsm8k: prod3 误
 #                                           加权 vs prod5 修复后), 下=做法
 #    reinforcement_d19_extrapolation.png    ③ 外推问题示意图(非真实数据):
-#                                           拟合模型只在实测区域内可信,
-#                                           『外推最优点』= 拟合噪声
+#                                           预测器在实测区内贴合, 在无数据
+#                                           区冲上虚假高峰(『外推最优点』=
+#                                           拟合噪声), 该点正式实测打回原形
+#
+#  v10.3 (评审反馈): ① d19 极性修复 — 原图把『实测最优』『外推最优点』
+#  都标在曲线最低点(得分极性反了), 改为: 实测最优 = 最高实测点, 外推
+#  最优点 = 预测器在无数据区的虚假最高峰(论文式终选挑的就是它), 并加
+#  『正式实测:打回原形』空心点; ② 图内得分统一百分点口径 (xx.x% /
+#  x.xxpt), 与 deck 表格 (v10.3) 一致。
 #
 #  v10 (用户反馈重设计): ① d14 改 as-is/to-be 左右对照并各挂实验佐证;
 #  ② d8 按『原因 → 结果 → 做法』重组, 右联改 gsm8k 修复前后对比
@@ -92,8 +99,8 @@ D8_GSM8K = [  # (标签, 赢家分, 对照 uniform 分, 赢家颜色) — gsm8k 
 ]
 D8_HOW = ("做法:各基准按信噪比(SNR)定话语权 w;噪声地板按任务实测比例计算"
           "(prod3 曾把 CoT 按 4 选 1 硬算,高估约 20 倍);w_floor = 0.5,NLL 只补位")
-D8_AFTER = ("修复后(prod5):赢家 gsm8k 0.301 = uniform 的 2.9×、base 的 10.4×;"
-            "三臂全胜 uniform(+0.036 ~ +0.043)")
+D8_AFTER = ("修复后(prod5):赢家 gsm8k 30.1% = uniform 的 2.9×、base 的 10.4×;"
+            "三臂全胜 uniform(+3.6 ~ +4.3pt)")
 
 
 def load_json(path):
@@ -311,20 +318,20 @@ def chart_d14(out_dir, run_dir):
     fig.text(0.5, 0.96, "同一个数据池,两种簇划分:各簇分到的 token 份额",
              ha="center", va="center", fontsize=13, fontweight="bold")
     fig.text(0.045, 0.30,
-             "实验佐证(prod1):\n"
-             "· K=14/21/24/32:巨簇都 ≥97.5%,怎么调都无解\n"
-             "· 其余 13 个孤岛簇合计 0.95%(图中灰缝)\n"
-             "· 35 个候选配方全被钉死 → prod1 输 uniform 0.0036",
-             ha="left", va="top", fontsize=9.5, color=DGRAY, linespacing=1.55)
+              "实验佐证(prod1):\n"
+              "· K=14/21/24/32:巨簇都 ≥97.5%,怎么调都无解\n"
+              "· 其余 13 个孤岛簇合计 0.95%(图中灰缝)\n"
+              "· 35 个候选配方全被钉死 → prod1 输 uniform 0.36pt",
+              ha="left", va="top", fontsize=9.5, color=DGRAY, linespacing=1.55)
     if real:
         right_note = ("实验佐证(prod2 / prod5):\n"
                       "· 单簇 ≤ 8.8%,15 个旋钮全部可用\n"
-                      "· prod2 首次转正:+0.0102(0.1752 vs 0.1650)\n"
+                      "· prod2 首次转正:+1.02pt(17.52% vs 16.50%)\n"
                       "· prod5 赢家把 C10 押到 80%(池占比 5.5% 的 14.6 倍)")
     else:
         right_note = ("实验佐证(prod2):\n"
                       "· 单簇 ≤ 8.8%,15 个旋钮全部可用\n"
-                      "· prod2 首次转正:+0.0102(0.1752 vs 0.1650)\n"
+                      "· prod2 首次转正:+1.02pt(17.52% vs 16.50%)\n"
                       "· 未找到 macro_info.json — 图为等分示意")
     fig.text(0.545, 0.30, right_note, ha="left", va="top", fontsize=9.5,
              color=DGRAY, linespacing=1.55)
@@ -348,9 +355,9 @@ def chart_d8(out_dir):
         y = n - 1 - i
         ax.barh(y + 0.20, sig, height=0.34, color=TEAL, zorder=3)
         ax.barh(y - 0.20, noi, height=0.34, color=RED, zorder=3)
-        ax.text(sig + 0.0006, y + 0.20, f"{sig:.4f}", va="center",
+        ax.text(sig + 0.0006, y + 0.20, f"{sig * 100:.2f}pt", va="center",
                 fontsize=8, color=DGRAY, zorder=4)
-        ax.text(noi + 0.0006, y - 0.20, f"{noi:.4f}", va="center",
+        ax.text(noi + 0.0006, y - 0.20, f"{noi * 100:.2f}pt", va="center",
                 fontsize=8, color=DGRAY, zorder=4)
         ax.text(0.0508, y, f"{snr:.2f}", va="center", ha="left",
                 fontsize=9.5, fontweight="bold",
@@ -378,17 +385,17 @@ def chart_d8(out_dir):
         ax.bar(gx - 0.17, win, width=0.30, color=wc, zorder=3)
         ax.bar(gx + 0.17, uni, width=0.30, color=GRAY, zorder=3)
         tag = " (-56%)" if gi == 0 else " (2.9×)"
-        ax.text(gx - 0.17, win + 0.012, f"{win:.3f}{tag}", ha="center",
+        ax.text(gx - 0.17, win + 0.012, f"{win * 100:.1f}%{tag}", ha="center",
                 va="bottom", fontsize=9, fontweight="bold", color=wc,
                 zorder=4)
-        ax.text(gx + 0.17, uni + 0.012, f"{uni:.3f}", ha="center",
+        ax.text(gx + 0.17, uni + 0.012, f"{uni * 100:.1f}%", ha="center",
                 va="bottom", fontsize=9, fontweight="bold", color=DGRAY,
                 zorder=4)
     ax.set_xticks([1.0, 2.55], [r[0] for r in D8_GSM8K], fontsize=10)
     ax.set_xlim(0.4, 3.15)
     ax.set_ylim(0, 0.42)
-    ax.set_yticks([0, 0.1, 0.2, 0.3, 0.4])
-    ax.tick_params(axis="y", labelsize=9)
+    ax.set_yticks([0, 0.1, 0.2, 0.3, 0.4],
+                  ["0", "10%", "20%", "30%", "40%"], fontsize=9)
     ax.grid(axis="y", alpha=0.3)
     ax.set_axisbelow(True)
     ax.set_title("结果:gsm8k — 赢家 vs uniform", fontsize=11.5,
@@ -419,24 +426,27 @@ def chart_d19(out_dir):
     ax = fig.add_axes([0.06, 0.15, 0.90, 0.66])
 
     def true_trend(x):
-        return 0.30 + 0.10 * ((x - 5.5) / 4.5) ** 2
+        # 真实得分: 缓升、见顶、回落 (示意; 纵轴得分, 越高越好)
+        return 0.34 + 0.13 * np.exp(-0.5 * ((x - 6.0) / 3.6) ** 2)
 
     def sigmoid(x):
         return 1.0 / (1.0 + np.exp(-x))
 
     def predictor(x):
-        # 实测区内贴合真趋势 + 小幅拟合摆动; 8.4 之后被末端数据带偏,
-        # 急速俯冲 — 高阶拟合外推的典型行为 (示意)
-        return true_trend(x) + 0.018 * np.sin(2.6 * x) \
-            - 0.32 * sigmoid((x - 8.4) * 3.2)
+        # 实测区内贴合真趋势 + 小幅拟合摆动; 实测区右端之外被末端数据
+        # 带偏, 冲上虚假高峰 — 高阶拟合外推的典型行为 (示意)
+        return true_trend(x) + 0.016 * np.sin(2.6 * x) \
+            + 0.21 * sigmoid((x - 8.6) * 3.0)
 
     xg = np.linspace(0.8, 10.4, 400)
     xs = np.array([1.4, 2.0, 2.6, 3.2, 3.8, 4.4, 5.0, 5.6, 6.2, 6.8, 7.3])
     noise = np.array([0.025, -0.030, 0.018, -0.020, 0.028, 0.010,
                       0.022, -0.008, 0.018, 0.012, 0.020])
     ys = true_trend(xs) + noise
-    bi = int(np.argmin(ys))
-    xstar = float(xg[np.argmin(predictor(xg))])
+    bi = int(np.argmax(ys))                      # 实测最优 = 最高实测点
+    xstar = float(xg[np.argmax(predictor(xg))])  # 论文式终选 = 预测最大值
+    ystar = float(predictor(xstar))              # → 落在无数据区 = 虚假高峰
+    yreal = float(true_trend(xstar))             # 该点正式实测落在真趋势上
 
     ax.axvspan(0.8, 7.8, color=TEAL, alpha=0.06, zorder=1)
     ax.axvspan(7.8, 11.0, color=RED, alpha=0.07, zorder=1)
@@ -449,23 +459,30 @@ def chart_d19(out_dir):
                label="实测过的配比(搜索阶段)")
     ax.scatter([xs[bi]], [ys[bi]], s=170, color=TEAL,
                edgecolors="white", linewidth=1.5, zorder=6)
-    ax.scatter([xstar], [predictor(xstar)], s=170, color=RED,
+    ax.scatter([xstar], [ystar], s=170, color=RED,
                edgecolors="white", linewidth=1.5, zorder=6)
-    ax.text(xs[bi], 0.235, "实测最优(可信)", ha="center", va="center",
+    # 外推点正式实测: 预测虚高的落差 (prod4 式翻车)
+    ax.plot([xstar, xstar], [yreal, ystar], ":", color=RED, lw=1.6,
+            zorder=5)
+    ax.scatter([xstar], [yreal], s=150, facecolors="none", edgecolors=RED,
+               linewidth=2.0, zorder=6)
+    ax.text(xs[bi], 0.55, "实测最优(可信)", ha="center", va="center",
             fontsize=10, fontweight="bold", color=TEAL, zorder=7)
-    ax.text(xstar, 0.155, "外推『最优点』\n= 拟合噪声,不是信号",
-            ha="center", va="bottom", fontsize=10, fontweight="bold",
-            color=RED, linespacing=1.4, zorder=7)
-    ax.text(4.3, 0.60, "实测过的区域(预测可信)", ha="center", va="center",
+    ax.text(xstar + 0.15, 0.687, "外推『最优点』= 拟合噪声", ha="center",
+            va="center", fontsize=10, fontweight="bold", color=RED,
+            zorder=7)
+    ax.text(xstar, 0.345, "正式实测:打回原形", ha="center", va="center",
+            fontsize=10, fontweight="bold", color=RED, zorder=7)
+    ax.text(4.3, 0.62, "实测过的区域(预测可信)", ha="center", va="center",
             fontsize=10.5, fontweight="bold", color=DGRAY, zorder=7)
-    ax.text(9.4, 0.60, "从未实测 = 外推(预测不可信)", ha="center",
+    ax.text(9.0, 0.24, "从未实测 = 外推(预测不可信)", ha="center",
             va="center", fontsize=10.5, fontweight="bold", color=RED,
             zorder=7)
-    ax.text(0.9, 0.05, "prod4 实况:外推『终选』0.1972,输给实测最优 "
-            "cfg72 的 0.2142(差 0.017,z~2.0)— 全部数字见下一页",
+    ax.text(0.9, 0.05, "prod4 实况:外推『终选』19.72%,输给实测最优 "
+            "cfg72 的 21.42%(差 1.70pt,z≈2.0)— 全部数字见下一页",
             ha="left", va="center", fontsize=9.5, color=DGRAY, zorder=7)
     ax.set_xlim(0.8, 11.0)
-    ax.set_ylim(0.0, 0.65)
+    ax.set_ylim(0.0, 0.72)
     ax.set_xticks([])
     ax.set_yticks([])
     ax.set_xlabel("配比空间(一维示意;真实为 15 维)", fontsize=9.5)
