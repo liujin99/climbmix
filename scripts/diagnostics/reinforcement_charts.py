@@ -30,6 +30,11 @@
 #                                  cluster_semantics.md (recipe_report §2b
 #                                  生成), 缺件回退域分组常量
 #
+#  v10.6 (评审反馈): ① d19 『正式实测』→『中等规模实测』(与 deck 术语
+#    统一); ② 簇内容图标签差异化 — 细鉴命名簇(§4c)用鉴定名, 其余 = 域
+#    纯度%(混合簇双域)+ 中位长度, 不再重复『××簇 · ××%』; ③ 簇内容图
+#    加赢家下注/地板分隔线 + 注记(地板结构不成立时不画, 防误标)。
+#
 #  v10.5 (评审反馈): ① d14/d8/d19 底部文字佐证块删除(数字改由 deck 页
 #  表格承载, 图只管机理) + 图幅压扁适配『表 + 图』同页; ② d8 删底部小
 #  结行与口语注释; ③ d19 删 prod4 数字行(进表格), 『打回原形』改专业
@@ -504,8 +509,8 @@ def chart_d19(out_dir):
     ax.text(xstar + 0.15, 0.687, "外推『最优点』= 拟合噪声", ha="center",
             va="center", fontsize=10, fontweight="bold", color=RED,
             zorder=7)
-    ax.text(xstar, 0.335, "正式实测:大幅低于预测", ha="center", va="center",
-            fontsize=10, fontweight="bold", color=RED, zorder=7)
+    ax.text(xstar, 0.335, "中等规模实测:大幅低于预测", ha="center",
+            va="center", fontsize=10, fontweight="bold", color=RED, zorder=7)
     ax.text(4.3, 0.62, "实测过的区域(预测可信)", ha="center", va="center",
             fontsize=10.5, fontweight="bold", color=DGRAY, zorder=7)
     ax.text(9.0, 0.22, "从未实测 = 外推(预测不可信)", ha="center",
@@ -672,18 +677,21 @@ def chart_recipe(out_dir, run_dir):
     return ok
 
 
-# ── ⑤ 簇内容分析: 每个簇分别是什么 (v10.5) ───────────────────────────
+# ── ⑤ 簇内容分析: 每个簇分别是什么 (v10.5; v10.6 标签差异化 + 地板分隔) ─
 # 数据面: 池份额 = macro_info.json; 内容速写 = cluster_semantics.md
 # (recipe_report §2b 生成, cluster_peek 抽样: 域构成前2 / 中位 ch),
 # 三代解析, 缺件回退域分组常量; 赢家 α = load_recipes 的 climb(终选)。
+# v10.6: 标签去泛化 — 细鉴命名簇(§4c)用鉴定名, 其余用『域 纯度%』+
+# 混合簇双域 + 中位长度; 赢家下注簇与地板簇之间画分隔线并注记
+# (地板结构 = 多数簇权重相同且 ≪ max 时才画, 防误标)。
 SEM_ROW = re.compile(
     r"^\|\s*(C\d+)\s*\|\s*[\d,]+\s*\|[^|]*\|\s*([^|]*?)\s*\|"
     r"\s*(\d+)\s*\|")
 
 
 def parse_cluster_semantics(run_dir):
-    """cluster_semantics.md (render_brief 表) → {label: {dom1, med}}。
-    dom1 = 域构成第 1 名(如『数学 95.7%』); 缺件/坏行容错。"""
+    """cluster_semantics.md (render_brief 表) → {label: {dom1, dom2, med}}。
+    dom1/dom2 = 域构成前两名(如『数学 95.7%』/『化学 2.1%』); 容错。"""
     path = find_run_file(run_dir, "cluster_semantics.md")
     if not path:
         return {}
@@ -694,11 +702,19 @@ def parse_cluster_semantics(run_dir):
                 m = SEM_ROW.match(line.strip())
                 if not m:
                     continue
-                out[m.group(1)] = {"dom1": m.group(2).split("/")[0].strip(),
+                doms = [d.strip() for d in m.group(2).split("/") if d.strip()]
+                out[m.group(1)] = {"dom1": doms[0] if doms else "",
+                                   "dom2": doms[1] if len(doms) > 1 else "",
                                    "med": int(m.group(3))}
     except (OSError, ValueError):
         return {}
     return out
+
+
+def _dom_pct(s):
+    """『数学 95.7%』→ (『数学』, 95.7); 解析失败 → (原串, None)。"""
+    m = re.match(r"^(.*?)\s*([\d.]+)\s*%$", s.strip())
+    return (m.group(1).strip(), float(m.group(2))) if m else (s.strip(), None)
 
 
 def chart_cluster_content(out_dir, run_dir):
@@ -709,6 +725,16 @@ def chart_cluster_content(out_dir, run_dir):
     K = len(labels)
     sem = parse_cluster_semantics(run_dir)
     alpha = load_recipes(run_dir, labels).get("climb(终选)")
+    # 地板结构判定 (v10.6): 多数簇权重相同且 ≪ max → 赢家下注簇/地板簇
+    # 分隔线才成立; 结构不成立(如无 floor 的 fixture)不画, 防误标
+    above, show_sep = [], False
+    if alpha is not None:
+        floor_v = float(np.median(alpha))
+        n_floor = int(np.sum(np.isclose(alpha, floor_v, rtol=1e-6)))
+        above = [int(i) for i in np.where(alpha > 3.0 * floor_v)[0]]
+        show_sep = (len(above) >= 1 and n_floor >= 3
+                    and len(above) + n_floor >= K
+                    and floor_v < 0.25 * float(alpha.max()))
     # 行序: 赢家 α 降序 (无 α 按池份额) — 搜索判决权重高的簇排上面
     order = sorted(range(K),
                    key=lambda i: (-(alpha[i] if alpha is not None else 0.0),
@@ -722,15 +748,26 @@ def chart_cluster_content(out_dir, run_dir):
         lab = labels[i]
         dom = CLUSTER_DOMAIN.get(lab)
         si = sem.get(lab)
-        desc = (si["dom1"] if si and si["dom1"] not in ("", "—")
-                else f"{dom or '未知'}域")
-        med = f" · 中位 {si['med']:,} ch" if si else ""
-        name = CLUSTER_NAMES.get(lab) or (f"{dom}簇" if dom else "")
-        ylabels.append(f"{lab} {name} · {desc}{med}")
+        name = CLUSTER_NAMES.get(lab)
+        if si and si["dom1"] not in ("", "—"):
+            # 差异化标签: 命名簇用鉴定名; 其余 = 域纯度(混合簇给双域) + 中位长度
+            d1, p1 = _dom_pct(si["dom1"])
+            d2, p2 = _dom_pct(si["dom2"]) if si["dom2"] else ("", None)
+            mix = f"{d1} {p1:.0f}%" if p1 is not None else d1
+            if p2 is not None and p2 >= 20.0:
+                mix += f"·{d2} {p2:.0f}%"
+            med = f" · 中位 {si['med']:,} ch"
+            ylabels.append(f"{lab} {name}{med}" if name
+                           else f"{lab} {mix}{med}")
+        else:
+            ylabels.append(f"{lab} {name or (f'{dom}簇' if dom else '')}")
         ax.barh(y, shares[i], height=0.62,
                 color=DOMAIN_COLORS.get(dom, GRAY), zorder=3)
         ax.text(shares[i] + xmax * 0.012, y, f"{shares[i]:.1f}%",
                 va="center", fontsize=8.5, color=DGRAY, zorder=4)
+    if show_sep:
+        y_sep = K - 1 - len(above) + 0.5
+        ax.axhline(y_sep, ls=(0, (4, 3)), color=GRAY, lw=0.9, zorder=2)
     ax.set_yticks(range(K - 1, -1, -1), ylabels, fontsize=8.5)
     ax.set_xlim(0, xmax)
     ax.set_ylim(-0.7, K - 0.1)
@@ -742,20 +779,24 @@ def chart_cluster_content(out_dir, run_dir):
                        for d, c in DOMAIN_COLORS.items()],
               loc="lower center", bbox_to_anchor=(0.5, 1.01), ncol=5,
               fontsize=9, frameon=False)
-    # 右列: 赢家配方权重 α (= 搜索对每个簇的判决)
+    # 右列: 赢家配方权重 α (= 搜索对每个簇的判决); 下注簇高亮, 地板簇置灰
     if alpha is not None:
         tr = ax.get_yaxis_transform()
         ax.text(1.045, K - 0.42, "赢家 α", transform=tr, ha="left",
                 va="center", fontsize=9.5, fontweight="bold", color=NAVY)
+        amax = int(np.argmax(alpha))
         for r, i in enumerate(order):
             y = K - 1 - r
-            lab = labels[i]
-            hot = lab in ("C10", "C0", "C6")
+            hot = i in above
             ax.text(1.045, y, f"{alpha[i]:.3f}", transform=tr, ha="left",
                     va="center", fontsize=9.5 if hot else 8,
                     fontweight="bold" if hot else "normal",
-                    color={"C10": ORANGE, "C0": TEAL,
-                           "C6": BLUE}.get(lab, GRAY))
+                    color=ORANGE if i == amax else (TEAL if hot else GRAY))
+        if show_sep:
+            ax.text(1.045, K - 1 - len(above) + 0.5,
+                    f"以下 {K - len(above)} 簇全部压到 0.1× 地板",
+                    transform=tr, ha="left", va="center", fontsize=7.5,
+                    color=DGRAY, zorder=5)
     src = ("内容速写:cluster_semantics.md(§2b,cluster_peek 抽样鉴定)"
            if sem else "未找到 cluster_semantics.md — 域构成按 §4c 常量回退")
     fig.text(0.5, 0.012,
@@ -767,7 +808,7 @@ def chart_cluster_content(out_dir, run_dir):
     fig.savefig(path, dpi=150)
     plt.close(fig)
     print(f"  ✓ {path}" + (f"  [内容速写: {len(sem)}/{K} 簇]"
-                           if sem else "  [回退: 无 cluster_semantics.md]"))
+                            if sem else "  [回退: 无 cluster_semantics.md]"))
     return ok
 
 

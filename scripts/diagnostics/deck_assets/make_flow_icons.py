@@ -69,7 +69,28 @@ def icon_cluster():
     save(fig, "flow_cluster.png")
 
 
-# ② 小模型当替身: 小方块快速试错 → 大方块(虚线)最终复验
+# ② 配比采样: 候选配比 = 权重堆叠条, 逐轮向高分集中 (底部 = 本轮选中)
+def icon_sample():
+    fig, ax = new_ax(CARD_BG)
+    cols = [TEAL, NAVY, ORANGE, BLUE, GRAY]
+    rows = [  # (y, 段占比, 整体透明度 — 越下越"聚焦")
+        (0.72, [0.30, 0.22, 0.18, 0.14, 0.16], 0.45),
+        (0.47, [0.20, 0.11, 0.41, 0.15, 0.13], 0.70),
+        (0.22, [0.08, 0.05, 0.68, 0.09, 0.10], 1.00),
+    ]
+    for y, fracs, al in rows:
+        x = 0.28
+        for f, c in zip(fracs, cols):
+            w = 2.20 * f
+            ax.add_patch(Rectangle((x, y), w, 0.17, fc=c, ec="white",
+                                   lw=0.8, alpha=al, zorder=3))
+            x += w
+    ax.add_patch(Rectangle((0.24, 0.18), 2.28, 0.25, fill=False, ec=ORANGE,
+                           ls=(0, (4, 2)), lw=1.2, zorder=5))
+    save(fig, "flow_sample.png")
+
+
+# ③ 小模型当替身: 小方块快速试错 → 大方块(虚线)最终复验
 def icon_proxy():
     fig, ax = new_ax(CARD_BG)
 
@@ -145,6 +166,7 @@ def icon_final():
 
 if __name__ == "__main__":
     icon_cluster()
+    icon_sample()
     icon_proxy()
     icon_learner()
     icon_final()

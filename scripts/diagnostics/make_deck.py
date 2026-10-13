@@ -66,8 +66,9 @@ DECK_OWNED = {"reinforcement_d14_cluster_balance.png",
 # 流程页小插图 (deck_assets/, 无文字的意象图; 缺件回退矢量图标)
 ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                          "deck_assets")
-FLOW_ICON_IMG = {"data": "flow_cluster.png", "d20": "flow_proxy.png",
-                 "lgbm": "flow_learner.png", "d28": "flow_final.png"}
+FLOW_ICON_IMG = {"data": "flow_cluster.png", "sample": "flow_sample.png",
+                 "d20": "flow_proxy.png", "lgbm": "flow_learner.png",
+                 "d28": "flow_final.png"}
 
 
 def deck_dir_for(run_dir):
@@ -87,16 +88,22 @@ def resolve_chart(dirs, name):
                 return p
     return None
 
-# ── 幻灯片文案 (v10.5 评审反馈: ① 全 deck 术语专业化 — 代理模型 /
-#    LightGBM 拟合, 删口语表述; ② 两层成本设计(代理试错 vs 正式裁决)
-#    归入方法页, 搜索过程页改讲『三轮迭代收敛』; ③ 代理模型有效性 =
-#    附加验证, 移至靠后; ④ 三处加固页改『表(数据)+ 图(机理)』—
-#    问题/做法不再用文字描述, 关键数字加粗; ⑤ 加固③(外推)与 prod4
-#    对决表同主题, 合并为单页; ⑥ 新增 15 语义簇内容分析页
-#    (cluster_content_map.png)。
+# ── 幻灯片文案 (v10.6 评审反馈: ① 结论页/总表页脚注精简; ② 方法页步骤
+#    重排 — 补『配比采样』步、『代理模型训练与验证』、LightGBM 拟合对象
+#    写明、『正式规模』改『中等规模验证』, 并写明两级模型规模 (0.9B 代理 /
+#    2.0B 验证) 与训练量 (搜索 115×640M ≈ 74B + 验证 6×3B = 18B; 弃用
+#    9,110 题口径); ③ 加固①② takeaway 写明后果 (簇塌缩/误加权 → climb
+#    得分低); ④ 加固③ 重构为 prod4(问题) × prod5(守卫后) 因果链表;
+#    ⑤ 簇内容页标签差异化 (细鉴命名 + 域构成 + 中位长度, 图加地板分隔线),
+#    并后移为配比全景的『附』页。
 #    页序 (15 页): 标题 / 结论先行 / 方法 / 搜索过程 / 总表 / 提升来源 /
-#    加固①②③ / 簇内容 / 配比全景 / 质量分 / 代理模型(附加) / 没骗自己 /
-#    意味着什么。
+#    加固①②③ / 配比全景 / 附:簇内容 / 质量分 / 代理模型(附加) / 没骗
+#    自己 / 意味着什么。
+#    v10.5 评审反馈: ① 全 deck 术语专业化 — 代理模型 / LightGBM 拟合,
+#    删口语表述; ② 两层成本设计(代理试错 vs 正式裁决)归入方法页, 搜索
+#    过程页改讲『三轮迭代收敛』; ③ 代理模型有效性 = 附加验证, 移至靠后;
+#    ④ 三处加固页改『表(数据)+ 图(机理)』; ⑤ 加固③与 prod4 对决表合并;
+#    ⑥ 新增 15 语义簇内容分析页。
 #    v10.4 评审反馈: 结论先行表以 base 为基准, 三个 climb 臂整组底色;
 #    主结果页删; 流程页意象小图; 配比全景页。
 #    v10.3: 表格得分百分点口径 xx.xx% + Δ(pt) + 相对提升(%); d19 极性
@@ -126,38 +133,37 @@ SLIDES = [
                  ["uniform(15 簇等权)", "16.57%", "−0.95pt", "−5.4%",
                   "无显著差异"],
                  ["base(不继续训练)", "17.52%", "(基准)", "—", "参照基准"]]),
-         emph=[0, 1, 2], y=1.9, row_h=0.46, size=12.5,
-         widths=[0.28, 0.12, 0.15, 0.13, 0.32],
-         note="Δ 与相对提升均 vs base(不继续训练):三种传统配比(人工域配比 / "
-              "池自然占比 / 15 簇等权)全部未超过 base,等权甚至 −0.95pt — "
-              "同数据池、同底座、同预算(每臂 3B tokens)下,增益完全来自配比选择;"
-              "显著性(vs uniform,逐题二项 SE 实算):三个搜索臂 z = "
-              "**+3.80 / +3.67 / +3.16**,全部显著;climb 对 uniform "
-              "**6 项基准全胜**(符号检验 p=0.016);"
-              "climb = 搜索终选(cfg#101);cfg90 / cfg100 = 搜索实测 top-3 "
-              "的另两个;domainfix / natural / uniform = 三种传统配比 — "
-              "各页同此;得分 = Centered×100,pt = 百分点"),
+          emph=[0, 1, 2], y=1.9, row_h=0.46, size=12.5,
+          widths=[0.28, 0.12, 0.15, 0.13, 0.32],
+          note="Δ 与相对提升均 vs base;同池、同底座、同预算(每臂 3B tokens)— 增益全部来自配比选择。"
+               "显著性(vs uniform,逐题二项 SE):三搜索臂 z = **+3.80 / +3.67 / +3.16**;"
+               "climb **6 项全胜**(p=0.016)。cfg90 / cfg100 = 搜索 top-3 的另两个;"
+               "domainfix / natural / uniform = 三种传统配比;得分 = Centered×100"),
     dict(kind="flow", title="方法 — CLIMB:把数据配比变成可搜索参数",
-         takeaway="15 个语义簇的权重 α 构成搜索空间:代理模型低成本评估候选,LightGBM 拟合响应面引导采样,逐轮逼近最优",
+         takeaway="采样候选配比 → 代理模型训练与验证得到实测得分 → 预测器拟合响应面引导下一轮 — 在 15 维配比空间逐轮逼近最优",
          steps=[
              ("① 语义聚类", "data",
-              "116M 篇 STEM 文档按嵌入聚成 15 个语义簇(统计练习 / 形式数学 / 综述长文…)",
-              "文档选择 → 15 维权重向量 α"),
-             ("② 代理模型评估", "d20",
-              "代理模型(约正式模型 1/3 规模)按候选配比短训,在 6 项基准上评分",
-              "每配比 640M tokens ≈ 正式的 1/5 · ~4h"),
-             ("③ LightGBM 拟合", "lgbm",
-              "LightGBM 拟合『配比 → 得分』,引导下一轮采样向高分区域集中;混入随机点保持全局探索",
-              "3 轮 64/32/16 ≈ 115 个实测配比"),
-             ("④ 正式规模验证", "d28",
-              "top-3 配方与 3 种传统配比、base 同池同预算正式训练对决",
-              "每臂 3B tokens · 9,110 题"),
+              "116M 篇 STEM 文档聚成 15 个语义簇;一个配比 = 15 维权重向量 α",
+              "数据池 116M 篇 · 91.8B tokens"),
+             ("② 配比采样", "sample",
+              "第 1 轮随机采样覆盖全空间;之后由预测器引导,向预测高分区域集中",
+              "3 轮 64/32/16 ≈ 115 个候选配比"),
+             ("③ 代理模型训练与验证", "d20",
+              "按候选配比短训代理模型,再在 6 项基准上验证 — 每个候选得到一个实测得分",
+              "代理模型 0.9B 参数 · 每候选 640M tokens"),
+             ("④ 预测器拟合", "lgbm",
+              "LightGBM 用已实测的『配比 α → 得分』样本拟合响应面,预测新配比的得分",
+              "拟合样本:全部 115 个实测配比"),
+             ("⑤ 中等规模验证", "d28",
+              "top-3 配方与 3 种传统配比、base 参照同池同预算对决,裁定最终赢家",
+              "验证模型 2.0B 参数 · 每臂 3B tokens"),
          ],
-         loop_label="得分反馈给下一轮采样",
-          note="CLIMB = NVIDIA 论文方法(arXiv:2504.13161,聚类 + 迭代搜索数据配比)。"
-               "两层成本设计:搜索层在代理模型上低成本试错(115 个候选),"
-               "正式训练的昂贵裁决只花在 6 个决赛臂 + 1 个不训练锚点上;"
-               "我们在其机制不设防的三处各加一道闸 — 见后文『三处加固』"),
+         loop_label="预测得分反馈,引导下一轮采样",
+         note="CLIMB = NVIDIA 论文方法(arXiv:2504.13161,聚类 + 迭代搜索数据配比)。"
+              "两层成本设计:搜索层在 0.9B 代理模型上低成本试错 — 115 个候选 × "
+              "640M tokens ≈ 74B;中等规模训练只花 6 个决赛臂 + 1 个不训练的 "
+              "base 参照 — 6 × 3B = 18B。我们在其机制不设防的三处各加一道闸 — "
+              "见后文『三处加固』"),
     dict(kind="image", title="搜索过程:三轮迭代收敛",
          takeaway="第 1 轮随机采样覆盖空间,第 2 轮起学习器引导 — 各轮最优逐轮提升,第 3 轮产出全场最优",
          bullets=[
@@ -178,15 +184,12 @@ SLIDES = [
                   ["gsm8k(1319·写过程)", "**30.10%**", "25.93%", "26.54%", "12.81%", "9.48%", "10.54%", "2.88%"],
                   ["math(500·写过程)", "**5.80%**", "5.00%", "2.60%", "2.80%", "1.60%", "1.60%", "0.40%"],
                   ["STEM 平均(centered)", "**20.86%**", "20.78%", "20.13%", "17.73%", "17.23%", "16.57%", "17.52%"]]),
-          emph=[6], y=1.85, row_h=0.42, size=11,
-          widths=[0.26] + [0.1057] * 7,
-          note="得分口径两要点:① 表中数值 = Centered×100(百分点,20.86% ↔ 0.2086)— "
-               "nanochat 官方评测逐任务输出 Centered 列(chance 校正准确率),"
-               "CLIMB 论文同口径,我们沿用;② 公式:Centered = (准确率 − chance) ÷ (1 − chance),"
-               "选择题 chance = 0.25(4 选 1)、写过程题 chance ≈ 0(精确匹配),"
-               "『STEM 平均』= 6 任务 Centered 的算术平均。加粗 = 行最优;数字与 report.md §3 完全同源"
-               "(逐题 ±SE 明细见 report,臂间间距远大于误差棒 — 9,110 题逐题实算);"
-               "选择题 4 行的行最优都是 base — 3B 继续训练的共性回退,与配方无关"),
+           emph=[6], y=1.85, row_h=0.42, size=11,
+           widths=[0.26] + [0.1057] * 7,
+           note="数值 = Centered×100(chance 校正准确率,CLIMB 论文同口径);"
+                "『STEM 平均』= 6 任务 Centered 的算术平均。加粗 = 行最优 — "
+                "选择题 4 行的行最优都是 base:3B 继续训练的共性回退,与配方无关;"
+                "逐题 ±SE 明细见 report(臂间间距远大于误差棒)"),
     dict(kind="table", title="提升来自哪里 — 对最强传统方法",
          takeaway="逐基准跟最强传统方法比:大赢的全是『要写过程的数学题』(2×+),选择题全部打平 — 净增益干净落在推理能力",
          table=(["基准(题量)", "climb", "最强传统方法", "Δ", "结论"],
@@ -201,7 +204,7 @@ SLIDES = [
           note="传统方法 = 非搜索配比:domainfix(人工域配比)/ natural(池自然占比)/ uniform(15 簇等权),"
                "逐基准取最强;选择题 Δ 全部 ≪ SE(逐题 SE 见 report §3);vs base:gsm8k **10.4×**、math **14.5×**"),
     dict(kind="table_image", title="三处加固 ①:簇大小强制均衡",
-         takeaway="论文式距离合并结构性失效:99.05% token 塌缩进单一巨簇(K=14~32 均如此);容量约束均衡划分恢复 15 个有效旋钮",
+         takeaway="失衡的代价:99.05% token 塌缩进单一巨簇,15 维配比退化成 1 个旋钮 — 搜索无从调优,climb 得分反而低于等权臂(−0.36pt);均衡划分恢复 15 个旋钮后,+1.02 → +4.29pt",
          table=(["轮次", "簇划分策略", "最大簇 token 占比", "有效旋钮", "climb − 等权臂"],
                 [["prod1(修复前)", "论文式距离合并", "**99.05%**", "1",
                   "**−0.36pt**(方向为负)"],
@@ -213,7 +216,7 @@ SLIDES = [
          widths=[0.17, 0.25, 0.19, 0.13, 0.26],
          image="reinforcement_d14_cluster_balance.png"),
     dict(kind="table_image", title="三处加固 ②:评分按信噪比加权",
-         takeaway="误加权使搜索目标静默翻转为纯 NLL 排名 — 赢家 gsm8k −56%、math −78%;按信噪比定权后,三臂全胜 uniform",
+         takeaway="误加权的代价:0.25/K 噪声地板把全场最强信号 gsm8k 误判为噪声(w=0),搜索目标静默翻转 — 选出的『赢家』gsm8k −56%、math −78%;按信噪比定权后 w=0.93,赢家 gsm8k 30.1%(uniform 的 2.9×)",
          table=(["评分方案", "gsm8k 权重 w", "赢家 gsm8k(d28)", "赢家 math(d28)"],
                 [["prod3:0.25/K 噪声地板 + w_floor=0",
                   "**0**(最强信号被判为噪声)", "5.2%(−56%)", "0.4%(−78%)"],
@@ -224,30 +227,19 @@ SLIDES = [
          widths=[0.34, 0.22, 0.22, 0.22],
          image="reinforcement_d8_scoring_snr.png"),
     dict(kind="table_image", title="三处加固 ③:终选守卫 — 终选必须是实测第一",
-         takeaway="外推『最优点』= 拟合噪声;守卫规则:终选必须是实测第一,外推须领先 > max(0.30, 留出残差 σ) 才允许上场",
-         table=(["臂(prod4 同轮对决)", "d28 得分", "实测状态", "判决"],
-                [["climb-cfg72", "**21.42%**", "已实测",
-                  "全场最佳 — 守卫语义下的正确终选"],
-                 ["climb-终选(论文式外推)", "19.72%", "从未训练",
-                  "**−1.70pt**(z≈2.0),热区垫底"],
-                 ["climb-终选-rep(外推·换种子)", "19.90%", "从未训练", "热区垫底"],
-                 ["uniform 家族(4 臂)", "16.47%~18.33%", "—",
-                  "全部远离 CLIMB 配方"],
-                 ["prod5(守卫生效)", "cfg#101:**20.86%**", "实测第一",
-                  "**6/6 全胜 uniform;外推反例构造性不可复现**"]]),
-         emph=[0, 4], y=1.72, row_h=0.38, size=11,
-         widths=[0.26, 0.15, 0.14, 0.45],
+         takeaway="因果链:论文式终选采信外推『最优点』→ prod4 实测输自家实测点 1.70pt(外推 = 拟合噪声)→ 加守卫:终选必须是实测第一 → prod5 终选 = 实测赢家 cfg#101,6/6 全胜",
+         table=(["环节", "prod4 · 论文式终选(无守卫)", "prod5 · 终选守卫生效"],
+                [["终选方式", "直接采信预测器外推的『最优点』 — 该配比从未实测训练",
+                  "守卫规则:终选 = 实测第一;外推候选须领先 > "
+                  "max(0.30, 留出残差 σ) 方可上场"],
+                 ["实测对决", "外推点 **19.72%**,输自家实测点 cfg72 **21.42%** — "
+                  "**−1.70pt**(z≈2.0);换种子外推同样垫底(19.90%)",
+                  "守卫触发 → 终选 cfg#101 = 实测第一,**20.86%**(全场最佳)"],
+                 ["判决", "外推『增益』= 拟合噪声 — 论文机制缺陷坐实",
+                  "**6/6 全胜 uniform**;外推反例在守卫路径下构造性不可复现"]]),
+         y=1.72, row_h=0.62, size=11.5,
+         widths=[0.12, 0.44, 0.44],
          image="reinforcement_d19_extrapolation.png"),
-    dict(kind="image", title="15 个语义簇:内容构成",
-         takeaway="池结构 = 数学 ×5 · 生物 ×3 · 化学 ×2 · 物理 ×2 · 混合 ×3;决定权重的是域与文档功能,不是体量 — C10 池占比仅 5.5%,却拿到 80.4% 预算",
-         bullets=[
-             ("簇内容鉴定", "每簇的域构成 / 文档长度 / 抽样文本来自 cluster_peek "
-                        "抽样鉴定(§2b 自动生成);C10 = 中位 1,000 ch 的统计练习,"
-                        "C6 = 中位 2,956 ch 的综述长文(≈3×)"),
-             ("形状 ≠ 价值", "C2(化学·数学混合短题)文档形状与 C10 相近,被压到 "
-                        "0.1× 地板 — **同为短练习,域对了才有训练价值**"),
-         ],
-         image="cluster_content_map.png"),
     dict(kind="image", title="最终配比全景:赢家 vs 传统方法 vs 池",
          takeaway="搜索给出的答案与任何人工先验都不同 — 80.4% 押一个池占比仅 5.5% 的簇",
          bullets=[
@@ -260,7 +252,18 @@ SLIDES = [
          ],
          image="recipe_distribution.png",
          caption="各策略 token 预算在 15 个语义簇上的分配(100% 堆叠,按赢家 α 降序,仅标注 ≥8% 的段);"
-                 "数据:optimal_mixture_weights.json / topk_mixture_candidates.json / macro_info.json"),
+                 "数据:optimal_mixture_weights.json / topk_mixture_candidates.json / macro_info.json;"
+                 "逐簇内容见下页"),
+    dict(kind="image", title="附:15 个语义簇分别是什么",
+         takeaway="决定权重的是域与文档功能,不是体量 — C10 池占比仅 5.5%,却拿到 80.4% 预算;其余 13 簇(含 3 个数学簇)全部压在地板",
+         bullets=[
+             ("怎么读", "上页配比的逐簇展开:条长 = 池内体量,右列 = 赢家 α;"
+                      "**分隔线以下全部压到 0.1× 地板**,赢家预算集中在分隔线上方"),
+             ("簇内容鉴定", "关键簇经抽样细鉴命名(统计练习 / 形式数学解题 / 综述长文 / "
+                        "化学·数学混合短题),其余按域构成 + 中位长度概览 — "
+                        "**同为短练习,域对了才有训练价值**(C2 被压到地板)"),
+         ],
+         image="cluster_content_map.png"),
     dict(kind="table", title="尖锐发现:文本质量分 ≠ 训练价值",
          takeaway="赢家重仓的簇质量分反而最低 — 质量分衡量『像不像好文本』,不衡量『喂了有没有用』",
          table=(["簇", "质量分(相关性 / 知识性)", "在配方中的角色", "实测效果"],
@@ -273,23 +276,23 @@ SLIDES = [
           note="同样是短练习题:**化学练习没用(权重 0.1×),统计练习大赚(14.6×)— "
                "押对领域,比押『高分文本』重要**"),
     dict(kind="image", title="附加验证:代理模型的有效性",
-         takeaway="搜索在代理模型上选中的配方,正式训练全部兑现;两次独立搜索(冷/热启动)抵达同一水平",
+         takeaway="搜索在代理模型上选中的配方,中等规模验证全部兑现;两次独立搜索(冷/热启动)抵达同一水平",
          bullets=[
-             ("选中 → 兑现", "代理分挑出的 3 个决赛配方,正式训练**全部显著胜出**"
-                        "(z = +3.80 / +3.67 / +3.16)"),
+             ("选中 → 兑现", "代理分挑出的 3 个决赛配方,中等规模验证**全部显著胜出**"
+                         "(z = +3.80 / +3.67 / +3.16)"),
              ("独立复现", "冷启动重搜(115 个配比全新采样):20.9% vs 上代热启动 "
-                       "21.4%,落在训练种子噪声带(±1.6~3.2pt)内 — "
-                       "**两次独立搜索抵达同一水平**"),
+                        "21.4%,落在训练种子噪声带(±1.6~3.2pt)内 — "
+                        "**两次独立搜索抵达同一水平**"),
          ],
          image="proxy_target_consistency.png",
-         caption="climb 配方:代理分 vs 正式实测"),
+         caption="climb 配方:代理分 vs 中等规模实测"),
     dict(kind="table", title="怎么保证没骗自己",
          takeaway="规则先于结果、误差逐题实算、结论独立复现 — 四道检查全部量化、全部在案",
          table=(["检查", "数值", "判定"],
                  [["评测对账(换环境复评)", "同一底座复评:17.52% vs 基准 17.38%(差 0.14pt)",
                     "**PASS**(阈值 0.2pt)"],
-                   ["误差逐题实算", "全部 6 臂 × 9,110 题,逐题二项分布算误差,不用默认值",
-                    "**所有结论带 z / p**"],
+                   ["误差逐题实算", "全部 6 臂 × 6 项基准,逐题二项分布实算误差,不用默认值",
+                     "**所有结论带 z / p**"],
                    ["独立复现", "两次独立搜索:20.9% vs 21.4%(种子噪声带 ±1.6~3.2pt)",
                     "**同一水平**"],
                   ["规则先于结果", "判决标准(V1–V5,含加冕规则)实验前写死,留档可查",
@@ -501,7 +504,8 @@ def _table_image(slide, s):
 
 
 def _icon(slide, kind, cx, cy):
-    """步骤图标: data=数据池+15 簇点 / d20,d28=模型方块 / lgbm=递增柱。cx,cy = 中心(int EMU)。"""
+    """步骤图标: data=数据池+15 簇点 / sample=候选配比堆叠条 / d20,d28=模型方块
+    / lgbm=递增柱。cx,cy = 中心(int EMU)。"""
     if kind == "data":
         can = slide.shapes.add_shape(MSO_SHAPE.CAN, Emu(int(cx - Inches(0.60))),
                                      Emu(int(cy - Inches(0.21))), Inches(0.36), Inches(0.42))
@@ -528,6 +532,25 @@ def _icon(slide, kind, cx, cy):
                 ov.fill.fore_color.rgb = palette[(r * 5 + c) % 3]
                 ov.line.fill.background()
                 ov.shadow.inherit = False
+    elif kind == "sample":
+        # 三条不同切分的堆叠条 = 三个候选配比 (采样多样化)
+        cols = [TEAL, NAVY, RGBColor(0x8A, 0x8A, 0x8A),
+                RGBColor(0x6C, 0xD9, 0xDE)]
+        splits = [(0.55, 0.20, 0.15, 0.10), (0.25, 0.40, 0.20, 0.15),
+                  (0.12, 0.18, 0.55, 0.15)]
+        y = int(cy) - int(Inches(0.27))
+        for sp in splits:
+            x = int(cx) - int(Inches(0.42))
+            for f, c in zip(sp, cols):
+                w = int(Inches(0.84) * f)
+                b = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Emu(x),
+                                           Emu(y), Emu(w), Inches(0.11))
+                b.fill.solid()
+                b.fill.fore_color.rgb = c
+                b.line.fill.background()
+                b.shadow.inherit = False
+                x += w
+            y += int(Inches(0.19))
     elif kind in ("d20", "d28"):
         big = kind == "d28"
         w, h = (Inches(0.58), Inches(0.5)) if big else (Inches(0.46), Inches(0.4))
@@ -559,14 +582,18 @@ def _icon(slide, kind, cx, cy):
 
 
 def _flow(slide, s):
-    """算法流程图: 图标 + ①②③ 搜索层(浅青) + ④ 验证层(navy); ①→② 之间 α 配比芯片;
-    ③→② 回环箭头。"""
+    """算法流程图: 图标 + ①②③④ 搜索层(浅青) + ⑤ 验证层(navy); ①→② 之间
+    α 配比芯片; ④→② 回环箭头 (预测器引导下一轮采样)。v10.6 起五步
+    (补『配比采样』) — 标题允许两行, 字号随列数降档。"""
     steps = s["steps"]
     n = len(steps)
     gap = Inches(0.58)
     bw = Emu((int(CW) - int(gap) * (n - 1)) // n)
     by, bh = Inches(2.02), Inches(2.7)
     step = int(bw) + int(gap)
+    five = n >= 5
+    head_sz, body_sz, key_sz = ((13.5, 11, 10.5) if five
+                                else (15, 11.5, 11))
     centers = []
     for i, (head, icon, body, key) in enumerate(steps):
         x = ML + Emu(step * i)
@@ -588,16 +615,25 @@ def _flow(slide, s):
                 Emu(int(by) + int(Inches(0.36)) - int(ih) // 2), iw, ih)
         else:
             _icon(slide, icon, centers[-1], int(by) + int(Inches(0.40)))
-        tf = _box(slide, x + Inches(0.14), by + Inches(0.72), bw - Inches(0.28), Inches(0.38))
-        _run(tf.paragraphs[0], head, 15, bold=True, color=WHITE if last else NAVY)
-        tf = _box(slide, x + Inches(0.14), by + Inches(1.12), bw - Inches(0.28), Inches(1.0))
+        tf = _box(slide, x + Inches(0.14),
+                  by + (Inches(0.68) if five else Inches(0.72)),
+                  bw - Inches(0.28),
+                  Inches(0.58) if five else Inches(0.38))
+        _run(tf.paragraphs[0], head, head_sz, bold=True,
+             color=WHITE if last else NAVY)
+        tf = _box(slide, x + Inches(0.14),
+                  by + (Inches(1.32) if five else Inches(1.12)),
+                  bw - Inches(0.28),
+                  Inches(0.90) if five else Inches(1.0))
         p = tf.paragraphs[0]
         p.line_spacing = 1.22
-        _run(p, body, 11.5, color=WHITE if last else DARK)
-        tf = _box(slide, x + Inches(0.14), by + bh - Inches(0.58), bw - Inches(0.28), Inches(0.52))
+        _run(p, body, body_sz, color=WHITE if last else DARK)
+        tf = _box(slide, x + Inches(0.14),
+                  by + bh - (Inches(0.52) if five else Inches(0.58)),
+                  bw - Inches(0.28), Inches(0.52))
         p = tf.paragraphs[0]
         p.line_spacing = 1.18
-        _run(p, key, 11, bold=True,
+        _run(p, key, key_sz, bold=True,
              color=RGBColor(0x9B, 0xE3, 0xE7) if last else TEAL)
         if not last:
             ar = slide.shapes.add_shape(
@@ -626,8 +662,8 @@ def _flow(slide, s):
     p = tf.paragraphs[0]
     p.alignment = 2
     _run(p, "配比", 9, color=GRAY)
-    # 迭代回环: ③ → ②
-    lx, rx = centers[1], centers[2]
+    # 迭代回环: ④ 预测器 → ② 采样 (跨 ③, 箭头在卡片下方)
+    lx, rx = centers[1], centers[n - 2]
     lo = slide.shapes.add_shape(MSO_SHAPE.LEFT_ARROW, Emu(lx),
                                 by + bh + Inches(0.18), Emu(rx - lx), Inches(0.3))
     lo.fill.solid()
