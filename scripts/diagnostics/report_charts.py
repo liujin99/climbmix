@@ -49,8 +49,10 @@
 #
 #  原则: stdlib + numpy 必需, matplotlib 可选 (缺失只出文字摘要);
 #  不依赖 climbmix 包 (服务器裸 python3 可跑, 与 cp4_report 同原则;
-#  复用同目录 cp4_report 的 eval CSV 解析); 图内标签 ASCII (服务器无
-#  CJK 字体, mfu_probe 同教训); 只读 RUN_DIR。
+#  复用同目录 cp4_report 的 eval CSV 解析); 图内标签中文 — CJK 字体经
+#  reinforcement_charts.setup_cjk_font 自动检测, 缺字体时降级文字版
+#  (v10, 2026-10-13 用户裁决: 除 arm 名/基准名外全中文); 每图保存前经
+#  verify_layout 自检文字重叠; 只读 RUN_DIR。
 #
 #  口径注意: proxy 分 = 搜索 utility (prod5 为 SNR 加权分, 越大越好;
 #  --direction minimize 可切换); 臂分 = d28 STEM (centered)。图 C 的
@@ -77,6 +79,14 @@ except ImportError:
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cp4_report import (BENCHMARK_SIZES, binom_se, discover_arms,
                         parse_eval_csv, resolve_run_file, stem_se)
+
+# 中文字体 + 布局自检由同目录 reinforcement_charts 提供 (该模块在
+# matplotlib 缺失时会 sys.exit, 故仅 HAS_MPL 时导入 — 保持本脚本
+# "无 matplotlib 也能出文字版" 的降级路径)
+if HAS_MPL:
+    from reinforcement_charts import setup_cjk_font, verify_layout
+
+LAYOUT_FAILS = []       # verify_layout 失败清单 (main 汇总, 退出码 1)
 
 CLIMB_COLOR = "#DD8452"
 BASELINE_COLOR = "#4C72B0"
@@ -330,7 +340,6 @@ def chart_convergence(out_dir, fleet, maximize):
     scores, iters, ids = fleet["scores"], fleet["iters"], fleet["ids"]
     n = len(scores)
     rounds = sorted(set(iters.tolist()))
-    better = "higher" if maximize else "lower"
 
     # 每轮 best (文本层始终输出)
     per_round = []
@@ -371,8 +380,8 @@ def chart_convergence(out_dir, fleet, maximize):
     for r in rounds:
         m = iters == r
         ax.scatter(x[m], scores[m], s=22, alpha=0.65,
-                   color=ROUND_COLORS[(r - 1) % len(ROUND_COLORS)],
-                   edgecolors="none", label=f"round {r}")
+                    color=ROUND_COLORS[(r - 1) % len(ROUND_COLORS)],
+                    edgecolors="none", label=f"第 {r} 轮")
     # 轮次边界
     for r in rounds[1:]:
         b = int((iters < r).sum())
@@ -381,33 +390,34 @@ def chart_convergence(out_dir, fleet, maximize):
     if len(r1) >= 4:
         mu, sd = float(r1.mean()), float(r1.std(ddof=1))
         ax.axhspan(mu - sd, mu + sd, color="#4C72B0", alpha=0.10,
-                   label="round-1 random baseline (mean+/-std)")
+                    label="第 1 轮随机带(均值 ± 标准差)")
     # 每轮 best 连线
     bx = [gi + 1 for _, _, _, gi in per_round if gi >= 0]
     by = [b for _, _, b, _ in per_round if np.isfinite(b)]
     if len(bx) >= 2:
         ax.plot(bx, by, "o-", color="black", linewidth=1.4, markersize=6,
-                label="best per round", zorder=5)
+                label="每轮最佳", zorder=5)
         for xi, yi in zip(bx, by):
             ax.annotate(f"{yi:.3f}", (xi, yi), textcoords="offset points",
                         xytext=(0, 8), ha="center", fontsize=8)
-    lift_txt = " | ".join(f"top-{k}: {v:+.2f} sigma" for k, v in lifts.items())
+    lift_txt = " | ".join(f"前{k}名: {v:+.2f}σ" for k, v in lifts.items())
     if lift_txt:
-        ax.text(0.02, 0.97, f"search lift vs round-1:  {lift_txt}",
+        ax.text(0.02, 0.97, f"搜索提升 vs 第 1 轮:{lift_txt}",
                 transform=ax.transAxes, va="top", ha="left", fontsize=9,
                 bbox=dict(facecolor="white", edgecolor="gray", alpha=0.85))
-    ax.set_xlabel("config # (chronological)")
-    ax.set_ylabel(f"proxy utility ({better} = better)")
-    ax.set_title("Search convergence: per-config proxy score by round")
+    ax.set_xlabel("配置序号(按时间)")
+    ax.set_ylabel(f"替身效用分({'越大越好' if maximize else '越小越好'})")
+    ax.set_title("搜索收敛:逐配置替身得分(按轮着色)")
     ax.legend(fontsize=8, loc="lower right")
     ax.grid(alpha=0.3)
     fig.text(0.5, 0.005,
-             "proxy utility = SNR-weighted score of each mixture on the d20 "
-             "proxy model (6 tasks, z-scale: round-1 mean ~ 0);\n"
-             "blue band = round-1 random-sampling level - later rounds above "
-             "it = the search is learning", ha="center", fontsize=8,
-             color="#555555")
+              "替身效用分 = 每个配比在 d20 替身模型上的 SNR 加权分"
+              "(6 任务 z 尺度,第 1 轮均值 ~ 0)\n"
+              "蓝色带 = 第 1 轮随机采样水平 — 后续轮次高出它 = 搜索在学",
+              ha="center", fontsize=8, color="#555555")
     fig.tight_layout(rect=(0, 0.06, 1, 1))
+    if not verify_layout(fig, "A 收敛"):
+        LAYOUT_FAILS.append("A 收敛")
     path = os.path.join(out_dir, "search_convergence.png")
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -490,18 +500,22 @@ def chart_arms(out_dir, run_dir, se_stem, task2="gsm8k_cot"):
     n_t2 = BENCHMARK_SIZES.get(t2) if t2 else None
     if t2 and n_t2 is None:
         print(f"[B] 任务 '{t2}' 不在 BENCHMARK_SIZES — 第二联无二项误差棒/z")
+    # 先给全部臂赋 g2/SE_g, 再算 z — 旧版在同一个循环里读
+    # ref_row['g2'], 参照臂(natural)按 stem 排序在后段, 排在它前面的
+    # 臂全部拿不到 z_g (第二联 z 标签静默缺失; prod5 实况即如此)
+    for r in rows:
+        r["g2"] = ((r["tasks"].get(t2) or {}).get("raw") if t2 else None)
+        r["se_g"] = (binom_se(r["g2"], n_t2)
+                     if r["g2"] is not None else None)
+    ref_se_g = (binom_se(ref_row.get("g2"), n_t2)
+                if ref_row and ref_row.get("g2") is not None else None)
     for r in rows:
         r["z_stem"] = (_z(r["stem"], ref_row["stem"], _se_diff(r))
                        if ref_row else None)
-        r["g2"] = ((r["tasks"].get(t2) or {}).get("raw")
-                   if t2 else None)
-        se_a = binom_se(r["g2"], n_t2) if r["g2"] is not None else None
-        se_b = (binom_se(ref_row.get("g2"), n_t2)
-                if ref_row and ref_row.get("g2") is not None else None)
-        r["se_g"] = se_a
+        se_a = r["se_g"]
         r["z_g"] = (_z(r["g2"], ref_row.get("g2"),
-                       math.sqrt((se_a or 0) ** 2 + (se_b or 0) ** 2))
-                    if ref_row and se_a and se_b else None)
+                       math.sqrt((se_a or 0) ** 2 + (ref_se_g or 0) ** 2))
+                    if ref_row and se_a and ref_se_g else None)
 
     if not HAS_MPL:
         print("[B] matplotlib 不可用 — 文字版 (STEM 降序):")
@@ -517,7 +531,7 @@ def chart_arms(out_dir, run_dir, se_stem, task2="gsm8k_cot"):
         for r in rows:
             z = r[z_key]
             tag = f"\n(z={z:+.1f})" if z is not None else ""
-            mark = " (ref)" if ref_row and r["arm"] == ref_row["arm"] else ""
+            mark = "(参照)" if ref_row and r["arm"] == ref_row["arm"] else ""
             out.append(r["arm"] + mark + tag)
         return out
 
@@ -526,19 +540,19 @@ def chart_arms(out_dir, run_dir, se_stem, task2="gsm8k_cot"):
 
     if t2:
         fig, axes = plt.subplots(1, 2,
-                                 figsize=(max(12, 1.5 * len(rows)), 5.5))
+                                  figsize=(max(12, 1.5 * len(rows)), 5.5))
         panels = [
             (axes[0], "stem", None, "z_stem",
-             "STEM (centered acc, 6 tasks)", "STEM centered"),
+             "STEM(Centered 准确率,6 任务)", "STEM Centered 分"),
             (axes[1], "g2", "se_g", "z_g",
-             f"{t2} (raw acc)" + ("  [auto-picked]" if t2_auto else ""),
-             f"{t2} raw acc"),
+             f"{t2}(原始准确率)" + ("  [自动挑选]" if t2_auto else ""),
+             f"{t2} 原始准确率"),
         ]
     else:
         fig, axes = plt.subplots(1, 1,
-                                 figsize=(max(8, 1.5 * len(rows)), 5.5))
+                                  figsize=(max(8, 1.5 * len(rows)), 5.5))
         panels = [(axes, "stem", None, "z_stem",
-                   "STEM (centered acc, 6 tasks)", "STEM centered")]
+                   "STEM(Centered 准确率,6 任务)", "STEM Centered 分")]
     for ax, key, se_key, z_key, ttl, ylab in panels:
         vals = [r[key] if r[key] is not None else float("nan")
                 for r in rows]
@@ -555,10 +569,17 @@ def chart_arms(out_dir, run_dir, se_stem, task2="gsm8k_cot"):
                     for r in rows]
         ax.errorbar(xs, vals, yerr=errs, fmt="none",
                     ecolor="#333333", capsize=3, linewidth=1)
-        for xi, v in zip(xs, vals):
+        # 数值标签放误差棒顶端之上 (旧版贴着误差棒画 → 文字压线)
+        vmax = 0.0
+        for xi, v, e in zip(xs, vals, errs):
             if v is not None and np.isfinite(v):
-                ax.annotate(f"{v:.4f}", (xi, v), textcoords="offset points",
-                            xytext=(0, 6), ha="center", fontsize=7.5)
+                top = v + (e or 0.0)
+                ax.annotate(f"{v:.4f}", (xi, top),
+                            textcoords="offset points", xytext=(0, 5),
+                            ha="center", fontsize=7.5)
+                vmax = max(vmax, top)
+        if vmax > 0:
+            ax.set_ylim(0, vmax * 1.12)
         ax.set_xticks(xs)
         ax.set_xticklabels(_panel_labels(z_key), fontsize=8,
                            rotation=30, ha="right")
@@ -567,10 +588,11 @@ def chart_arms(out_dir, run_dir, se_stem, task2="gsm8k_cot"):
         ax.grid(axis="y", alpha=0.3)
         ax.set_axisbelow(True)
     ref_name = ref_row["arm"] if ref_row else "n/a"
-    fig.suptitle(f"Arm comparison at target scale (ref = {ref_name}; "
-                 f"z = advantage in noise units, |z|>=2 significant)",
-                 fontsize=11)
+    fig.suptitle(f"正式规模臂间对比(参照臂 = {ref_name};"
+                 f"z = 领先多少个噪声单位,|z| >= 2 显著)", fontsize=11)
     fig.tight_layout()
+    if not verify_layout(fig, "B 臂间主结果"):
+        LAYOUT_FAILS.append("B 臂间主结果")
     path = os.path.join(out_dir, "arms_main_results.png")
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -617,10 +639,9 @@ def chart_consistency(out_dir, pairs, baseline_stems=None, se=0.006):
         sorted(range(len(pairs)), key=lambda i: -pairs[i]["proxy"]))}
     drank = {i: r + 1 for r, i in enumerate(
         sorted(range(len(pairs)), key=lambda i: -pairs[i]["d28"]))}
-    txt = (f"proxy->target rank consistency: n={len(pairs)}, "
-           f"Spearman rho = {rho:+.4f}" if len(pairs) >= 3
-           else f"proxy->target rank consistency: n={len(pairs)} (rho "
-                f"needs n>=3)")
+    txt = (f"替身 → 正式排名一致性:n={len(pairs)},"
+           f"Spearman ρ = {rho:+.4f}" if len(pairs) >= 3
+           else f"替身 → 正式排名一致性:n={len(pairs)}(ρ 需 n>=3)")
     print(f"[C] {txt}")
     for i, p in enumerate(pairs):
         se_txt = (f"  SE {p['se']:.4f}" if p.get("se") is not None
@@ -638,9 +659,8 @@ def chart_consistency(out_dir, pairs, baseline_stems=None, se=0.006):
     fig, ax = plt.subplots(figsize=(7.5, 6.5))
     if baseline_stems:
         ax.axhspan(min(baseline_stems), max(baseline_stems),
-                   color="#999999", alpha=0.20,
-                   label="baseline arms d28 range "
-                         "(uniform/natural/domainfix)")
+                    color="#999999", alpha=0.20,
+                    label="基线臂 d28 区间(uniform/natural/domainfix)")
     # 沿 proxy 名次连接各点: 线单调上行 = 排名传递; 折返 = 该处换位
     order = sorted(range(len(pairs)), key=lambda i: -pairs[i]["proxy"])
     ax.plot([pairs[i]["proxy"] for i in order],
@@ -655,27 +675,26 @@ def chart_consistency(out_dir, pairs, baseline_stems=None, se=0.006):
                s=90, color=CLIMB_COLOR, edgecolors="white", linewidth=1.2,
                zorder=5)
     for i, p in enumerate(pairs):
-        ax.annotate(f"{p['arm']}\n#{prank[i]} -> #{drank[i]}",
+        ax.annotate(f"{p['arm']}\n替身第{prank[i]} → 正式第{drank[i]}",
                     (p["proxy"], p["d28"]),
                     textcoords="offset points", xytext=(9, -4),
                     fontsize=8.5)
-    ax.set_xlabel("d20 proxy utility (measured, search fleet)")
-    ax.set_ylabel("d28 STEM (centered, +/- per-arm eval SE)")
-    ax.set_title(txt if len(pairs) >= 3
-                 else "proxy->target rank consistency")
+    ax.set_xlabel("d20 替身效用分(搜索舰队实测)")
+    ax.set_ylabel("d28 STEM(Centered,误差棒 = 逐臂评测 SE)")
+    ax.set_title(txt if len(pairs) >= 3 else "替身 → 正式排名一致性")
     ax.grid(alpha=0.3)
     if baseline_stems:
         ax.legend(fontsize=8, loc="lower right")
     fig.text(0.5, 0.005,
-             "each point = one climb arm: its measured proxy score (x) vs "
-             "its d28 STEM (y); '#p->#d' = its rank in each space.\n"
-             "error bars = per-arm eval sampling SE, computed from per-task "
-             "accuracy + item counts (binomial, macro-average composite);\n"
-             "reading: top-1 holds; adjacent swaps inside the error bars "
-             "are noise (trust regions, not points - KEY_FINDINGS #3); "
-             "all climb arms sit above the gray baseline band.",
-             ha="center", fontsize=8, color="#555555")
+              "每个点 = 一个 climb 臂:横轴 = 它的替身实测分,纵轴 = 正式 "
+              "d28 STEM;『替身第 p → 正式第 d』= 两个空间里的名次\n"
+              "误差棒 = 逐臂评测抽样 SE(逐任务准确率 + 题量,二项实算)\n"
+              "读法:第 1 名守住;误差棒内的相邻换位是噪声(信区域,不"
+              "信点 — KEY_FINDINGS #3);全部 climb 臂高于灰色基线带",
+              ha="center", fontsize=8, color="#555555")
     fig.tight_layout(rect=(0, 0.10, 1, 1))
+    if not verify_layout(fig, "C 一致性散点"):
+        LAYOUT_FAILS.append("C 一致性散点")
     path = os.path.join(out_dir, "proxy_target_consistency.png")
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -703,11 +722,12 @@ def chart_cluster_smallmult(out_dir, fleet, labels, maximize):
     fig, axes = plt.subplots(nrows, ncols,
                              figsize=(3.0 * ncols, 2.8 * nrows),
                              squeeze=False)
+    from matplotlib.ticker import MaxNLocator
     for k in range(K):
         ax = axes.flat[k]
         ax.scatter(W[:, k], scores, s=10, alpha=0.5,
-                   color=ROUND_COLORS[k % len(ROUND_COLORS)],
-                   edgecolors="none")
+                    color=ROUND_COLORS[k % len(ROUND_COLORS)],
+                    edgecolors="none")
         mk = np.isfinite(W[:, k]) & np.isfinite(scores)
         if int(mk.sum()) >= 3 and float(np.ptp(W[mk, k])) > 0:
             fit = np.poly1d(np.polyfit(W[mk, k], scores[mk], 1))
@@ -715,18 +735,22 @@ def chart_cluster_smallmult(out_dir, fleet, labels, maximize):
             ax.plot(xs, fit(xs), "--", color="#333333", lw=1.0, alpha=0.75)
         col = ("#2A7F3E" if rhos[k] > 0.3 else
                "#C44E52" if rhos[k] < -0.3 else "#666666")
-        ax.set_title(f"{labels[k]}  rho={rhos[k]:+.2f}", fontsize=9, color=col)
-        ax.tick_params(labelsize=7)
+        ax.set_title(f"{labels[k]}  ρ={rhos[k]:+.2f}", fontsize=9, color=col)
+        # 3 个刻度 + 6pt: 小倍数图相邻子图的刻度标签不再互撞
+        ax.xaxis.set_major_locator(MaxNLocator(3))
+        ax.yaxis.set_major_locator(MaxNLocator(3))
+        ax.tick_params(labelsize=6)
     for k in range(K, nrows * ncols):
         axes.flat[k].axis("off")
-    fig.suptitle("Per cluster: does putting MORE of it help? "
-                 "(x = mixture weight, y = proxy score; dashed = linear fit)",
-                 fontsize=12)
+    fig.suptitle("逐簇:多放一点有用吗?(横轴 = 配比权重 α,纵轴 = 替身分;"
+                 "虚线 = 线性拟合)", fontsize=12)
     fig.text(0.5, 0.005,
-             "rho = Spearman(weight, score) per cluster: green = the search "
-             "rewards MORE of this cluster, red = less, gray = no clear "
-             "direction", ha="center", fontsize=8, color="#555555")
+              "ρ = Spearman(权重, 得分):绿 = 搜索奖励多放该簇,"
+              "红 = 少放,灰 = 方向不明", ha="center", fontsize=8,
+              color="#555555")
     fig.tight_layout(rect=(0, 0.04, 1, 1))
+    if not verify_layout(fig, "D 逐簇小倍数"):
+        LAYOUT_FAILS.append("D 逐簇小倍数")
     path = os.path.join(out_dir, "cluster_alpha_vs_score.png")
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -751,8 +775,8 @@ def chart_heatmap(out_dir, fleet, labels, maximize, n_side=5):
     worst_i = order[-n_side:][::-1]
     sel = np.concatenate([best_i, worst_i])
     M = W[sel]                       # (2*n_side, K)
-    col_labels = ([f"b{r + 1}\ncfg{ids[i]}" for r, i in enumerate(best_i)] +
-                  [f"w{r + 1}\ncfg{ids[i]}" for r, i in enumerate(worst_i)])
+    col_labels = ([f"优{r + 1}\ncfg{ids[i]}" for r, i in enumerate(best_i)] +
+                  [f"输{r + 1}\ncfg{ids[i]}" for r, i in enumerate(worst_i)])
 
     if not HAS_MPL:
         print("[E] matplotlib 不可用 — 文字版 (best/worst 权重):")
@@ -781,8 +805,8 @@ def chart_heatmap(out_dir, fleet, labels, maximize, n_side=5):
             ax.text(r, k, f"{v:.2f}", ha="center", va="center", fontsize=7,
                     color="white" if v > 0.6 * float(M.max()) else "black")
     ax.axvline(n_side - 0.5, color="white", linewidth=2)
-    ax.set_title("Winners vs losers: cluster mixture share")
-    fig.colorbar(im, ax=ax, shrink=0.8, label="mixture share (alpha)")
+    ax.set_title("赢家 vs 输家:簇配比份额")
+    fig.colorbar(im, ax=ax, shrink=0.8, label="配比份额(α)")
     axd.barh(np.arange(K), delta,
              color=["#2A7F3E" if v > 0 else "#C44E52" if v < 0 else "#999999"
                     for v in delta])
@@ -793,17 +817,19 @@ def chart_heatmap(out_dir, fleet, labels, maximize, n_side=5):
     lo, hi = float(delta.min()), float(delta.max())
     pad = 0.3 * max(hi - lo, 0.05)
     axd.set_xlim(lo - pad, hi + pad)
-    axd.set_xlabel("winner - loser\n(mean share)")
+    axd.set_xlabel("赢家 - 输家\n(平均份额)")
     axd.tick_params(labelleft=False)
     axd.grid(axis="x", alpha=0.3)
     fig.text(0.5, 0.005,
-             "columns b1..b5 = top-5 / w1..w5 = bottom-5 measured configs; "
-             "right panel: how much MORE (green) or LESS (red) the winners "
-             "put in each cluster", ha="center", fontsize=8, color="#555555")
+              "列:优1..优5 = 实测前 5 名配比 / 输1..输5 = 后 5 名;"
+              "右图:赢家比输家每簇多放(绿)或少放(红)多少",
+              ha="center", fontsize=8, color="#555555")
     import warnings
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         fig.tight_layout(rect=(0, 0.05, 1, 1))
+    if not verify_layout(fig, "E 热力图"):
+        LAYOUT_FAILS.append("E 热力图")
     path = os.path.join(out_dir, "best_vs_worst_heatmap.png")
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -813,6 +839,7 @@ def chart_heatmap(out_dir, fleet, labels, maximize, n_side=5):
 # ── main ───────────────────────────────────────────────────────────────
 
 def main():
+    global HAS_MPL
     ap = argparse.ArgumentParser(
         description="结果叙事图表包: 收敛/臂间/一致性/逐簇/热力图 + 判定块")
     ap.add_argument("run_dir", nargs="?", default="result/prod5_current",
@@ -841,6 +868,16 @@ def main():
     maximize = args.direction == "maximize"
     t0 = time.time()
     made = []
+
+    # 中文字体 (v10 中文标签前置条件): 缺字体 → 整包降级文字版,
+    # 与 matplotlib 缺失同一降级路径 (装好字体重跑即可恢复图表)
+    if HAS_MPL:
+        if setup_cjk_font() is None:
+            print("[!] 未找到中文字体 — 图表降级为文字版。"
+                  "修复: sudo apt-get install -y fonts-noto-cjk,"
+                  "或把 CJK 字体放入 ~/.fonts/,或参照 "
+                  "reinforcement_charts.py 报错信息里的 find 命令")
+            HAS_MPL = False
 
     fleet = load_fleet(run_dir)
     if fleet is None:
@@ -913,9 +950,13 @@ def main():
         for p in made:
             print(f"  {p}")
     else:
-        print("未生成任何图表 (输入不足或 matplotlib 缺失 — 见上方降级说明)")
+        print("未生成任何图表 (输入不足或 matplotlib/中文字体缺失 — 见上方降级说明)")
     if not HAS_MPL:
-        print("注: matplotlib 不可用, 已输出文字版; 图表需安装 matplotlib")
+        print("注: matplotlib 或中文字体不可用, 已输出文字版")
+    if LAYOUT_FAILS:
+        print(f"✗ {len(LAYOUT_FAILS)} 张图未通过标签重叠自检: "
+              + ", ".join(LAYOUT_FAILS))
+        return 1
     return 0
 
 
