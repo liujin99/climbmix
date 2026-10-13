@@ -30,6 +30,11 @@
 #                                  cluster_semantics.md (recipe_report §2b
 #                                  生成), 缺件回退域分组常量
 #
+#  v10.7 (评审反馈): ① d8 图内标签 prod3/prod5 → 第3轮/第5轮(与 deck
+#    弃用内部代号一致); ② 簇内容图每簇标签附『样本开头摘录』(§2b 的
+#    每簇 1 篇抽样, 两行标签), 摘录逐字对子集字体 cmap 校验防豆腐块;
+#    图幅 13×6.4 略加高(两行标签行距)。
+#
 #  v10.6 (评审反馈): ① d19 『正式实测』→『中等规模实测』(与 deck 术语
 #    统一); ② 簇内容图标签差异化 — 细鉴命名簇(§4c)用鉴定名, 其余 = 域
 #    纯度%(混合簇双域)+ 中位长度, 不再重复『××簇 · ××%』; ③ 簇内容图
@@ -120,8 +125,8 @@ D8_SNR = [  # bench, 真信号 sd_cfg, 抽样噪声 SE_binom, SNR (prod2 §4.2)
     ("math", 0.0024, 0.0259, 0.09),
 ]
 D8_GSM8K = [  # (标签, 赢家分, 对照 uniform 分, 赢家颜色) — gsm8k 跨协议可比
-    ("prod3 · 误加权", 0.052, 0.119, RED),
-    ("prod5 · 修复后", 0.3010, 0.1054, TEAL),
+    ("第3轮 · 误加权", 0.052, 0.119, RED),
+    ("第5轮 · 修复后", 0.3010, 0.1054, TEAL),
 ]
 
 # 配比全景对比 (v10.4) — 语义名/域配比出处:
@@ -441,11 +446,11 @@ def chart_d8(out_dir):
     ax.set_axisbelow(True)
     ax.set_title("结果:gsm8k — 赢家 vs uniform", fontsize=11.5,
                  fontweight="bold")
-    ax.legend(handles=[Patch(color=RED, label="prod3 赢家(误加权)"),
-                        Patch(color=TEAL, label="prod5 赢家(修复后)"),
-                        Patch(color=GRAY, label="uniform 对照")],
-               loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=3,
-               fontsize=8.5, frameon=False)
+    ax.legend(handles=[Patch(color=RED, label="第3轮赢家(误加权)"),
+                       Patch(color=TEAL, label="第5轮赢家(修复后)"),
+                       Patch(color=GRAY, label="uniform 对照")],
+              loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=3,
+              fontsize=8.5, frameon=False)
 
     fig.text(0.5, 0.95, "评分按信噪比(SNR)加权:问题(左)· 做法(中)· 结果(右)",
               ha="center", va="center", fontsize=13, fontweight="bold")
@@ -677,16 +682,21 @@ def chart_recipe(out_dir, run_dir):
     return ok
 
 
-# ── ⑤ 簇内容分析: 每个簇分别是什么 (v10.5; v10.6 标签差异化 + 地板分隔) ─
+# ── ⑤ 簇内容分析: 每个簇分别是什么 (v10.5; v10.6 标签差异化 + 地板分隔;
+#    v10.7 每簇标签附 1 篇样本摘录) ───────────────────────────────────
 # 数据面: 池份额 = macro_info.json; 内容速写 = cluster_semantics.md
-# (recipe_report §2b 生成, cluster_peek 抽样: 域构成前2 / 中位 ch),
-# 三代解析, 缺件回退域分组常量; 赢家 α = load_recipes 的 climb(终选)。
-# v10.6: 标签去泛化 — 细鉴命名簇(§4c)用鉴定名, 其余用『域 纯度%』+
-# 混合簇双域 + 中位长度; 赢家下注簇与地板簇之间画分隔线并注记
-# (地板结构 = 多数簇权重相同且 ≪ max 时才画, 防误标)。
+# (recipe_report §2b 生成, cluster_peek 抽样: 域构成前2 / 中位 ch /
+# 每簇 1 篇样本开头), 三代解析, 缺件回退域分组常量; 赢家 α =
+# load_recipes 的 climb(终选)。
+# 标签两行: 第 1 行 = 细鉴名(§4c)或『域 纯度%』+ 中位长度, 第 2 行 =
+# 『样本开头摘录』— 真实内容差异一眼可见。摘录逐字对内置子集字体 cmap
+# 校验 (子集外字符截断, 防豆腐块; 字体子集已扩到全 CJK 基本块, 通常
+# 不会截); 用系统全量字体时无校验必要。
 SEM_ROW = re.compile(
     r"^\|\s*(C\d+)\s*\|\s*[\d,]+\s*\|[^|]*\|\s*([^|]*?)\s*\|"
     r"\s*(\d+)\s*\|")
+SNIPPET_ROW = re.compile(
+    r"^-\s*\*\*(C\d+)\*\*\s*\[[^\]]*\]\s*\([^)]*\):\s*(.+)$")
 
 
 def parse_cluster_semantics(run_dir):
@@ -709,6 +719,54 @@ def parse_cluster_semantics(run_dir):
     except (OSError, ValueError):
         return {}
     return out
+
+
+def parse_cluster_snippets(run_dir):
+    """cluster_semantics.md 尾部『每簇 1 篇抽样开头』→ {label: 摘录文本}。"""
+    path = find_run_file(run_dir, "cluster_semantics.md")
+    if not path:
+        return {}
+    out = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                m = SNIPPET_ROW.match(line.strip())
+                if m:
+                    out[m.group(1)] = m.group(2).strip()
+    except OSError:
+        return {}
+    return out
+
+
+def _subset_cmap():
+    """内置子集字体的码位覆盖; None = 无子集文件(用系统全量字体, 免校验),
+    空 set = 有子集但读不出(保守: 摘录全部弃用)。"""
+    p = os.path.join(BUNDLED_FONT_DIR, "wqy-zenhei-deck.ttf")
+    if not os.path.isfile(p):
+        return None
+    try:
+        from fontTools.ttLib import TTFont
+        have = set()
+        for t in TTFont(p)["cmap"].tables:
+            if t.isUnicode():
+                have.update(t.cmap.keys())
+        return have
+    except Exception:
+        return set()
+
+
+def _excerpt(snips, lab, cmap, limit=16):
+    """样本摘录 → 『…』; 子集字体缺字的位置截断; 太短则弃用。"""
+    s = snips.get(lab)
+    if not s:
+        return ""
+    if cmap is not None:
+        i = 0
+        while i < len(s) and (s[i] == " " or ord(s[i]) in cmap):
+            i += 1
+        s = s[:i].rstrip()
+    s = s[:limit].rstrip()
+    return f"『{s}…』" if len(s) >= 6 else ""
 
 
 def _dom_pct(s):
@@ -740,8 +798,10 @@ def chart_cluster_content(out_dir, run_dir):
                    key=lambda i: (-(alpha[i] if alpha is not None else 0.0),
                                   -shares[i]))
     xmax = max(float(shares.max()) * 1.22, 4.0)
-    fig = plt.figure(figsize=(13, 6.0))
-    ax = fig.add_axes([0.365, 0.07, 0.415, 0.76])
+    snips = parse_cluster_snippets(run_dir)
+    cmap = _subset_cmap() if snips else None
+    fig = plt.figure(figsize=(13, 6.4))
+    ax = fig.add_axes([0.365, 0.08, 0.415, 0.76])
     ylabels = []
     for r, i in enumerate(order):
         y = K - 1 - r
@@ -750,17 +810,19 @@ def chart_cluster_content(out_dir, run_dir):
         si = sem.get(lab)
         name = CLUSTER_NAMES.get(lab)
         if si and si["dom1"] not in ("", "—"):
-            # 差异化标签: 命名簇用鉴定名; 其余 = 域纯度(混合簇给双域) + 中位长度
+            # 第 1 行: 命名簇用鉴定名; 其余 = 域纯度(混合簇给双域) + 中位长度
             d1, p1 = _dom_pct(si["dom1"])
             d2, p2 = _dom_pct(si["dom2"]) if si["dom2"] else ("", None)
             mix = f"{d1} {p1:.0f}%" if p1 is not None else d1
             if p2 is not None and p2 >= 20.0:
                 mix += f"·{d2} {p2:.0f}%"
             med = f" · 中位 {si['med']:,} ch"
-            ylabels.append(f"{lab} {name}{med}" if name
-                           else f"{lab} {mix}{med}")
+            line1 = f"{lab} {name}{med}" if name else f"{lab} {mix}{med}"
         else:
-            ylabels.append(f"{lab} {name or (f'{dom}簇' if dom else '')}")
+            line1 = f"{lab} {name or (f'{dom}簇' if dom else '')}"
+        # 第 2 行: 该簇 1 篇文档样本开头 — 内容差异直接可见
+        exc = _excerpt(snips, lab, cmap)
+        ylabels.append(f"{line1}\n{exc}" if exc else line1)
         ax.barh(y, shares[i], height=0.62,
                 color=DOMAIN_COLORS.get(dom, GRAY), zorder=3)
         ax.text(shares[i] + xmax * 0.012, y, f"{shares[i]:.1f}%",
@@ -768,7 +830,7 @@ def chart_cluster_content(out_dir, run_dir):
     if show_sep:
         y_sep = K - 1 - len(above) + 0.5
         ax.axhline(y_sep, ls=(0, (4, 3)), color=GRAY, lw=0.9, zorder=2)
-    ax.set_yticks(range(K - 1, -1, -1), ylabels, fontsize=8.5)
+    ax.set_yticks(range(K - 1, -1, -1), ylabels, fontsize=8)
     ax.set_xlim(0, xmax)
     ax.set_ylim(-0.7, K - 0.1)
     ax.set_xticks([])
@@ -799,7 +861,9 @@ def chart_cluster_content(out_dir, run_dir):
                     color=DGRAY, zorder=5)
     src = ("内容速写:cluster_semantics.md(§2b,cluster_peek 抽样鉴定)"
            if sem else "未找到 cluster_semantics.md — 域构成按 §4c 常量回退")
-    fig.text(0.5, 0.012,
+    if snips:
+        src += f";『』摘录 = 每簇 1 篇样本开头({len(snips)} 簇)"
+    fig.text(0.5, 0.008,
              f"{src};α = climb 终选配方权重(optimal_mixture_weights.json);"
              "域分组出处 experiment_prod5.md §4c",
              ha="center", va="bottom", fontsize=8.5, color=DGRAY)
@@ -807,8 +871,9 @@ def chart_cluster_content(out_dir, run_dir):
     path = os.path.join(out_dir, "cluster_content_map.png")
     fig.savefig(path, dpi=150)
     plt.close(fig)
-    print(f"  ✓ {path}" + (f"  [内容速写: {len(sem)}/{K} 簇]"
-                            if sem else "  [回退: 无 cluster_semantics.md]"))
+    print(f"  ✓ {path}"
+          + (f"  [内容速写: {len(sem)}/{K} 簇, 样本摘录: {len(snips)} 簇]"
+             if sem else "  [回退: 无 cluster_semantics.md]"))
     return ok
 
 
