@@ -43,7 +43,15 @@ class FakeMM:
         self._schema = _Schema()
 
     def read_texts(self, idx, verbose=False):
-        return [f"doc {int(i)}: " + "content " * 8 for i in idx]
+        # 簇 0 (docs 0-3) 与簇 1 (docs 4-7) 用不同实词 — 关键词提取的
+        # 对比 IDF 需要两簇内容可区分 (content/words vs protein/synthesis)
+        out = []
+        for i in idx:
+            if int(i) >= 4:
+                out.append(f"doc {int(i)}: " + "protein synthesis " * 4)
+            else:
+                out.append(f"doc {int(i)}: " + "content words " * 4)
+        return out
 
 
 # 注入 stub (须在 import cluster_peek 之前)
@@ -99,17 +107,35 @@ def main():
     assert "域构成 (本簇内):" in full and "| 数学 | 3 | 75.0% |" in full
     assert "| 化学 | 0 | 0.0% |" in full          # 0 行保留 (id 序)
     assert "质量列均值: stem_relevance 4.00" in full
+    assert "关键词 (对比 IDF, 抽样文档提取): content · words · doc" in full
+    assert "关键词 (对比 IDF, 抽样文档提取): synthesis · protein · doc" in full
     assert "### 抽样 2 篇 (首 40 字符)" in full
     print("PASS  render_full: structure matches the historical CLI output")
 
+    # ── 2b) 关键词提取: 对比 IDF 只留区分词, 子串冗余去重 ──
+    from collections import Counter
+    kws = cp.contrastive_keywords(
+        [Counter({"甲乙": 3, "通用": 2}), Counter({"丙丁": 3, "通用": 2})],
+        top=1)
+    assert kws == [["甲乙"], ["丙丁"]], kws     # 两簇共有的『通用』被压掉
+    kws2 = cp.contrastive_keywords(
+        [Counter({"神经递质": 5, "神经": 5, "经递": 5}),
+         Counter({"氧化还原": 4})], top=1)
+    assert kws2[0] == ["神经递质"], kws2        # 长词优先, 子串『经递』被吸收
+    assert profs[0]["keywords"] and profs[1]["keywords"]
+    print("PASS  keywords: contrastive IDF + substring dedup")
+
     # ── 3) render_brief: 紧凑表 (报告 §2b 内嵌体) ──
     brief = cp.render_brief(profs)
-    assert brief.count("\n") < 15                  # 紧凑: 表头2 + 2行 + 空 + caption + 2 样本
+    assert brief.count("\n") < 16                  # 紧凑: 表 2 行 + 关键词节 + 样本节
     assert "| C0 | 4 | 35.4% | 数学 75.0% / 物理 25.0% | 1000 |" in brief
     assert "| C1 | 4 | 64.6% | 化学 66.7% / 生物学 33.3% | 2200 |" in brief
     assert "stem_relevance 4.00, knowledge_value 5.00" in brief
-    assert brief.count("- **C0**") == 1 and brief.count("- **C1**") == 1
-    print("PASS  render_brief: compact table + one excerpt per cluster")
+    assert "每簇关键词 (对比 IDF, 提取自每簇抽样文档; seed 固定):" in brief
+    assert "- **C0** 关键词: content · words · doc" in brief
+    assert "- **C1** 关键词: synthesis · protein · doc" in brief
+    assert brief.count("- **C0**") == 2 and brief.count("- **C1**") == 2
+    print("PASS  render_brief: compact table + keywords + one excerpt per cluster")
 
     # ── 4) recipe_report._cluster_semantics: 生成 → 缓存复用 → 跳过路径 ──
     run_dir = os.path.join(tmp, "run")
