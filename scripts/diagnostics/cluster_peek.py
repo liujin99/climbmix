@@ -28,8 +28,14 @@
 #  簇关键词 (2026-10-13, prod5 试点): 每簇从抽样文档提取区分性关键词 —
 #  CJK 2~4 字 n-gram + 拉丁词, 按文档频计数, 跨簇对比 IDF 加权 (只在本
 #  簇高频、别簇罕见的词得分高), 零分词依赖。§2b 紧凑版新增『每簇关键词』
-#  节; deck 簇内容图标签第二行 = 关键词 + 样本开头 — 域名相同的簇靠真实
+#  节; deck 簇内容图标签第二行 = 关键词 — 域名相同的簇靠真实
 #  内容词区分。CLI --semantics-out 可直接写 §2b 缓存 (试点重生成入口)。
+#
+#  抽样量 (2026-10-14, 用户裁决): 默认 n_per 25→50 — 实测耗时 117s→123s
+#  (I/O 为主, 读篇数非瓶颈, 几乎免费); 收敛性实证 (prod5 服务器): n=25
+#  vs 50 两次独立抽样主题层 15/15 簇完全一致 (命名不受影响), 词层 top-3
+#  属长尾抖动 (关键词分布长尾, 前三名天然不稳; C10 故事簇最稳 —
+#  multiply/percentage 两抽均在)。
 #
 #  动机: 赢家配方解剖 (report.md) 的逐簇 α 表只有匿名 C0..C{K-1} —
 #  "簇分别是什么" 从未被回答 (用户点名缺口)。零 NPU; 复用池级 metadata
@@ -154,7 +160,7 @@ def contrastive_keywords(cluster_dfs, top=3, min_df=2):
     return out
 
 
-def collect(pool_dir, cluster_cache, clusters=None, n_per=25, chars=300,
+def collect(pool_dir, cluster_cache, clusters=None, n_per=50, chars=300,
             seed=7, kw_top=3, kw_min_df=2):
     """簇语义数据面 (CLI 完整版与 recipe_report §2b 紧凑版共用)。
 
@@ -330,7 +336,7 @@ def main():
     ap.add_argument("--cluster-cache", required=True)
     ap.add_argument("--clusters", default="all",
                     help="逗号分隔 (C10/10 均可) 或 all (默认)")
-    ap.add_argument("--n", type=int, default=40, help="每簇抽样文档数")
+    ap.add_argument("--n", type=int, default=50, help="每簇抽样文档数")
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--chars", type=int, default=300,
                     help="每篇抽样文档展示的字符数")

@@ -203,7 +203,7 @@ def _cluster_semantics(run_dir, pool_dir):
             import cluster_peek as cp   # 同目录 (脚本运行时 sys.path[0])
             # n_per=25 (2026-10-13): 关键词提取需要多篇样本 (对比 IDF);
             # 展示样本仍取第 1 篇, 与旧 n_per=1 的 §2b 内容语义等价
-            _, profs = cp.collect(pool_dir, cache_npz, n_per=25, chars=220,
+            _, profs = cp.collect(pool_dir, cache_npz, n_per=50, chars=220,
                                   seed=7)
             body = cp.render_brief(profs)
         except (Exception, SystemExit) as e:
