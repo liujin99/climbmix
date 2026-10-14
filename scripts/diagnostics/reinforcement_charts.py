@@ -14,6 +14,10 @@
 #                                           后), 双环形图 + 两侧实验佐证
 #    reinforcement_d8_dual_signal.png      ② 双信号: 左=精度单信号重叠(示意+实算 SE)
 #                                           中=混合公式+比例条 右=w 下限反证
+#    finding_quality_value.png             发现① 质量分 × 赢家权重 排序倒挂
+#                                           (左=质量分 降序, 右=climb 权重)
+#    finding_pool_manifold.png             发现③ 池结构机理示意
+#                                           (通用池成团 vs 窄域池流形+孤岛)
 #    reinforcement_d8_scoring_snr.png       ③ 左=原因(逐基准 真信号 vs 抽样
 #                                           噪声), 右=结果(gsm8k: prod3 误
 #                                           加权 vs prod5 修复后), 下=做法
@@ -927,6 +931,137 @@ def _dom_pct(s):
     return (m.group(1).strip(), float(m.group(2))) if m else (s.strip(), None)
 
 
+# ── 关键发现①: 质量分 × 赢家权重 排序倒挂 (v10.15 评审反馈: 发现块补
+#    机理图。prod5 本轮 recipe 质量列全 0(E1 缓存继承, filter=none),
+#    数字取自实验档案已核实三簇 — 与 D8_GSM8K 同款硬编码房样) ────────
+F1_ROWS = [("C6 代数与数论长文(质量分最高)", 4.45, 0.012, "#8A8A8A"),
+           ("C0 形式数学解题", 4.33, 0.081, "#6E9EC4"),
+           ("C10 算术应用题(赢家重仓)", 3.88, 0.804, ORANGE)]
+
+
+def chart_finding_quality(out_dir):
+    fig = plt.figure(figsize=(13, 3.8))
+
+    # 左: 质量分(stem_relevance) — 降序, "像不像好文本"
+    ax = fig.add_axes([0.10, 0.30, 0.34, 0.52])
+    n = len(F1_ROWS)
+    for i, (lab, q, _, c) in enumerate(F1_ROWS):
+        y = n - 1 - i
+        ax.barh(y, q - 3.5, left=3.5, height=0.52, color=c, zorder=3)
+        ax.text(q + 0.015, y, f"{q:.2f}", va="center", fontsize=10,
+                fontweight="bold", color=DGRAY, zorder=4)
+    ax.set_yticks(range(n - 1, -1, -1),
+                  ["C6 代数与数论长文\n(质量分最高)", "C0 形式数学解题",
+                   "C10 算术应用题\n(赢家重仓)"], fontsize=9.5)
+    ax.set_xlim(3.5, 4.7)
+    ax.set_ylim(-0.55, n - 1 + 0.6)
+    ax.set_xticks([3.5, 4.0, 4.5], ["3.5", "4.0", "4.5"], fontsize=9)
+    ax.grid(axis="x", alpha=0.3)
+    ax.set_axisbelow(True)
+    ax.set_title("质量分:『像不像好文本』", fontsize=11.5, fontweight="bold")
+
+    # 右: 赢家配方权重 α — 与质量分倒挂, "喂了有没有用"
+    ax = fig.add_axes([0.565, 0.30, 0.35, 0.52])
+    for i, (lab, q, w, c) in enumerate(F1_ROWS):
+        y = n - 1 - i
+        ax.barh(y, w, height=0.52, color=c, zorder=3)
+    ax.get_yaxis().set_visible(False)
+    ax.set_xlim(0, 1.0)
+    ax.set_ylim(-0.55, n - 1 + 0.6)
+    ax.set_xticks([0, 0.25, 0.5, 0.75, 1.0],
+                  ["0", "0.25", "0.5", "0.75", "1"], fontsize=9)
+    ax.grid(axis="x", alpha=0.3)
+    ax.set_axisbelow(True)
+    ax.set_title("climb 赢家权重:『喂了有没有用』", fontsize=11.5,
+                 fontweight="bold")
+    ax.text(0.012 + 0.012, 2, "0.1× 地板", va="center", fontsize=9,
+            color=DGRAY, zorder=4)
+    ax.annotate("cfg100 反例:另押 C6 0.16\n→ math 反而减半(2.60% vs 5.80%)",
+                xy=(0.175, 1.75), xytext=(0.42, 2.12), fontsize=8.5,
+                color=RED, ha="left", va="center", linespacing=1.5,
+                arrowprops=dict(arrowstyle="->", color=RED, lw=1.0))
+    ax.text(0.081 + 0.015, 1, "0.08", va="center", fontsize=9.5,
+            fontweight="bold", color=DGRAY, zorder=4)
+    ax.text(0.804 + 0.015, 0, "0.80(池占比的 14.6×)", va="center",
+            fontsize=10, fontweight="bold", color=ORANGE, zorder=4)
+
+    fig.text(0.5, 0.94, "发现①:质量分与训练价值 — 排序完全倒挂",
+             ha="center", va="center", fontsize=13, fontweight="bold")
+    fig.text(0.5, 0.05, "质量分:experiment_prod5.md §4c 档案三簇(stem_relevance;"
+             "本 run recipe 质量列全 0,E1 缓存继承);权重:optimal_mixture_weights.json",
+             ha="center", va="center", fontsize=8, color=DGRAY)
+    ok = verify_layout(fig, "finding_quality")
+    path = os.path.join(out_dir, "finding_quality_value.png")
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    print(f"  ✓ {path}")
+    return ok
+
+
+# ── 关键发现③: 池结构机理示意 (通用池天然成团 vs 窄域池一条流形;
+#    v10.15 评审反馈: 发现块补机理图。纯示意, 无数据主张) ────────────
+def chart_finding_manifold(out_dir):
+    rng = np.random.default_rng(7)
+    fig = plt.figure(figsize=(13, 3.8))
+
+    # 左: 通用池(论文场景) — 多域天然成团
+    ax = fig.add_axes([0.06, 0.16, 0.40, 0.62])
+    ax.set_axis_off()
+    blobs = [(0.18, 0.72, TEAL), (0.52, 0.80, NAVY), (0.82, 0.66, "#8A8A8A"),
+             (0.30, 0.26, "#6CD9DE"), (0.66, 0.22, "#6E9EC4")]
+    for cx, cy, c in blobs:
+        pts = rng.normal(0, 0.045, (110, 2)) + [cx, cy]
+        ax.scatter(pts[:, 0], pts[:, 1], s=5, color=c, alpha=0.5, zorder=3)
+        el = plt.matplotlib.patches.Ellipse(
+            (cx, cy), 0.26, 0.24, fill=False, ls="--", color=GRAY, lw=1.1,
+            zorder=2)
+        ax.add_patch(el)
+    ax.text(0.5, 0.97, "多域天然成团", ha="center", va="top", fontsize=11,
+            fontweight="bold", color=NAVY, zorder=4)
+    ax.text(0.5, 0.04, "域间有间隙 → 论文的距离合并正好切在域边界上",
+            ha="center", va="bottom", fontsize=9.5, color=DGRAY, zorder=4)
+
+    # 右: 窄域池(我们,116M 篇 STEM) — 一条连续流形 + 13 个格式孤岛
+    ax = fig.add_axes([0.54, 0.16, 0.40, 0.62])
+    ax.set_axis_off()
+    t = np.linspace(0.04, 0.96, 800)
+    ym = 0.5 + 0.16 * np.sin(2 * np.pi * t * 0.9) + rng.normal(0, 0.038, 800)
+    ax.scatter(t, ym, s=4, color=TEAL, alpha=0.30, zorder=3)
+    islands = [(0.10, 0.80, 16), (0.28, 0.90, 10), (0.88, 0.75, 12),
+               (0.80, 0.12, 14), (0.35, 0.10, 8), (0.62, 0.10, 9)]
+    for ix, iy, k in islands:
+        pts = rng.normal(0, 0.016, (k, 2)) + [ix, iy]
+        ax.scatter(pts[:, 0], pts[:, 1], s=5, color=GRAY, alpha=0.75,
+                   zorder=3)
+    ax.text(0.06, 0.855, "SMILES", fontsize=7.5, color=DGRAY, zorder=4)
+    ax.text(0.845, 0.795, "代码", fontsize=7.5, color=DGRAY, zorder=4)
+    ax.text(0.655, 0.175, "表格", fontsize=7.5, color=DGRAY, zorder=4)
+    ax.annotate("一条连续流形(99% tokens)", xy=(0.5, 0.62), xytext=(0.5, 0.98),
+                ha="center", va="top", fontsize=11, fontweight="bold",
+                color=NAVY, zorder=4,
+                arrowprops=dict(arrowstyle="->", color=NAVY, lw=1.1))
+    el = plt.matplotlib.patches.Ellipse(
+        (0.5, 0.5), 1.02, 0.72, fill=False, ls="--", color=RED, lw=1.2,
+        zorder=2)
+    ax.add_patch(el)
+    ax.text(0.5, 0.02, "+ 13 个格式孤岛(标注 3 个)\n"
+            "距离合并链式塌缩:任意 K 都并成一簇",
+            ha="center", va="bottom", fontsize=8.5, color=RED, zorder=4,
+            linespacing=1.5)
+
+    fig.text(0.5, 0.94, "发现③:池结构 — 通用池天然成团 vs 窄域池一条流形",
+             ha="center", va="center", fontsize=13, fontweight="bold")
+    fig.text(0.5, 0.05, "示意(点云为概念示意,非嵌入数据);实证:"
+             "paper_deviations.md D14(K=14/21/24/32 → 最大簇 99.0/98.5/98.3/97.5%)",
+             ha="center", va="center", fontsize=8, color=DGRAY)
+    ok = verify_layout(fig, "finding_manifold")
+    path = os.path.join(out_dir, "finding_pool_manifold.png")
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    print(f"  ✓ {path}")
+    return ok
+
+
 def chart_cluster_content(out_dir, run_dir):
     labels, shares = cluster_token_shares(run_dir)
     if labels is None:
@@ -1095,7 +1230,9 @@ def main():
            chart_d8(out_dir),
            chart_d19(out_dir),
            chart_recipe(out_dir, args.run_dir),
-           chart_cluster_content(out_dir, args.run_dir)]
+           chart_cluster_content(out_dir, args.run_dir),
+           chart_finding_quality(out_dir),
+           chart_finding_manifold(out_dir)]
     if not all(oks):
         sys.exit("✗ 有图未通过标签重叠自检 — 请把上面的『重叠/越界』行贴回来")
     print("下一步: python3 scripts/diagnostics/make_deck.py <run_dir>")
