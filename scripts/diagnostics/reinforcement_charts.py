@@ -856,8 +856,12 @@ def chart_cluster_content(out_dir, run_dir):
     cmap = _subset_cmap() if snips else None
     # v10.8: 图加宽 (13→14.4) + 左标签区扩到 0.445 — 第 2 行 = 关键词 +
     # 样本摘录 (总预算 44 单位 ≈ 4.9in), 无关键词时整行预算给摘录
+    # v10.10: 摘录移出图面 (评审反馈: 只有开头读者看不出所以然) —
+    # 第 2 行只留关键词, 标签区缩到 0.20、条形区放宽到 0.62;
+    # 完整摘录仍在 §2b (cluster_semantics.md), 旧格式文件无关键词时
+    # 退回摘录 (优雅降级)
     fig = plt.figure(figsize=(14.4, 6.2))
-    ax = fig.add_axes([0.445, 0.08, 0.41, 0.76])
+    ax = fig.add_axes([0.20, 0.08, 0.62, 0.76])
     ylabels = []
     for r, i in enumerate(order):
         y = K - 1 - r
@@ -876,14 +880,11 @@ def chart_cluster_content(out_dir, run_dir):
             line1 = f"{lab} {name}{med}" if name else f"{lab} {mix}{med}"
         else:
             line1 = f"{lab} {name or (f'{dom}簇' if dom else '')}"
-        # 第 2 行: 簇关键词 (对比 IDF) + 样本开头 — 内容差异直接可见;
-        # 关键词占掉预算后, 摘录用剩余预算 (至少 16 单位)
+        # 第 2 行: 簇关键词 (对比 IDF) — 内容差异直接可见
         kw = kws.get(lab, "").replace(" · ", "·").strip()
-        exc = _excerpt(snips, lab, cmap,
-                       budget=max(16.0, 44.0 - _disp_units(kw)
-                                  - (2.0 if kw else 0.0)))
-        line2 = (f"{kw} {exc}" if (kw and exc) else (exc or kw))
-        ylabels.append(f"{line1}\n{line2}" if line2 else line1)
+        if not kw:  # 旧格式语义文件无关键词 → 退回样本开头
+            kw = _excerpt(snips, lab, cmap, budget=40.0)
+        ylabels.append(f"{line1}\n{kw}" if kw else line1)
         ax.barh(y, shares[i], height=0.62,
                 color=DOMAIN_COLORS.get(dom, GRAY), zorder=3)
         ax.text(shares[i] + xmax * 0.012, y, f"{shares[i]:.1f}%",
@@ -937,8 +938,8 @@ def chart_cluster_content(out_dir, run_dir):
            "簇名 = 人工鉴定)" if sem else "未找到 cluster_semantics.md — 域构成按 §4c 常量回退")
     if kws:
         src += f";关键词 = 每簇抽样文档提取(对比 IDF,{len(kws)} 簇)"
-    if snips:
-        src += f";『』= 每簇 1 篇样本开头({len(snips)} 簇)"
+    elif snips:
+        src += f";『』= 每簇 1 篇样本开头({len(snips)} 簇, 旧格式回退)"
     fig.text(0.5, 0.008,
              f"{src};α = climb 终选配方权重(optimal_mixture_weights.json);"
              "域分组出处 experiment_prod5.md §4c",
@@ -948,8 +949,7 @@ def chart_cluster_content(out_dir, run_dir):
     fig.savefig(path, dpi=150)
     plt.close(fig)
     print(f"  ✓ {path}"
-          + (f"  [内容速写: {len(sem)}/{K} 簇, 关键词: {len(kws)} 簇, "
-             f"样本摘录: {len(snips)} 簇]"
+          + (f"  [内容速写: {len(sem)}/{K} 簇, 关键词: {len(kws)} 簇]"
              if sem else "  [回退: 无 cluster_semantics.md]"))
     return ok
 
