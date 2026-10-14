@@ -137,9 +137,16 @@ D8_GSM8K = [  # (标签, 赢家分, 对照 uniform 分, 赢家颜色) — gsm8k 
 ]
 
 # 配比全景对比 (v10.4) — 语义名/域配比出处:
-CLUSTER_NAMES = {  # experiment_prod5.md §4c (cluster_peek 鉴定 2026-09-30)
-    "C10": "统计练习题", "C0": "形式数学解题", "C6": "综述长文",
-    "C2": "化学·数学混合短题",
+CLUSTER_NAMES = {  # 全簇命名 (cluster_semantics.md §2b, n=25 抽样 + 对比 IDF
+    #  关键词, 2026-10-14; 沿革见 experiment_prod5.md 记录沿革 v1.0.4)。
+    #  勘误: C10 旧名"统计练习题"(2026-09-30, n=1 抽样)系误读 — n=25 关键词
+    #  divide·percentage·multiply + 样本"22% of 12 餐厅小费" = 算术应用题,
+    #  与 gsm8k 机制闭环更贴合。C6/C2: 格式名 → 内容名。
+    "C0": "形式数学解题", "C1": "教学与实验长文", "C2": "SMILES 分子性质问答",
+    "C3": "海洋与生态生物学", "C4": "材料化学综述", "C5": "粒子物理与宇宙学",
+    "C6": "代数与数论长文", "C7": "化学常识概述", "C8": "高等数学论文",
+    "C9": "分数运算练习", "C10": "算术应用题", "C11": "论坛问答与任务文本",
+    "C12": "凝聚态与量子光学", "C13": "材料计算问答", "C14": "蛋白质与膜生化",
 }
 DOMAINFIX_DOMAINS = [  # experiment_prod4.md §4e — 域标签空间, 无簇 α 向量
     ("数学", 60.0), ("物理", 15.0), ("化学", 12.5), ("生物", 12.5),
@@ -675,7 +682,7 @@ def chart_recipe(out_dir, run_dir):
     fig.text(0.5, 0.955, "最终配比:赢家 vs 传统方法 vs 池自然分布",
               ha="center", va="center", fontsize=13, fontweight="bold")
     fig.text(0.5, 0.10,
-             "赢家把 C10『统计练习题』押到 80%(池占比 5.5%,14.6× 浓缩);"
+             "赢家把 C10『算术应用题』押到 80%(池占比 5.5%,14.6× 浓缩);"
              "top-3 配方全部 C10-heavy(0.55~0.80)\n"
              "domainfix 定义在域标签空间(数学 0.60),无簇空间 α 向量,"
              "不能与语义簇直接对比 — 右图单列;natural 臂 ≡ 池自然占比",
@@ -926,8 +933,8 @@ def chart_cluster_content(out_dir, run_dir):
                     f"以下 {K - len(above)} 簇全部压到 0.1× 地板",
                     transform=tr, ha="left", va="center", fontsize=7.5,
                     color=DGRAY, zorder=5)
-    src = ("内容速写:cluster_semantics.md(§2b,cluster_peek 抽样鉴定)"
-           if sem else "未找到 cluster_semantics.md — 域构成按 §4c 常量回退")
+    src = ("内容速写:cluster_semantics.md(§2b,cluster_peek 抽样鉴定;"
+           "簇名 = 人工鉴定)" if sem else "未找到 cluster_semantics.md — 域构成按 §4c 常量回退")
     if kws:
         src += f";关键词 = 每簇抽样文档提取(对比 IDF,{len(kws)} 簇)"
     if snips:
