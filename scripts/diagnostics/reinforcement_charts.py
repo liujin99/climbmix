@@ -885,6 +885,19 @@ def chart_cluster_content(out_dir, run_dir):
         y_sep = K - 1 - len(above) + 0.5
         ax.axhline(y_sep, ls=(0, (4, 3)), color=GRAY, lw=0.9, zorder=2)
     ax.set_yticks(range(K - 1, -1, -1), ylabels, fontsize=8)
+    # 摘录含真实文档文本: $..$ 会被 matplotlib 当 mathtext 解析, 摘录里
+    # 的 LaTeX 命令 (\spn 等) 直接触发 ParseFatal 崩溃 (服务器 2026-10-14
+    # 实测) — 逐标签关闭数学解析, 摘录原样展示; 老 matplotlib 无该 API
+    # 时退回 rcParam 全局关 (本脚本各图均不用 mathtext, 全局关无副作用)
+    _tick_labels = ax.get_yticklabels()
+    if all(hasattr(t, "set_parse_math") for t in _tick_labels):
+        for t in _tick_labels:
+            t.set_parse_math(False)
+    else:
+        try:
+            plt.rcParams["text.parse_math"] = False
+        except KeyError:
+            pass
     ax.set_xlim(0, xmax)
     ax.set_ylim(-0.7, K - 0.1)
     ax.set_xticks([])
