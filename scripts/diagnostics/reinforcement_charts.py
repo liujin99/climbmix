@@ -399,106 +399,93 @@ def chart_d14(out_dir, run_dir):
 #    反证(右, w 下限) (v10.14 评审反馈: 改进②纯文字页太干 — 补机理图;
 #    左图 33%/31% 为示意值, SE 公式为实算, 右图数字全部实测) ──────────
 def chart_d8_dual(out_dir):
+    # v10.17: 整图重讲(评审反馈: 原图不直白, "反证"难懂) —
+    # 左=为什么: 能力相变(435M 代理 + 少量数据, 数学基准落在相变陡峭段,
+    #   精度大幅摆动; Phase Transitions, NeurIPS'25 — data-mix-insights
+    #   docs/PhaseTransitions_深度分析_v2.md)
+    # 中=怎么做: 精度(锯齿)vs 损失(平稳)两条信号轨迹 + 混合公式
+    # 右=结果: 两种信号各自选出的赢家 gsm8k(事故轮 vs 双信号轮, 实测)
+    rng = np.random.default_rng(11)
     fig = plt.figure(figsize=(13, 4.2))
 
-    # 左 问题: 100 题 speedrun 下相邻配比的精度重叠 (示意值 + 实算 SE)
-    ax = fig.add_axes([0.08, 0.32, 0.23, 0.48])
-    se = 0.046  # sqrt(0.3*0.7/100)
-    for xi, (lab, acc, c) in enumerate([("配比 A", 0.33, "#6E9EC4"),
-                                        ("配比 B", 0.31, TEAL)]):
-        ax.bar(xi, acc, width=0.42, color=c, zorder=3)
-        ax.errorbar(xi, acc, yerr=se, color=DGRAY, capsize=6, lw=1.4,
-                    zorder=4)
-        ax.text(xi, acc + se + 0.018, f"{acc * 100:.0f}%", ha="center",
-                va="bottom", fontsize=10, fontweight="bold", color=c,
-                zorder=4)
-    ax.set_xticks([0, 1], ["配比 A", "配比 B"], fontsize=10)
-    ax.set_xlim(-0.55, 1.55)
-    ax.set_ylim(0, 0.52)
-    ax.set_yticks([0, 0.25, 0.5], ["0", "25%", "50%"], fontsize=9)
-    ax.grid(axis="y", alpha=0.3)
-    ax.set_axisbelow(True)
-    ax.set_title("问题:精度单信号,相邻配比分辨不开", fontsize=11.5,
+    # 左 为什么: 相变曲线 — 阈值处尖锐跳变, 数学基准落在陡峭段
+    ax = fig.add_axes([0.07, 0.28, 0.24, 0.52])
+    x = np.linspace(0, 1, 300)
+    y = 0.62 / (1 + np.exp(-(x - 0.55) * 14))
+    ax.plot(x, y, color=NAVY, lw=2.2, zorder=3)
+    ax.axvspan(0.42, 0.68, color="#FDECEA", zorder=1)
+    xs = rng.uniform(0.42, 0.68, 26)
+    ys = 0.62 / (1 + np.exp(-(xs - 0.55) * 14)) + rng.normal(0, 0.075, 26)
+    ax.scatter(xs, np.clip(ys, -0.02, 0.70), s=12, color=RED, alpha=0.65,
+               zorder=4)
+    ax.text(0.55, 0.665, "相变区", ha="center", va="top", fontsize=9,
+            fontweight="bold", color=RED, zorder=4)
+    ax.text(0.13, 0.045, "平台区 ≈ 0%(稳)", ha="center", fontsize=8.5,
+            color=DGRAY, zorder=4)
+    ax.text(0.89, 0.50, "平台区 >60%(稳)", ha="center", fontsize=8.5,
+            color=DGRAY, zorder=4)
+    ax.annotate("435M 代理 + 少量数据:\n数学基准落在这里\n(红点 = 不同配比/种子)",
+                xy=(0.56, 0.30), xytext=(0.02, 0.50), fontsize=8.5,
+                color=RED, fontweight="bold", linespacing=1.5, va="top",
+                arrowprops=dict(arrowstyle="->", color=RED, lw=1.1))
+    ax.set_xlim(0, 1)
+    ax.set_ylim(-0.05, 0.72)
+    ax.set_xticks([])
+    ax.set_yticks([0, 0.3, 0.6], ["0", "30%", "60%"], fontsize=8.5)
+    ax.set_xlabel("能力驱动量(模型规模 × 数学配比 × 数据量)", fontsize=9)
+    ax.set_title("为什么:相变区里,精度大幅摆动", fontsize=11.5,
                  fontweight="bold")
-    ax.text(0.5, -0.24, "每任务 100 题 speedrun:1 题 = 1pt,"
-            "SE = √(p(1−p)/100) ≈ ±4.6pt(示意值,SE 为实算)",
-            ha="center", va="top", fontsize=8.5, color=DGRAY,
-            transform=ax.transAxes)
 
-    # 中 做法: 公式卡 + 混合比例条
-    ax = fig.add_axes([0.335, 0.32, 0.185, 0.48])
-    ax.set_axis_off()
-    ax.add_patch(FancyBboxPatch(
-        (0.02, 0.03), 0.96, 0.94, transform=ax.transAxes,
-        boxstyle="round,pad=0.02,rounding_size=0.04",
-        facecolor="#EDF5F6", edgecolor="#9DC8CC", lw=1.0, zorder=1))
-    ax.text(0.5, 0.88, "做法:双信号混合", ha="center", va="center",
-            fontsize=12, fontweight="bold", color=NAVY, zorder=3)
-    ax.text(0.5, 0.66, "score = w·acc_z + (1−w)·nll_z",
-            ha="center", va="center", fontsize=11, fontweight="bold",
-            color=NAVY, zorder=3)
-    ax.add_patch(plt.Rectangle((0.08, 0.38), 0.56, 0.13,
-                               facecolor=TEAL, edgecolor="none",
-                               transform=ax.transAxes, zorder=2))
-    ax.add_patch(plt.Rectangle((0.64, 0.38), 0.28, 0.13,
-                               facecolor=GRAY, edgecolor="none",
-                               transform=ax.transAxes, zorder=2))
-    ax.text(0.36, 0.445, "精度 z · 主信号", ha="center", va="center",
-            fontsize=8.5, color="white", fontweight="bold", zorder=3)
-    ax.text(0.78, 0.445, "损失 z\n补位", ha="center", va="center",
-            fontsize=7.5, color="white", zorder=3)
-    ax.text(0.5, 0.28, "w ≥ 0.5:损失永不接管话语权\n"
-            "NLL 缺失 → 按精度单独计分",
-            ha="center", va="center", fontsize=9.5, color=DGRAY,
-            linespacing=1.7, zorder=3)
-    ax.text(0.5, 0.10, "精度为主,损失补位", ha="center", va="center",
-            fontsize=10.5, color=TEAL, fontweight="bold", zorder=3)
+    # 中 怎么做: 两条信号轨迹 + 混合公式
+    ax = fig.add_axes([0.365, 0.28, 0.20, 0.52])
+    xs = np.arange(24)
+    acc = np.cumsum(rng.normal(0, 0.32, 24)) * 0.16
+    acc = acc / (np.abs(acc).max() + 1e-9)
+    nll = 0.55 * np.sin(xs / 24 * 2 * np.pi * 0.8)
+    ax.axhline(0, color="#CCCCCC", lw=0.7, zorder=1)
+    ax.plot(xs, acc, color=TEAL, lw=1.6, zorder=3)
+    ax.plot(xs, nll, color=GRAY, lw=1.8, zorder=3)
+    ax.set_xlim(-0.5, 37)
+    ax.set_ylim(-1.45, 1.75)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.text(24.6, 0.95, "精度 acc_z\n大幅摆动", fontsize=8.5, color=TEAL,
+            fontweight="bold", va="center", linespacing=1.4, zorder=4)
+    ax.text(24.6, 0.18, "损失 nll_z\n平稳连续", fontsize=8.5, color=DGRAY,
+            fontweight="bold", va="center", linespacing=1.4, zorder=4)
+    ax.text(11.5, 1.58, "score = w·acc_z + (1−w)·nll_z", ha="center",
+            fontsize=10.5, fontweight="bold", color=NAVY, zorder=4)
+    ax.text(11.5, -1.30, "w ≥ 0.5:精度为主,损失永不接管", ha="center",
+            fontsize=9, color=DGRAY, zorder=4)
+    ax.set_title("怎么做:双信号混合", fontsize=11.5, fontweight="bold")
 
-    # 右 反证: 赢家 gsm8k — 纯损失(w=0, 第3轮) vs 双信号(w≥0.5, 第5轮)
-    # (v10.16 评审反馈: 原 w 取值轴只有文字和箭头 — 改数据条为主体,
-    #  w 轴缩为底部小条)
-    ax = fig.add_axes([0.565, 0.38, 0.365, 0.42])
-    for xi, (lab, v, c, tag) in enumerate(
-            [("第3轮 w=0\n(纯损失排名)", 0.052, RED, "5.2%(−56%)"),
-             ("第5轮 w(gsm8k)=0.93\n(双信号)", 0.301, TEAL, "30.1%(2.9×)")]):
+    # 右 结果: 两种信号各自选出的赢家 (gsm8k)
+    ax = fig.add_axes([0.615, 0.28, 0.315, 0.52])
+    for xi, (v, c, tag) in enumerate(
+            [(0.052, RED, "5.2%(−56%)"), (0.301, TEAL, "30.1%(2.9×)")]):
         ax.bar(xi, v, width=0.42, color=c, zorder=3)
         ax.text(xi, v + 0.014, tag, ha="center", va="bottom", fontsize=9.5,
                 fontweight="bold", color=c, zorder=4)
     ax.axhline(0.105, color=GRAY, lw=1.1, ls="--", zorder=2)
-    ax.text(1.62, 0.105, "uniform 10.5%", ha="right", va="bottom",
+    ax.text(1.55, 0.115, "uniform 10.5%", ha="right", va="bottom",
             fontsize=8.5, color=DGRAY, zorder=4)
-    ax.set_xticks([0, 1], ["第3轮 w=0\n(纯损失排名)", "第5轮 w(gsm8k)=0.93\n(双信号)"],
+    ax.set_xticks([0, 1], ["事故轮:w=0\n(纯损失排名)", "双信号轮:w(gsm8k)=0.93"],
                   fontsize=9)
-    ax.set_xlim(-0.55, 1.62)
+    ax.set_xlim(-0.55, 1.55)
     ax.set_ylim(0, 0.40)
     ax.set_yticks([0, 0.1, 0.2, 0.3, 0.4],
                   ["0", "10%", "20%", "30%", "40%"], fontsize=8.5)
     ax.grid(axis="y", alpha=0.3)
     ax.set_axisbelow(True)
-    ax.set_title("反证:赢家 gsm8k — 纯损失 vs 双信号", fontsize=11.5,
+    ax.set_title("结果:两种信号选出的赢家(gsm8k)", fontsize=11.5,
                  fontweight="bold")
 
-    # 右下: w 取值轴小条 (0 危险 → 1 安全)
-    ax = fig.add_axes([0.565, 0.10, 0.365, 0.16])
-    ax.axvspan(0.0, 0.5, color="#FDECEA", zorder=1)
-    ax.axvspan(0.5, 1.0, color="#EDF5F6", zorder=1)
-    ax.axvline(0.5, color=NAVY, lw=1.3, ls="--", zorder=2)
-    ax.text(0.5, 0.78, "下限 0.5", ha="center", va="center", fontsize=8.5,
-            fontweight="bold", color=NAVY, zorder=3)
-    ax.plot([0.02], [0.30], marker="v", color=RED, markersize=8, zorder=4)
-    ax.text(0.06, 0.30, "第3轮 w=0", ha="left", va="center", fontsize=8.5,
-            color=RED, fontweight="bold", zorder=3)
-    ax.plot([0.93], [0.30], marker="^", color=TEAL, markersize=8, zorder=4)
-    ax.text(0.89, 0.30, "第5轮 0.93", ha="right", va="center", fontsize=8.5,
-            color=TEAL, fontweight="bold", zorder=3)
-    ax.set_xlim(0, 1)
-    ax.set_ylim(0, 1)
-    ax.set_xticks([0, 0.5, 1.0], ["0", "0.5", "1"], fontsize=8)
-    ax.set_yticks([])
-    ax.set_xlabel("损失话语权 w(1−w = 损失占比)", fontsize=9)
-
-    fig.text(0.5, 0.95, "评分双信号:问题(左)· 做法(中)· 反证(右)",
-              ha="center", va="center", fontsize=13, fontweight="bold")
+    fig.text(0.5, 0.95, "评分双信号:为什么(左)· 怎么做(中)· 结果(右)",
+             ha="center", va="center", fontsize=13, fontweight="bold")
+    fig.text(0.5, 0.045, "左 = 相变示意(Phase Transitions, NeurIPS\'25 "
+             "Spotlight — 阈值处尖锐跳变, 非平滑过渡);中 = 信号轨迹示意;"
+             "右 = 实测;100 题 speedrun:1 题 = 1pt,SE ≈ ±4.6pt(实算)",
+             ha="center", va="center", fontsize=8, color=DGRAY)
     ok = verify_layout(fig, "d8_dual")
     path = os.path.join(out_dir, "reinforcement_d8_dual_signal.png")
     fig.savefig(path, dpi=150)

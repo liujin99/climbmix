@@ -92,7 +92,15 @@ def resolve_chart(dirs, name):
                 return p
     return None
 
-# ── 幻灯片文案 (v10.16 评审反馈: ① 方法页补迭代设计(3 轮迭代
+# ── 幻灯片文案 (v10.17 评审反馈: ① 方法页五步卡加迭代容器 — ②③④
+#    围虚线圆角框 + 顶部徽标"每轮迭代 = 采样→训练验证→拟合 · 共 3 轮
+#    (64/32/16)", 回环标签简化; ② p8 图整图重讲 — 左=为什么(能力相变:
+#    435M 代理 + 少量数据, 数学基准落在相变陡峭段, 精度大幅摆动;
+#    Phase Transitions, NeurIPS'25, data-mix-insights 深度分析)、中=
+#    怎么做(精度锯齿 vs 损失平稳两条信号轨迹 + 混合公式)、右=结果
+#    (两种信号各自选出的赢家 gsm8k: 事故轮 5.2% vs 双信号 30.1%);
+#    ③ ④ 标题统一"解决…"句式(去"的问题")。
+#    v10.16 评审反馈: ① 方法页补迭代设计(3 轮迭代
 #    64/32/16 进结论条/步骤②/回环标签 — 搜索过程页不再突兀); ② p8 图
 #    右板重做(原 w 轴只有文字和箭头 — 改『纯损失 vs 双信号』数据条 +
 #    uniform 参照线, w 轴缩为底部小条); ③④ 四个改进标题都带『解决了
@@ -235,7 +243,7 @@ SLIDES = [
                "top-3 配方与 3 种传统配比、base 同池同预算对决(每臂 3B tokens),裁定最终赢家",
                "验证模型 1.5B 有效参数"),
          ],
-         loop_label="3 次迭代(64/32/16 候选)· 预测得分反馈引导下一轮采样",
+         loop_label="预测得分反馈 → 进入下一轮采样",
          note="CLIMB = NVIDIA 论文方法(arXiv:2504.13161)。两级模型:代理 d20 = "
               "435M 有效参数(总参数 0.9B)/ 验证 d28 = 1.5B 有效参数(总参数 "
               "~2.4B),比例 ≈ 1:3.4,与论文的 1:3.7 相当(有效参数 = 参与"
@@ -297,18 +305,18 @@ SLIDES = [
           image="reinforcement_d14_cluster_balance.png"),
     dict(kind="table_image", title="四处机制改进优化 ②:评分双信号 — 解决代理模型上精度信号弱、噪声大",
          order_arrow=True,
-         takeaway="代理模型小、每任务只测 100 题 — 单靠 accuracy 排名不稳定;引入损失作第二信号,但永不接管(w ≥ 0.5)",
+         takeaway="435M 代理模型训练量少 — 数学基准处在能力相变区,精度大幅摆动,单信号排名不稳;引入平稳的损失作第二信号,但永不接管(w ≥ 0.5)",
          table=(["环节", "发生了什么 / 我们做了什么"],
                  [["① 论文的做法", "优化目标 = 下游验证集 accuracy,单信号直评"
                    "(1B 模型全量题)"],
-                  ["② 我们的场景问题", "搜索层 = 435M 代理 + 每任务 100 题 "
-                   "speedrun:单题 = 1pt、SE ≈ ±5pt,相邻配比分辨不开(左图);"
-                   "第1轮还把 NLL 缺失的 mmlu_stem 整项丢出目标"],
+                  ["② 我们的场景问题", "435M 代理 + 少量训练 + 每任务 100 题:数学基准"
+                   "处在**能力相变区**,准确率大幅摆动、相邻配比分辨不开(左图,"
+                   "相变理论 NeurIPS'25);第1轮还把 NLL 缺失的 mmlu_stem 整项丢出目标"],
                   ["③ 我们的改进优化", "score = w·acc_z + (1−w)·nll_z — 精度为主、"
                    "损失补位、**永不接管**(w ≥ 0.5,中图);NLL 缺失按精度单独"
                    "计分"],
-                  ["④ 改进结果", "第2~5轮全部在双信号目标下稳定运行;第3轮 w=0"
-                   "(纯损失排名)『赢家』gsm8k **−56%** — 反向证明下限必要(右图)"]]),
+                  ["④ 改进结果", "第2~5轮全部在双信号目标下稳定运行;事故轮(w=0,纯损失)"
+                   "『赢家』gsm8k **−56%**,双信号轮 **30.1%**(右图)"]]),
           y=1.72, row_h=0.52, size=11.5,
           widths=[0.20, 0.80],
           image="reinforcement_d8_dual_signal.png"),
@@ -332,7 +340,7 @@ SLIDES = [
           y=1.72, row_h=0.56, size=11.5,
           widths=[0.20, 0.80],
           image="reinforcement_d8_scoring_snr.png"),
-    dict(kind="table_image", title="四处机制改进优化 ④:终选守卫 — 解决终选选中未实测配比的问题",
+    dict(kind="table_image", title="四处机制改进优化 ④:终选守卫 — 解决终选选中未实测配比的风险",
          order_arrow=True,
          takeaway="论文式终选只信预测、不信实测;我们的规则反过来:终选必须是实测第一 — 第5轮实验,终选即实测赢家,6/6 全胜",
          table=(["环节", "发生了什么 / 我们做了什么"],
@@ -742,6 +750,26 @@ def _flow(slide, s):
     head_sz, body_sz, key_sz = ((13.5, 11, 10.5) if five
                                 else (15, 11.5, 11))
     centers = []
+    # v10.17: 迭代容器 — ②③④ 步围进虚线圆角框(评审反馈: 没表达出
+    # "3 轮迭代, 每轮 = 采样→训练验证→拟合"), 回环箭头与标签一并框入;
+    # 容器必须先于卡片添加(置底), 卡片/箭头画在其上
+    if five:
+        x_it = ML + Emu(step)
+        w_it = Emu(step * 2) + bw
+        box = slide.shapes.add_shape(
+            MSO_SHAPE.ROUNDED_RECTANGLE, x_it, by - Inches(0.30),
+            w_it, bh + Inches(1.22))
+        box.adjustments[0] = 0.03
+        box.fill.background()
+        box.line.color.rgb = RGBColor(0x9D, 0xC8, 0xCC)
+        box.line.width = Pt(1.25)
+        box.shadow.inherit = False
+        ln = box.line._get_or_add_ln()
+        ln.append(ln.makeelement(qn("a:prstDash"), {"val": "dash"}))
+        tf = _box(slide, x_it, by - Inches(0.27), w_it, Inches(0.22))
+        _run(tf.paragraphs[0],
+             "每轮迭代 = 采样 → 训练验证 → 拟合 · 共 3 轮(64/32/16 候选)",
+             10.5, bold=True, color=NAVY)
     for i, (head, icon, body, key) in enumerate(steps):
         x = ML + Emu(step * i)
         last = i == n - 1
