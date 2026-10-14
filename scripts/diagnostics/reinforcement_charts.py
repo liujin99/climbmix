@@ -399,92 +399,72 @@ def chart_d14(out_dir, run_dir):
 #    反证(右, w 下限) (v10.14 评审反馈: 改进②纯文字页太干 — 补机理图;
 #    左图 33%/31% 为示意值, SE 公式为实算, 右图数字全部实测) ──────────
 def chart_d8_dual(out_dir):
-    # v10.17: 整图重讲(评审反馈: 原图不直白, "反证"难懂) —
-    # 左=为什么: 能力相变(435M 代理 + 少量数据, 数学基准落在相变陡峭段,
-    #   精度大幅摆动; Phase Transitions, NeurIPS'25 — data-mix-insights
-    #   docs/PhaseTransitions_深度分析_v2.md)
-    # 中=怎么做: 精度(锯齿)vs 损失(平稳)两条信号轨迹 + 混合公式
-    # 右=结果: 两种信号各自选出的赢家 gsm8k(事故轮 vs 双信号轮, 实测)
+    # v10.18: 两联放大重讲(评审反馈: 相变故事应讲"区左侧" — 代理小 +
+    #   中训练量少 → 潜在能力缓慢积累但基准得分不动 → 不同配比得分
+    #   重叠、分辨不出好坏; 原右板"两种信号选出的赢家"表达不清, 撤下,
+    #   结果数字由页面表格承载(均实测)) —
+    #   左=为什么(相变区左侧, 得分看不出配比好坏; Phase Transitions,
+    #   NeurIPS'25 Spotlight)
+    #   右=怎么做(精度轨迹区分度小 vs 损失轨迹连续平稳 → 混合, w ≥ 0.5)
     rng = np.random.default_rng(11)
-    fig = plt.figure(figsize=(13, 4.2))
+    fig = plt.figure(figsize=(13, 3.4))
 
-    # 左 为什么: 相变曲线 — 阈值处尖锐跳变, 数学基准落在陡峭段
-    ax = fig.add_axes([0.07, 0.28, 0.24, 0.52])
+    # 左 为什么: 相变曲线 — 我们在跳变左侧, 不同配比的得分几乎重叠
+    ax = fig.add_axes([0.055, 0.22, 0.40, 0.58])
     x = np.linspace(0, 1, 300)
-    y = 0.62 / (1 + np.exp(-(x - 0.55) * 14))
-    ax.plot(x, y, color=NAVY, lw=2.2, zorder=3)
-    ax.axvspan(0.42, 0.68, color="#FDECEA", zorder=1)
-    xs = rng.uniform(0.42, 0.68, 26)
-    ys = 0.62 / (1 + np.exp(-(xs - 0.55) * 14)) + rng.normal(0, 0.075, 26)
-    ax.scatter(xs, np.clip(ys, -0.02, 0.70), s=12, color=RED, alpha=0.65,
+    y = 0.62 / (1 + np.exp(-(x - 0.62) * 16))
+    ax.plot(x, y, color=NAVY, lw=2.4, zorder=3)
+    ax.axvspan(0.55, 1.0, color="#FDECEA", zorder=1)
+    xs = rng.uniform(0.30, 0.50, 22)
+    ys = 0.62 / (1 + np.exp(-(xs - 0.62) * 16)) + rng.normal(0, 0.018, 22)
+    ax.scatter(xs, np.clip(ys, -0.02, 0.70), s=16, color=RED, alpha=0.75,
                zorder=4)
-    ax.text(0.55, 0.665, "相变区", ha="center", va="top", fontsize=9,
-            fontweight="bold", color=RED, zorder=4)
-    ax.text(0.13, 0.045, "平台区 ≈ 0%(稳)", ha="center", fontsize=8.5,
-            color=DGRAY, zorder=4)
-    ax.text(0.89, 0.50, "平台区 >60%(稳)", ha="center", fontsize=8.5,
-            color=DGRAY, zorder=4)
-    ax.annotate("435M 代理 + 少量数据:\n数学基准落在这里\n(红点 = 不同配比/种子)",
-                xy=(0.56, 0.30), xytext=(0.02, 0.50), fontsize=8.5,
-                color=RED, fontweight="bold", linespacing=1.5, va="top",
-                arrowprops=dict(arrowstyle="->", color=RED, lw=1.1))
+    ax.text(0.775, 0.665, "相变跳变区\n(代理 + 少量中训练还没到)",
+            ha="center", va="top", fontsize=9.5, color=RED,
+            linespacing=1.5, zorder=4)
+    ax.annotate("不同配比的代理得分:几乎重叠\n→ 分辨不出配比好坏",
+                xy=(0.40, 0.075), xytext=(0.60, 0.30), fontsize=10,
+                color=RED, fontweight="bold", linespacing=1.5,
+                arrowprops=dict(arrowstyle="->", color=RED, lw=1.2))
+    ax.text(0.12, 0.16, "得分平缓区\n潜在能力在积累", ha="center",
+            fontsize=9, color=DGRAY, linespacing=1.5, zorder=4)
     ax.set_xlim(0, 1)
     ax.set_ylim(-0.05, 0.72)
     ax.set_xticks([])
-    ax.set_yticks([0, 0.3, 0.6], ["0", "30%", "60%"], fontsize=8.5)
-    ax.set_xlabel("能力驱动量(模型规模 × 数学配比 × 数据量)", fontsize=9)
-    ax.set_title("为什么:相变区里,精度大幅摆动", fontsize=11.5,
+    ax.set_yticks([0, 0.3, 0.6], ["0", "30%", "60%"], fontsize=9)
+    ax.set_xlabel("能力驱动量(模型规模 × 数学配比 × 数据量)", fontsize=10)
+    ax.set_title("为什么:相变区左侧,基准得分看不出配比好坏", fontsize=12,
                  fontweight="bold")
 
-    # 中 怎么做: 两条信号轨迹 + 混合公式
-    ax = fig.add_axes([0.365, 0.28, 0.20, 0.52])
+    # 右 怎么做: 精度轨迹区分度小 vs 损失轨迹连续平稳 → 双信号混合
+    ax = fig.add_axes([0.545, 0.22, 0.40, 0.58])
     xs = np.arange(24)
-    acc = np.cumsum(rng.normal(0, 0.32, 24)) * 0.16
-    acc = acc / (np.abs(acc).max() + 1e-9)
-    nll = 0.55 * np.sin(xs / 24 * 2 * np.pi * 0.8)
+    acc = rng.normal(0, 0.13, 24)
+    nll = 0.6 * np.sin(xs / 24 * 2 * np.pi * 0.8)
     ax.axhline(0, color="#CCCCCC", lw=0.7, zorder=1)
-    ax.plot(xs, acc, color=TEAL, lw=1.6, zorder=3)
-    ax.plot(xs, nll, color=GRAY, lw=1.8, zorder=3)
-    ax.set_xlim(-0.5, 37)
-    ax.set_ylim(-1.45, 1.75)
+    ax.plot(xs, acc, color=TEAL, lw=1.7, zorder=3)
+    ax.plot(xs, nll, color=GRAY, lw=2.0, zorder=3)
+    ax.set_xlim(-0.5, 40)
+    ax.set_ylim(-1.5, 1.9)
     ax.set_xticks([])
     ax.set_yticks([])
-    ax.text(24.6, 0.95, "精度 acc_z\n大幅摆动", fontsize=8.5, color=TEAL,
+    ax.text(25.0, 0.55, "精度 acc_z\n区分度小", fontsize=9.5, color=TEAL,
             fontweight="bold", va="center", linespacing=1.4, zorder=4)
-    ax.text(24.6, 0.18, "损失 nll_z\n平稳连续", fontsize=8.5, color=DGRAY,
+    ax.text(25.0, -0.55, "损失 nll_z\n连续平稳", fontsize=9.5, color=DGRAY,
             fontweight="bold", va="center", linespacing=1.4, zorder=4)
-    ax.text(11.5, 1.58, "score = w·acc_z + (1−w)·nll_z", ha="center",
-            fontsize=10.5, fontweight="bold", color=NAVY, zorder=4)
-    ax.text(11.5, -1.30, "w ≥ 0.5:精度为主,损失永不接管", ha="center",
-            fontsize=9, color=DGRAY, zorder=4)
-    ax.set_title("怎么做:双信号混合", fontsize=11.5, fontweight="bold")
-
-    # 右 结果: 两种信号各自选出的赢家 (gsm8k)
-    ax = fig.add_axes([0.615, 0.28, 0.315, 0.52])
-    for xi, (v, c, tag) in enumerate(
-            [(0.052, RED, "5.2%(−56%)"), (0.301, TEAL, "30.1%(2.9×)")]):
-        ax.bar(xi, v, width=0.42, color=c, zorder=3)
-        ax.text(xi, v + 0.014, tag, ha="center", va="bottom", fontsize=9.5,
-                fontweight="bold", color=c, zorder=4)
-    ax.axhline(0.105, color=GRAY, lw=1.1, ls="--", zorder=2)
-    ax.text(1.55, 0.115, "uniform 10.5%", ha="right", va="bottom",
-            fontsize=8.5, color=DGRAY, zorder=4)
-    ax.set_xticks([0, 1], ["事故轮:w=0\n(纯损失排名)", "双信号轮:w(gsm8k)=0.93"],
-                  fontsize=9)
-    ax.set_xlim(-0.55, 1.55)
-    ax.set_ylim(0, 0.40)
-    ax.set_yticks([0, 0.1, 0.2, 0.3, 0.4],
-                  ["0", "10%", "20%", "30%", "40%"], fontsize=8.5)
-    ax.grid(axis="y", alpha=0.3)
-    ax.set_axisbelow(True)
-    ax.set_title("结果:两种信号选出的赢家(gsm8k)", fontsize=11.5,
+    ax.text(11.5, 1.68, "score = w·acc_z + (1−w)·nll_z", ha="center",
+            fontsize=11.5, fontweight="bold", color=NAVY, zorder=4)
+    ax.text(11.5, -1.32, "w ≥ 0.5:精度为主,损失永不接管话语权;NLL 缺失按精度单独计分",
+            ha="center", fontsize=9.5, color=DGRAY, zorder=4)
+    ax.set_xlabel("候选配比(按序)", fontsize=10)
+    ax.set_title("怎么做:引入连续平稳的损失信号补位", fontsize=12,
                  fontweight="bold")
 
-    fig.text(0.5, 0.95, "评分双信号:为什么(左)· 怎么做(中)· 结果(右)",
-             ha="center", va="center", fontsize=13, fontweight="bold")
-    fig.text(0.5, 0.045, "左 = 相变示意(Phase Transitions, NeurIPS\'25 "
-             "Spotlight — 阈值处尖锐跳变, 非平滑过渡);中 = 信号轨迹示意;"
-             "右 = 实测;100 题 speedrun:1 题 = 1pt,SE ≈ ±4.6pt(实算)",
+    fig.text(0.5, 0.95, "评分双信号:为什么(左)· 怎么做(右)",
+             ha="center", va="center", fontsize=13.5, fontweight="bold")
+    fig.text(0.5, 0.035, "左 = 相变示意(Phase Transitions, NeurIPS\'25 "
+             "Spotlight — 阈值左侧能力缓慢积累、得分不动;data-mix-insights "
+             "深度分析);右 = 信号轨迹示意;100 题 speedrun:SE ≈ ±4.6pt(实算)",
              ha="center", va="center", fontsize=8, color=DGRAY)
     ok = verify_layout(fig, "d8_dual")
     path = os.path.join(out_dir, "reinforcement_d8_dual_signal.png")
