@@ -12,8 +12,9 @@
 #    reinforcement_d14_cluster_balance.png  ① 左 as-is(论文距离合并, 为什么
 #                                           翻车)vs 右 to-be(强制均衡, 改进
 #                                           后), 双环形图 + 两侧实验佐证
-#    reinforcement_d8_dual_signal.png      ② 双信号: 左=精度单信号重叠(示意+实算 SE)
-#                                           中=混合公式+比例条 右=w 下限反证
+#    reinforcement_d8_dual_signal.png      ② 双信号两联: 左=为什么(相变区左侧,
+#                                           得分看不出配比好坏) 右=怎么做(精度
+#                                           不动 vs 损失缓降 → 混合, w ≥ 0.5)
 #    finding_quality_value.png             发现① 质量分 × 赢家权重 排序倒挂
 #                                           (左=质量分 降序, 右=climb 权重)
 #    finding_pool_manifold.png             发现③ 池结构机理示意
@@ -406,6 +407,9 @@ def chart_d8_dual(out_dir):
     #   左=为什么(相变区左侧, 得分看不出配比好坏; Phase Transitions,
     #   NeurIPS'25 Spotlight)
     #   右=怎么做(精度轨迹区分度小 vs 损失轨迹连续平稳 → 混合, w ≥ 0.5)
+    # v10.19: 右板修正(评审反馈) — 损失曲线改缓慢下降(原正弦的上升段
+    #   占面过大, 与"配比变好 → 损失下降"不符); 标题/标签补"相变区之前";
+    #   底注补 w 定法指向(按逐基准实测信噪比定, 见下页改进③)。
     rng = np.random.default_rng(11)
     fig = plt.figure(figsize=(13, 3.4))
 
@@ -436,11 +440,11 @@ def chart_d8_dual(out_dir):
     ax.set_title("为什么:相变区左侧,基准得分看不出配比好坏", fontsize=12,
                  fontweight="bold")
 
-    # 右 怎么做: 精度轨迹区分度小 vs 损失轨迹连续平稳 → 双信号混合
+    # 右 怎么做: 相变区之前 — 精度几乎不动, 损失缓慢下降 → 双信号混合
     ax = fig.add_axes([0.545, 0.22, 0.40, 0.58])
     xs = np.arange(24)
-    acc = rng.normal(0, 0.13, 24)
-    nll = 0.6 * np.sin(xs / 24 * 2 * np.pi * 0.8)
+    acc = rng.normal(0, 0.12, 24)                        # 精度: 原地抖动
+    nll = 0.55 - 0.040 * xs + rng.normal(0, 0.045, 24)   # 损失: 缓慢下降
     ax.axhline(0, color="#CCCCCC", lw=0.7, zorder=1)
     ax.plot(xs, acc, color=TEAL, lw=1.7, zorder=3)
     ax.plot(xs, nll, color=GRAY, lw=2.0, zorder=3)
@@ -448,23 +452,26 @@ def chart_d8_dual(out_dir):
     ax.set_ylim(-1.5, 1.9)
     ax.set_xticks([])
     ax.set_yticks([])
-    ax.text(25.0, 0.55, "精度 acc_z\n区分度小", fontsize=9.5, color=TEAL,
-            fontweight="bold", va="center", linespacing=1.4, zorder=4)
-    ax.text(25.0, -0.55, "损失 nll_z\n连续平稳", fontsize=9.5, color=DGRAY,
-            fontweight="bold", va="center", linespacing=1.4, zorder=4)
+    ax.text(25.0, 0.42, "精度:几乎不动\n(相变区之前,区分度小)", fontsize=9.5,
+            color=TEAL, fontweight="bold", va="center", linespacing=1.4,
+            zorder=4)
+    ax.text(25.0, -0.52, "损失:缓慢下降\n(连续、平稳、可分)", fontsize=9.5,
+            color=DGRAY, fontweight="bold", va="center", linespacing=1.4,
+            zorder=4)
     ax.text(11.5, 1.68, "score = w·acc_z + (1−w)·nll_z", ha="center",
             fontsize=11.5, fontweight="bold", color=NAVY, zorder=4)
-    ax.text(11.5, -1.32, "w ≥ 0.5:精度为主,损失永不接管话语权;NLL 缺失按精度单独计分",
+    ax.text(11.5, -1.32, "w ≥ 0.5,按逐基准实测信噪比定(见下页)— 精度为主、永不接管",
             ha="center", fontsize=9.5, color=DGRAY, zorder=4)
     ax.set_xlabel("候选配比(按序)", fontsize=10)
-    ax.set_title("怎么做:引入连续平稳的损失信号补位", fontsize=12,
+    ax.set_title("怎么做:相变区之前 — 精度几乎不动、损失缓慢下降", fontsize=12,
                  fontweight="bold")
 
     fig.text(0.5, 0.95, "评分双信号:为什么(左)· 怎么做(右)",
              ha="center", va="center", fontsize=13.5, fontweight="bold")
     fig.text(0.5, 0.035, "左 = 相变示意(Phase Transitions, NeurIPS\'25 "
-             "Spotlight — 阈值左侧能力缓慢积累、得分不动;data-mix-insights "
-             "深度分析);右 = 信号轨迹示意;100 题 speedrun:SE ≈ ±4.6pt(实算)",
+             "Spotlight — 阈值左侧能力缓慢积累、得分不动);右 = 信号轨迹示意"
+             "(nll_z = 损失取负标准分:损失降 → nll_z 升);100 题 speedrun:"
+             "SE ≈ ±4.6pt(实算)",
              ha="center", va="center", fontsize=8, color=DGRAY)
     ok = verify_layout(fig, "d8_dual")
     path = os.path.join(out_dir, "reinforcement_d8_dual_signal.png")
