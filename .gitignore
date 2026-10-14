@@ -9,8 +9,9 @@ build/
 *.so
 *.dylib
 
-.climbmix_output/
+climbmix_output/
 test_output_*/
+.pytest_cache/
 temp/
 result/
 

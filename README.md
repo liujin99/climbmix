@@ -479,4 +479,4 @@ README → docs/experiment_prodN.md → docs/paper_deviations.md → source.
 
 ## License
 
-Apache 2.0
+Apache 2.0 — see [LICENSE](LICENSE).
