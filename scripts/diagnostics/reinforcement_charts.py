@@ -454,33 +454,48 @@ def chart_d8_dual(out_dir):
     ax.text(0.5, 0.10, "精度为主,损失补位", ha="center", va="center",
             fontsize=10.5, color=TEAL, fontweight="bold", zorder=3)
 
-    # 右 反证与验证: 损失话语权 w 的取值轴 (0 危险 → 1 安全)
-    ax = fig.add_axes([0.565, 0.32, 0.365, 0.48])
+    # 右 反证: 赢家 gsm8k — 纯损失(w=0, 第3轮) vs 双信号(w≥0.5, 第5轮)
+    # (v10.16 评审反馈: 原 w 取值轴只有文字和箭头 — 改数据条为主体,
+    #  w 轴缩为底部小条)
+    ax = fig.add_axes([0.565, 0.38, 0.365, 0.42])
+    for xi, (lab, v, c, tag) in enumerate(
+            [("第3轮 w=0\n(纯损失排名)", 0.052, RED, "5.2%(−56%)"),
+             ("第5轮 w(gsm8k)=0.93\n(双信号)", 0.301, TEAL, "30.1%(2.9×)")]):
+        ax.bar(xi, v, width=0.42, color=c, zorder=3)
+        ax.text(xi, v + 0.014, tag, ha="center", va="bottom", fontsize=9.5,
+                fontweight="bold", color=c, zorder=4)
+    ax.axhline(0.105, color=GRAY, lw=1.1, ls="--", zorder=2)
+    ax.text(1.62, 0.105, "uniform 10.5%", ha="right", va="bottom",
+            fontsize=8.5, color=DGRAY, zorder=4)
+    ax.set_xticks([0, 1], ["第3轮 w=0\n(纯损失排名)", "第5轮 w(gsm8k)=0.93\n(双信号)"],
+                  fontsize=9)
+    ax.set_xlim(-0.55, 1.62)
+    ax.set_ylim(0, 0.40)
+    ax.set_yticks([0, 0.1, 0.2, 0.3, 0.4],
+                  ["0", "10%", "20%", "30%", "40%"], fontsize=8.5)
+    ax.grid(axis="y", alpha=0.3)
+    ax.set_axisbelow(True)
+    ax.set_title("反证:赢家 gsm8k — 纯损失 vs 双信号", fontsize=11.5,
+                 fontweight="bold")
+
+    # 右下: w 取值轴小条 (0 危险 → 1 安全)
+    ax = fig.add_axes([0.565, 0.10, 0.365, 0.16])
     ax.axvspan(0.0, 0.5, color="#FDECEA", zorder=1)
     ax.axvspan(0.5, 1.0, color="#EDF5F6", zorder=1)
-    ax.axvline(0.5, color=NAVY, lw=1.4, ls="--", zorder=2)
-    ax.text(0.5, 0.97, "下限 w=0.5", ha="center", va="top", fontsize=9,
+    ax.axvline(0.5, color=NAVY, lw=1.3, ls="--", zorder=2)
+    ax.text(0.5, 0.78, "下限 0.5", ha="center", va="center", fontsize=8.5,
             fontweight="bold", color=NAVY, zorder=3)
-    ax.plot([0.0], [0.62], marker="v", color=RED, markersize=10, zorder=4)
-    ax.text(0.0, 0.70, "第3轮 w=0(纯损失排名)\n『赢家』gsm8k −56%",
-            ha="left", va="bottom", fontsize=9, color=RED,
-            fontweight="bold", linespacing=1.5, zorder=3)
-    ax.plot([0.93], [0.30], marker="^", color=TEAL, markersize=10, zorder=4)
-    ax.text(0.93, 0.38, "第5轮 w(gsm8k)=0.93\n→ 主要得分来源(30.1%)",
-            ha="right", va="bottom", fontsize=9, color=TEAL,
-            fontweight="bold", linespacing=1.5, zorder=3)
-    ax.text(0.25, 0.06, "危险区:损失接管", ha="center", va="center",
-            fontsize=9, color=RED, zorder=3)
-    ax.text(0.75, 0.06, "安全区:精度主导", ha="center", va="center",
-            fontsize=9, color=TEAL, zorder=3)
+    ax.plot([0.02], [0.30], marker="v", color=RED, markersize=8, zorder=4)
+    ax.text(0.06, 0.30, "第3轮 w=0", ha="left", va="center", fontsize=8.5,
+            color=RED, fontweight="bold", zorder=3)
+    ax.plot([0.93], [0.30], marker="^", color=TEAL, markersize=8, zorder=4)
+    ax.text(0.89, 0.30, "第5轮 0.93", ha="right", va="center", fontsize=8.5,
+            color=TEAL, fontweight="bold", zorder=3)
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
-    ax.set_xticks([0, 0.25, 0.5, 0.75, 1.0],
-                  ["0", "0.25", "0.5", "0.75", "1"], fontsize=9)
+    ax.set_xticks([0, 0.5, 1.0], ["0", "0.5", "1"], fontsize=8)
     ax.set_yticks([])
-    ax.set_xlabel("损失话语权 w(1−w = 损失占比)", fontsize=9.5)
-    ax.set_title("反证与验证:损失话语权的下限", fontsize=11.5,
-                 fontweight="bold")
+    ax.set_xlabel("损失话语权 w(1−w = 损失占比)", fontsize=9)
 
     fig.text(0.5, 0.95, "评分双信号:问题(左)· 做法(中)· 反证(右)",
               ha="center", va="center", fontsize=13, fontweight="bold")
@@ -1002,58 +1017,69 @@ def chart_finding_quality(out_dir):
 #    v10.15 评审反馈: 发现块补机理图。纯示意, 无数据主张) ────────────
 def chart_finding_manifold(out_dir):
     rng = np.random.default_rng(7)
-    fig = plt.figure(figsize=(13, 3.8))
+    # v10.16 评审反馈: 原图小、字小难看 — 图幅压扁(13×3.0, 上页更大幅面)、
+    # 全字号上调、流形加软带底、面板微底色; 纯示意, 无数据主张
+    fig = plt.figure(figsize=(13, 3.0))
 
     # 左: 通用池(论文场景) — 多域天然成团
-    ax = fig.add_axes([0.06, 0.16, 0.40, 0.62])
+    ax = fig.add_axes([0.05, 0.15, 0.42, 0.64])
     ax.set_axis_off()
-    blobs = [(0.18, 0.72, TEAL), (0.52, 0.80, NAVY), (0.82, 0.66, "#8A8A8A"),
-             (0.30, 0.26, "#6CD9DE"), (0.66, 0.22, "#6E9EC4")]
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_facecolor("#F7FBFB")
+    blobs = [(0.20, 0.70, TEAL), (0.55, 0.78, NAVY),
+             (0.80, 0.60, "#8A8A8A"), (0.38, 0.24, "#6CD9DE")]
     for cx, cy, c in blobs:
-        pts = rng.normal(0, 0.045, (110, 2)) + [cx, cy]
-        ax.scatter(pts[:, 0], pts[:, 1], s=5, color=c, alpha=0.5, zorder=3)
+        pts = rng.normal(0, 0.042, (120, 2)) + [cx, cy]
+        ax.scatter(pts[:, 0], pts[:, 1], s=7, color=c, alpha=0.55, zorder=3)
         el = plt.matplotlib.patches.Ellipse(
-            (cx, cy), 0.26, 0.24, fill=False, ls="--", color=GRAY, lw=1.1,
+            (cx, cy), 0.25, 0.23, fill=False, ls="--", color=GRAY, lw=1.2,
             zorder=2)
         ax.add_patch(el)
-    ax.text(0.5, 0.97, "多域天然成团", ha="center", va="top", fontsize=11,
-            fontweight="bold", color=NAVY, zorder=4)
-    ax.text(0.5, 0.04, "域间有间隙 → 论文的距离合并正好切在域边界上",
-            ha="center", va="bottom", fontsize=9.5, color=DGRAY, zorder=4)
+    ax.text(0.5, 0.98, "通用池(论文):多域天然成团", ha="center", va="top",
+            fontsize=12.5, fontweight="bold", color=NAVY, zorder=4)
+    ax.text(0.5, 0.03, "域间有间隙 → 距离合并正好切在域边界上",
+            ha="center", va="bottom", fontsize=10.5, color=DGRAY, zorder=4)
 
-    # 右: 窄域池(我们,116M 篇 STEM) — 一条连续流形 + 13 个格式孤岛
-    ax = fig.add_axes([0.54, 0.16, 0.40, 0.62])
+    # 右: 窄域池(我们,116M 篇 STEM) — 一条连续流形 + 格式孤岛
+    ax = fig.add_axes([0.53, 0.15, 0.42, 0.64])
     ax.set_axis_off()
-    t = np.linspace(0.04, 0.96, 800)
-    ym = 0.5 + 0.16 * np.sin(2 * np.pi * t * 0.9) + rng.normal(0, 0.038, 800)
-    ax.scatter(t, ym, s=4, color=TEAL, alpha=0.30, zorder=3)
-    islands = [(0.10, 0.80, 16), (0.28, 0.90, 10), (0.88, 0.75, 12),
-               (0.80, 0.12, 14), (0.35, 0.10, 8), (0.62, 0.10, 9)]
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_facecolor("#F7FBFB")
+    t = np.linspace(0.05, 0.95, 800)
+    ym = 0.5 + 0.15 * np.sin(2 * np.pi * t * 0.9)
+    ax.fill_between(t, ym - 0.11, ym + 0.11, color=TEAL, alpha=0.14,
+                    zorder=2)
+    ax.scatter(t, ym + rng.normal(0, 0.032, 800), s=5, color=TEAL,
+               alpha=0.35, zorder=3)
+    islands = [(0.10, 0.82, 14), (0.30, 0.90, 8), (0.86, 0.80, 10),
+               (0.80, 0.14, 12), (0.38, 0.10, 7)]
     for ix, iy, k in islands:
-        pts = rng.normal(0, 0.016, (k, 2)) + [ix, iy]
-        ax.scatter(pts[:, 0], pts[:, 1], s=5, color=GRAY, alpha=0.75,
-                   zorder=3)
-    ax.text(0.06, 0.855, "SMILES", fontsize=7.5, color=DGRAY, zorder=4)
-    ax.text(0.845, 0.795, "代码", fontsize=7.5, color=DGRAY, zorder=4)
-    ax.text(0.655, 0.175, "表格", fontsize=7.5, color=DGRAY, zorder=4)
-    ax.annotate("一条连续流形(99% tokens)", xy=(0.5, 0.62), xytext=(0.5, 0.98),
-                ha="center", va="top", fontsize=11, fontweight="bold",
+        pts = rng.normal(0, 0.014, (k, 2)) + [ix, iy]
+        ax.scatter(pts[:, 0], pts[:, 1], s=7, color=GRAY, alpha=0.8,
+                   edgecolors="none", zorder=3)
+    ax.text(0.045, 0.87, "SMILES", fontsize=9, color=DGRAY, zorder=4)
+    ax.text(0.875, 0.845, "代码", fontsize=9, color=DGRAY, zorder=4)
+    ax.text(0.835, 0.185, "表格", fontsize=9, color=DGRAY, zorder=4)
+    ax.annotate("一条连续流形(99% tokens)", xy=(0.45, 0.60), xytext=(0.5, 0.99),
+                ha="center", va="top", fontsize=12.5, fontweight="bold",
                 color=NAVY, zorder=4,
-                arrowprops=dict(arrowstyle="->", color=NAVY, lw=1.1))
+                arrowprops=dict(arrowstyle="->", color=NAVY, lw=1.2))
     el = plt.matplotlib.patches.Ellipse(
-        (0.5, 0.5), 1.02, 0.72, fill=False, ls="--", color=RED, lw=1.2,
+        (0.5, 0.5), 1.04, 0.74, fill=False, ls="--", color=RED, lw=1.4,
         zorder=2)
     ax.add_patch(el)
     ax.text(0.5, 0.02, "+ 13 个格式孤岛(标注 3 个)\n"
             "距离合并链式塌缩:任意 K 都并成一簇",
-            ha="center", va="bottom", fontsize=8.5, color=RED, zorder=4,
+            ha="center", va="bottom", fontsize=10, color=RED, zorder=4,
             linespacing=1.5)
 
-    fig.text(0.5, 0.94, "发现③:池结构 — 通用池天然成团 vs 窄域池一条流形",
-             ha="center", va="center", fontsize=13, fontweight="bold")
-    fig.text(0.5, 0.05, "示意(点云为概念示意,非嵌入数据);实证:"
+    fig.text(0.5, 0.95, "池结构:通用池天然成团 vs 窄域池一条流形",
+             ha="center", va="center", fontsize=13.5, fontweight="bold")
+    fig.text(0.5, 0.02, "示意(点云为概念示意,非嵌入数据);实证:"
              "paper_deviations.md D14(K=14/21/24/32 → 最大簇 99.0/98.5/98.3/97.5%)",
-             ha="center", va="center", fontsize=8, color=DGRAY)
+             ha="center", va="center", fontsize=9, color=DGRAY)
     ok = verify_layout(fig, "finding_manifold")
     path = os.path.join(out_dir, "finding_pool_manifold.png")
     fig.savefig(path, dpi=150)
