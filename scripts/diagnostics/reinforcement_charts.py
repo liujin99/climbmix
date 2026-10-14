@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ═══════════════════════════════════════════════════════════════════════
-#  reinforcement_charts.py — 『三处机制改进优化』举证图 (deck v10, 2026-10-13)
+#  reinforcement_charts.py — 『四处机制改进优化』举证图 (deck v10, 2026-10-13)
 #
 #  用法:
 #    python3 scripts/diagnostics/reinforcement_charts.py result/prod5_20260929_201108
@@ -12,7 +12,9 @@
 #    reinforcement_d14_cluster_balance.png  ① 左 as-is(论文距离合并, 为什么
 #                                           翻车)vs 右 to-be(强制均衡, 改进
 #                                           后), 双环形图 + 两侧实验佐证
-#    reinforcement_d8_scoring_snr.png       ② 左=原因(逐基准 真信号 vs 抽样
+#    reinforcement_d8_dual_signal.png      ② 双信号: 左=精度单信号重叠(示意+实算 SE)
+#                                           中=混合公式+比例条 右=w 下限反证
+#    reinforcement_d8_scoring_snr.png       ③ 左=原因(逐基准 真信号 vs 抽样
 #                                           噪声), 右=结果(gsm8k: prod3 误
 #                                           加权 vs prod5 修复后), 下=做法
 #    reinforcement_d19_extrapolation.png    ③ 外推问题示意图(非真实数据):
@@ -389,7 +391,104 @@ def chart_d14(out_dir, run_dir):
     return ok
 
 
-# ── ② D8: 问题(左)· 做法(中, 公式)· 结果(右) (v10.5: 删底部小结行,
+# ── ② D8(双信号): 问题(左, 精度单信号分辨不开)· 做法(中, 混合公式)·
+#    反证(右, w 下限) (v10.14 评审反馈: 改进②纯文字页太干 — 补机理图;
+#    左图 33%/31% 为示意值, SE 公式为实算, 右图数字全部实测) ──────────
+def chart_d8_dual(out_dir):
+    fig = plt.figure(figsize=(13, 4.2))
+
+    # 左 问题: 100 题 speedrun 下相邻配比的精度重叠 (示意值 + 实算 SE)
+    ax = fig.add_axes([0.08, 0.32, 0.23, 0.48])
+    se = 0.046  # sqrt(0.3*0.7/100)
+    for xi, (lab, acc, c) in enumerate([("配比 A", 0.33, "#6E9EC4"),
+                                        ("配比 B", 0.31, TEAL)]):
+        ax.bar(xi, acc, width=0.42, color=c, zorder=3)
+        ax.errorbar(xi, acc, yerr=se, color=DGRAY, capsize=6, lw=1.4,
+                    zorder=4)
+        ax.text(xi, acc + se + 0.018, f"{acc * 100:.0f}%", ha="center",
+                va="bottom", fontsize=10, fontweight="bold", color=c,
+                zorder=4)
+    ax.set_xticks([0, 1], ["配比 A", "配比 B"], fontsize=10)
+    ax.set_xlim(-0.55, 1.55)
+    ax.set_ylim(0, 0.52)
+    ax.set_yticks([0, 0.25, 0.5], ["0", "25%", "50%"], fontsize=9)
+    ax.grid(axis="y", alpha=0.3)
+    ax.set_axisbelow(True)
+    ax.set_title("问题:精度单信号,相邻配比分辨不开", fontsize=11.5,
+                 fontweight="bold")
+    ax.text(0.5, -0.24, "每任务 100 题 speedrun:1 题 = 1pt,"
+            "SE = √(p(1−p)/100) ≈ ±4.6pt(示意值,SE 为实算)",
+            ha="center", va="top", fontsize=8.5, color=DGRAY,
+            transform=ax.transAxes)
+
+    # 中 做法: 公式卡 + 混合比例条
+    ax = fig.add_axes([0.335, 0.32, 0.185, 0.48])
+    ax.set_axis_off()
+    ax.add_patch(FancyBboxPatch(
+        (0.02, 0.03), 0.96, 0.94, transform=ax.transAxes,
+        boxstyle="round,pad=0.02,rounding_size=0.04",
+        facecolor="#EDF5F6", edgecolor="#9DC8CC", lw=1.0, zorder=1))
+    ax.text(0.5, 0.88, "做法:双信号混合", ha="center", va="center",
+            fontsize=12, fontweight="bold", color=NAVY, zorder=3)
+    ax.text(0.5, 0.66, "score = w·acc_z + (1−w)·nll_z",
+            ha="center", va="center", fontsize=11, fontweight="bold",
+            color=NAVY, zorder=3)
+    ax.add_patch(plt.Rectangle((0.08, 0.38), 0.56, 0.13,
+                               facecolor=TEAL, edgecolor="none",
+                               transform=ax.transAxes, zorder=2))
+    ax.add_patch(plt.Rectangle((0.64, 0.38), 0.28, 0.13,
+                               facecolor=GRAY, edgecolor="none",
+                               transform=ax.transAxes, zorder=2))
+    ax.text(0.36, 0.445, "精度 z · 主信号", ha="center", va="center",
+            fontsize=8.5, color="white", fontweight="bold", zorder=3)
+    ax.text(0.78, 0.445, "损失 z\n补位", ha="center", va="center",
+            fontsize=7.5, color="white", zorder=3)
+    ax.text(0.5, 0.28, "w ≥ 0.5:损失永不接管话语权\n"
+            "NLL 缺失 → 按精度单独计分",
+            ha="center", va="center", fontsize=9.5, color=DGRAY,
+            linespacing=1.7, zorder=3)
+    ax.text(0.5, 0.10, "精度为主,损失补位", ha="center", va="center",
+            fontsize=10.5, color=TEAL, fontweight="bold", zorder=3)
+
+    # 右 反证与验证: 损失话语权 w 的取值轴 (0 危险 → 1 安全)
+    ax = fig.add_axes([0.565, 0.32, 0.365, 0.48])
+    ax.axvspan(0.0, 0.5, color="#FDECEA", zorder=1)
+    ax.axvspan(0.5, 1.0, color="#EDF5F6", zorder=1)
+    ax.axvline(0.5, color=NAVY, lw=1.4, ls="--", zorder=2)
+    ax.text(0.5, 0.97, "下限 w=0.5", ha="center", va="top", fontsize=9,
+            fontweight="bold", color=NAVY, zorder=3)
+    ax.plot([0.0], [0.62], marker="v", color=RED, markersize=10, zorder=4)
+    ax.text(0.0, 0.70, "第3轮 w=0(纯损失排名)\n『赢家』gsm8k −56%",
+            ha="left", va="bottom", fontsize=9, color=RED,
+            fontweight="bold", linespacing=1.5, zorder=3)
+    ax.plot([0.93], [0.30], marker="^", color=TEAL, markersize=10, zorder=4)
+    ax.text(0.93, 0.38, "第5轮 w(gsm8k)=0.93\n→ 主要得分来源(30.1%)",
+            ha="right", va="bottom", fontsize=9, color=TEAL,
+            fontweight="bold", linespacing=1.5, zorder=3)
+    ax.text(0.25, 0.06, "危险区:损失接管", ha="center", va="center",
+            fontsize=9, color=RED, zorder=3)
+    ax.text(0.75, 0.06, "安全区:精度主导", ha="center", va="center",
+            fontsize=9, color=TEAL, zorder=3)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.set_xticks([0, 0.25, 0.5, 0.75, 1.0],
+                  ["0", "0.25", "0.5", "0.75", "1"], fontsize=9)
+    ax.set_yticks([])
+    ax.set_xlabel("损失话语权 w(1−w = 损失占比)", fontsize=9.5)
+    ax.set_title("反证与验证:损失话语权的下限", fontsize=11.5,
+                 fontweight="bold")
+
+    fig.text(0.5, 0.95, "评分双信号:问题(左)· 做法(中)· 反证(右)",
+              ha="center", va="center", fontsize=13, fontweight="bold")
+    ok = verify_layout(fig, "d8_dual")
+    path = os.path.join(out_dir, "reinforcement_d8_dual_signal.png")
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    print(f"  ✓ {path}")
+    return ok
+
+
+# ── ③ D8: 问题(左)· 做法(中, 公式)· 结果(右) (v10.5: 删底部小结行,
 #    数字进 deck 表格; 图幅压扁) ────────────────────────────────────
 def chart_d8(out_dir):
     fig = plt.figure(figsize=(13, 4.2))
@@ -851,17 +950,19 @@ def chart_cluster_content(out_dir, run_dir):
                    key=lambda i: (-(alpha[i] if alpha is not None else 0.0),
                                   -shares[i]))
     xmax = max(float(shares.max()) * 1.22, 4.0)
-    snips = parse_cluster_snippets(run_dir)
-    kws = parse_cluster_keywords(run_dir)
-    cmap = _subset_cmap() if snips else None
+    # v10.14: 关键词/摘录不再上图 (parse_cluster_* 与 _excerpt 留给
+    # cluster_peek/旧格式回退路径, 此处不再调用)
     # v10.8: 图加宽 (13→14.4) + 左标签区扩到 0.445 — 第 2 行 = 关键词 +
     # 样本摘录 (总预算 44 单位 ≈ 4.9in), 无关键词时整行预算给摘录
     # v10.10: 摘录移出图面 (评审反馈: 只有开头读者看不出所以然) —
     # 第 2 行只留关键词, 标签区缩到 0.20、条形区放宽到 0.62;
     # 完整摘录仍在 §2b (cluster_semantics.md), 旧格式文件无关键词时
     # 退回摘录 (优雅降级)
+    # v10.14: 关键词也移出图面 (评审反馈: 只留簇的文字描述更易读) —
+    # 标签单行 = 簇名 + 中位长度, 标签区 0.17、字号 8→9;关键词与样本
+    # 摘录全部住在 §2b 档案
     fig = plt.figure(figsize=(14.4, 6.2))
-    ax = fig.add_axes([0.20, 0.08, 0.62, 0.76])
+    ax = fig.add_axes([0.17, 0.08, 0.65, 0.76])
     ylabels = []
     for r, i in enumerate(order):
         y = K - 1 - r
@@ -870,7 +971,7 @@ def chart_cluster_content(out_dir, run_dir):
         si = sem.get(lab)
         name = CLUSTER_NAMES.get(lab)
         if si and si["dom1"] not in ("", "—"):
-            # 第 1 行: 命名簇用鉴定名; 其余 = 域纯度(混合簇给双域) + 中位长度
+            # 命名簇用鉴定名; 其余 = 域纯度(混合簇给双域) + 中位长度
             d1, p1 = _dom_pct(si["dom1"])
             d2, p2 = _dom_pct(si["dom2"]) if si["dom2"] else ("", None)
             mix = f"{d1} {p1:.0f}%" if p1 is not None else d1
@@ -880,11 +981,7 @@ def chart_cluster_content(out_dir, run_dir):
             line1 = f"{lab} {name}{med}" if name else f"{lab} {mix}{med}"
         else:
             line1 = f"{lab} {name or (f'{dom}簇' if dom else '')}"
-        # 第 2 行: 簇关键词 (对比 IDF) — 内容差异直接可见
-        kw = kws.get(lab, "").replace(" · ", "·").strip()
-        if not kw:  # 旧格式语义文件无关键词 → 退回样本开头
-            kw = _excerpt(snips, lab, cmap, budget=40.0)
-        ylabels.append(f"{line1}\n{kw}" if kw else line1)
+        ylabels.append(line1)
         ax.barh(y, shares[i], height=0.62,
                 color=DOMAIN_COLORS.get(dom, GRAY), zorder=3)
         ax.text(shares[i] + xmax * 0.012, y, f"{shares[i]:.1f}%",
@@ -892,7 +989,7 @@ def chart_cluster_content(out_dir, run_dir):
     if show_sep:
         y_sep = K - 1 - len(above) + 0.5
         ax.axhline(y_sep, ls=(0, (4, 3)), color=GRAY, lw=0.9, zorder=2)
-    ax.set_yticks(range(K - 1, -1, -1), ylabels, fontsize=8)
+    ax.set_yticks(range(K - 1, -1, -1), ylabels, fontsize=9)
     # 摘录含真实文档文本: $..$ 会被 matplotlib 当 mathtext 解析, 摘录里
     # 的 LaTeX 命令 (\spn 等) 直接触发 ParseFatal 崩溃 (服务器 2026-10-14
     # 实测) — 逐标签关闭数学解析, 摘录原样展示; 老 matplotlib 无该 API
@@ -935,21 +1032,18 @@ def chart_cluster_content(out_dir, run_dir):
                     transform=tr, ha="left", va="center", fontsize=7.5,
                     color=DGRAY, zorder=5)
     src = ("内容速写:cluster_semantics.md(§2b,cluster_peek 抽样鉴定;"
-           "簇名 = 人工鉴定)" if sem else "未找到 cluster_semantics.md — 域构成按 §4c 常量回退")
-    if kws:
-        src += f";关键词 = 每簇抽样文档提取(对比 IDF,{len(kws)} 簇)"
-    elif snips:
-        src += f";『』= 每簇 1 篇样本开头({len(snips)} 簇, 旧格式回退)"
+           "簇名 = 人工鉴定;关键词/样本摘录亦存 §2b)" if sem
+           else "未找到 cluster_semantics.md — 域构成按 §4c 常量回退")
     fig.text(0.5, 0.008,
-             f"{src};α = climb 终选配方权重(optimal_mixture_weights.json);"
-             "域分组出处 experiment_prod5.md §4c",
-             ha="center", va="bottom", fontsize=8.5, color=DGRAY)
+              f"{src};α = climb 终选配方权重(optimal_mixture_weights.json);"
+              "域分组出处 experiment_prod5.md §4c",
+              ha="center", va="bottom", fontsize=8.5, color=DGRAY)
     ok = verify_layout(fig, "cluster_content")
     path = os.path.join(out_dir, "cluster_content_map.png")
     fig.savefig(path, dpi=150)
     plt.close(fig)
     print(f"  ✓ {path}"
-          + (f"  [内容速写: {len(sem)}/{K} 簇, 关键词: {len(kws)} 簇]"
+          + (f"  [内容速写: {len(sem)}/{K} 簇]"
              if sem else "  [回退: 无 cluster_semantics.md]"))
     return ok
 
@@ -964,7 +1058,7 @@ def deck_dir_for(run_dir):
 
 def main():
     ap = argparse.ArgumentParser(
-        description="『三处机制改进优化』举证图 (D14/D8/D19) + 配比全景 + 簇内容"
+        description="『四处机制改进优化』举证图 (D14/D8×2/D19) + 配比全景 + 簇内容"
                     " → 汇报包目录 <run>/deck")
     ap.add_argument("run_dir", help="run 目录 (prod5 归档; 读取其中的 "
                     "macro_info.json 等, 图输出到其 deck/ 子目录)")
@@ -991,12 +1085,13 @@ def main():
     print(f"✓ 中文字体: {name}")
     out_dir = args.out_dir or deck_dir_for(args.run_dir)
     os.makedirs(out_dir, exist_ok=True)
-    print(f"『三处机制改进优化』举证图 + 配比全景 + 簇内容 → {out_dir} "
+    print(f"『四处机制改进优化』举证图 + 配比全景 + 簇内容 → {out_dir} "
           "(汇报包, 与实验结果目录分离)")
     print("  数据出处: paper_deviations.md D14 / experiment_prod2_k15bal.md "
           "§4.2 / TODO.md prod3 记录 / experiment_prod5.md §3b·§4c / "
           "experiment_prod4.md §3d·§4e / cluster_semantics.md (§2b)")
     oks = [chart_d14(out_dir, args.run_dir),
+           chart_d8_dual(out_dir),
            chart_d8(out_dir),
            chart_d19(out_dir),
            chart_recipe(out_dir, args.run_dir),
