@@ -242,52 +242,54 @@ def main():
     print(f"    均衡划分: K={len(np.unique(bm))}, 最大簇 {b_sh.max():.1%}"
           f"(上限 {(1 + args.slack) / args.K:.1%})")
 
-    # ── 出图: 二维嵌入(t-SNE 优先, 原始输出零修正), 点 = 细簇(单一
-    #    浅色), 分组靠圈/环, 不靠颜色堆砌 ──
+    # ── 出图: 二维嵌入(t-SNE 优先, 原始输出零修正), 点 = 细簇珠(白描边
+    #    互相分开 — 否则 986 个点糊成一片, 读者看不出"框里有许
+    #    多细簇"), 分组靠圈/环 ──
     setup_cjk_font()
     nrm = cen / np.clip(np.linalg.norm(cen, axis=1, keepdims=True), 1e-9, None)
     P, embed_note = embed_2d(nrm)
     giant = int(np.unique(dm)[np.argmax(d_sh)])
     span = float(max(np.ptp(P[:, 0]), np.ptp(P[:, 1]), 1e-9))
-    sizes = 3 + 22 * np.sqrt(fine_tok / fine_tok.max())
+    sizes = 6 + 24 * np.sqrt(fine_tok / fine_tok.max())
+    # 统一留边: 圈/环不会顶到面板边缘, 更不会压到面板外的文字带
+    xlim = (float(P[:, 0].min() - 0.05 * span), float(P[:, 0].max() + 0.05 * span))
+    ylim = (float(P[:, 1].min() - 0.06 * span), float(P[:, 1].max() + 0.06 * span))
     fig = plt.figure(figsize=(13, 4.05))
+    isl_n = len(np.unique(dm)) - 1
+    isl_sh = 1.0 - float(d_sh.max())
 
-    # 左 As-is: 巨簇边界 = 流形凸包(紧贴实际跨度); 孤岛(1%)不画圈 —
-    #   画圈会把注意力引到"这几个点该不该并"上, 而这无关紧要(并进
-    #   去也只是 98.9% → 99.0%); 要害是 15 个旋钮只剩 1 个
-    ax = fig.add_axes([0.035, 0.13, 0.42, 0.70])
-    ax.set_axis_off()
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.set_facecolor("#F7FBFB")
+    def _panel(x0):
+        ax = fig.add_axes([x0, 0.19, 0.42, 0.585])
+        ax.set_axis_off()
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_facecolor("#F7FBFB")
+        ax.set_xlim(*xlim)
+        ax.set_ylim(*ylim)
+        ax.scatter(P[:, 0], P[:, 1], s=sizes, color=GRAY, alpha=0.55,
+                   lw=0.4, edgecolors="#F7FBFB", zorder=3)
+        return ax
+
+    # 左 As-is: 巨簇边界 = 流形凸包; 点 = 细簇珠(看得出一框之内有许多
+    #   细簇 — 回应"为什么左图只有一个簇"); 孤岛(1%)不画圈, 数字入脚注
+    ax = _panel(0.035)
     man = P[dm == giant]
-    ax.scatter(P[:, 0], P[:, 1], s=sizes, color=GRAY, alpha=0.35, lw=0,
-               zorder=3)
     ax.add_patch(MplPolygon(man[ConvexHull(man).vertices], closed=True,
                             facecolor=(0.99, 0.93, 0.92, 0.55),
                             edgecolor=RED, lw=1.6, zorder=2))
-    isl_n = len(np.unique(dm)) - 1
-    isl_sh = 1.0 - float(d_sh.max())
-    ax.text(0.5, 0.985, f"As-is:论文式距离合并 — 最大簇 {d_sh.max():.1%}",
-            ha="center", va="top", transform=ax.transAxes,
-            fontsize=11.5, fontweight="bold", color=RED)
-    ax.text(0.5, 0.03, f"红框 = 巨簇({len(np.flatnonzero(dm == giant))} 个"
-            f"细簇并成 1 簇,{d_sh.max():.1%})· 孤岛 {isl_n} 簇"
-            f"({isl_sh:.1%})— 旋钮只剩 1 个",
-            ha="center", va="bottom", transform=ax.transAxes,
-            fontsize=9, color=RED)
+    fig.text(0.245, 0.845, f"As-is:论文式距离合并 — 最大簇 {d_sh.max():.1%}",
+             ha="center", va="center", fontsize=11.5, fontweight="bold",
+             color=RED)
+    fig.text(0.245, 0.135, f"点 = 细簇:红框内 {len(np.flatnonzero(dm == giant))}"
+             f" 个并成 1 簇({d_sh.max():.1%}),孤岛 {isl_n} 簇({isl_sh:.1%})"
+             f"— 旋钮只剩 1 个",
+             ha="center", va="center", fontsize=9, color=RED)
 
     # 右 To-be: 同一批细簇切成 15 个大小相近的簇 — 每簇一圈(细虚线环,
     #   不填色, 交叉相接时仍可辨) + 簇中心菱形锚点; 环必然沿流形相接:
     #   切片是连续流形上的容量切分, 不是天然主题团(见发现③)
-    ax = fig.add_axes([0.545, 0.13, 0.42, 0.70])
-    ax.set_axis_off()
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.set_facecolor("#F7FBFB")
+    ax = _panel(0.545)
     cmap = plt.get_cmap("tab20")
-    ax.scatter(P[:, 0], P[:, 1], s=sizes, color=GRAY, alpha=0.35, lw=0,
-               zorder=3)
     cents = []
     for i, k in enumerate(np.unique(bm)):
         col = cmap(i % 20)
@@ -301,13 +303,12 @@ def main():
     ax.scatter(cents[:, 0], cents[:, 1], marker="D", s=46,
                c=[cmap(i % 20) for i in range(len(cents))],
                edgecolors="white", lw=0.7, zorder=6)
-    ax.text(0.5, 0.985, f"To-be:容量约束均衡 — 最大簇 {b_sh.max():.1%}",
-            ha="center", va="top", transform=ax.transAxes,
-            fontsize=11.5, fontweight="bold", color=NAVY)
-    ax.text(0.5, 0.03, f"同一批细簇按容量切成大小相近的 {len(np.unique(bm))} 簇"
-            f"— 切片 ≠ 天然聚类;◆ = 簇中心,每簇一个旋钮",
-            ha="center", va="bottom", transform=ax.transAxes,
-            fontsize=9, color=NAVY)
+    fig.text(0.755, 0.845, f"To-be:容量约束均衡 — 最大簇 {b_sh.max():.1%}",
+             ha="center", va="center", fontsize=11.5, fontweight="bold",
+             color=NAVY)
+    fig.text(0.755, 0.135, f"同一批细簇按容量切成大小相近的 {len(np.unique(bm))} 簇"
+             f"— 切片 ≠ 天然聚类;◆ = 簇中心,每簇一个旋钮",
+             ha="center", va="center", fontsize=9, color=NAVY)
 
     fig.text(0.5, 0.965, "同一个池,两种簇划分 — 细簇与合并均为真实运行结果",
              ha="center", va="center", fontsize=13, fontweight="bold")
