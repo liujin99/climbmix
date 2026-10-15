@@ -2,6 +2,18 @@
 
 prod4 = CLIMBmix 算法的一轮完整验证实验（2026-09-15 → 09-20，d20 代理搜索 → d28 九臂验证）。目标是**算法设计的可迁移结论**——算法将运行于其他数据池（非 STEM 基准、更大的池），单轮跑赢是证据不是目的，要求结果一直的好。
 
+> **English abstract** — Winner-validation round (2026-09, 9 arms, d28
+> ~2.5B / 3B-token budget): search-found mixtures beat every non-search
+> baseline by +0.014–0.031 STEM, with gains concentrated in generative
+> math reasoning (gsm8k 2.4–2.9× the uniform family). The round's key
+> negative result: the predictor's never-measured extrapolated winner was
+> beaten by both *measured* search configs (a soft winner's curse) — the
+> selection mechanism is the weak link, motivating the D19 fix that
+> prod5 validated live. Rigor machinery ran end-to-end: seed-pair gap
+> bands, 4-decimal remote-anchor reconciliation, eval-protocol freeze,
+> quota-exact data cross-accounting. This file is the authoritative
+> Chinese record; the README carries the condensed English version.
+
 ## TL;DR
 
 1. **算法核心前提在 d28 成立**：CLIMB 搜索产出的配比全面碾压 uniform/自然占比/域配比家族（超家族带上界 +0.014~+0.031），跨轮 gap 单调改善（prod1 −0.0036 → prod2 +0.0102 → prod4 0.016~0.032）。

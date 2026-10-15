@@ -1,5 +1,9 @@
 # CLIMBmix — Nemotron-CLIMB Unofficial Reproduction
 
+[![arXiv](https://img.shields.io/badge/arXiv-2504.13161-b31a1b.svg)](https://arxiv.org/abs/2504.13161)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Hardware: Ascend NPU](https://img.shields.io/badge/Hardware-Ascend_NPU-e34b2a.svg)](#environment--limitations)
+
 > **DISCLAIMER**: This is an **unofficial** reproduction of the Nemotron-CLIMB paper.
 > It is NOT affiliated with, endorsed by, or connected to NVIDIA or the original authors.
 > This project is for **personal research purposes only** and should NOT be used for
@@ -15,18 +19,21 @@
 
 Automated framework that discovers, evaluates, and refines data mixtures
 for language model pre-training through embedding-driven clustering and
-iterative bootstrapping, using **nanochat-npu** as the training backend via
+iterative bootstrapping, using
+**[nanochat-npu](https://github.com/liujin99/nanochat-npu)** (an
+Ascend-NPU port of karpathy/nanochat) as the training backend via
 **method A** (subprocess calls).
 
-**Project scale**: five production rounds on a 116M-doc / ~92B-token STEM
-pool. Total compute: **≈3,900 NPU-hours** — the two full validation
-rounds (prod4 + prod5: two d20 search fleets with **226 measured points**,
-14 target arms at ~1.5B scaling / 3B tokens, anchors and failed launches
-included) ≈3,600, plus the one-time full-pool embedding (116M docs
-through a 400M-param encoder, 8 NPUs × ~40 h) ≈320; the three earlier
-production rounds came before that. Every deliberate deviation from the
-paper itemized in
-[docs/paper_deviations.md](docs/paper_deviations.md) (D1–D19).
+**Project at a glance**:
+
+| | |
+|---|---|
+| Production rounds | 5 (prod4 + prod5: full validation rounds) |
+| Data pool | 116M docs / ~92B tokens (STEM) |
+| Search | two d20 fleets — **226 measured points** |
+| Validation | 14 target arms at ~1.5B scaling / 3B tokens |
+| Compute | **≈3,900 NPU-hours** (≈3,600 search + arms, anchors and failed launches included; ≈320 one-time full-pool embedding — 116M docs through a 400M-param encoder, 8 NPUs × ~40 h) |
+| Paper deviations | every deliberate deviation itemized D1–D19 — [docs/paper_deviations.md](docs/paper_deviations.md) |
 
 The CLIMB premise is validated at target-model scale in our production
 rounds — twice, by two independent searches (warm-started in prod4, fresh
@@ -284,8 +291,10 @@ climbmix/
 │   ├── KEY_FINDINGS.md                # Condensed transferable findings (the index-grade summary)
 │   ├── paper_deviations.md             # Itemized deviations from the paper (arXiv:2504.13161) + consistency audit
 │   ├── algorithm_review.md             # Post-prod4 algorithm design review (clustering / predictor / selection)
+│   ├── architecture.md                 # End-to-end job-flow blueprint (ASCII diagrams: pool supply → search fleet → arms → reports)
 │   ├── prod5_runbook.md                # prod5 launch runbook (activation / smoke rehearsal / re-eval / launch)
 │   ├── remote_setup.md                 # Remote-fleet setup + embedding wave/merge operations
+│   ├── parallel_k_selection.md         # Choosing k (NPUs per proxy experiment): decision model + measured anchors
 │   ├── reuse_design.md                 # Cross-run reuse design (warm start, extension scripts)
 │   ├── scoring_metric_design.md        # SNR-weighted scoring design + proxy/target training-budget comparison
 │   ├── proxy_and_model_analysis.md     # Proxy/target model-size analysis
@@ -470,7 +479,7 @@ python scripts/run_climb.py --help
 
 ## Dependencies
 
-- **nanochat-npu** (external): training backend, must be at configured path
+- **[nanochat-npu](https://github.com/liujin99/nanochat-npu)** (external): training backend — an Ascend-NPU port of karpathy/nanochat; must be at configured path
 - **Python**: numpy, lightgbm, scikit-learn, scipy, pandas, pyarrow, torch, matplotlib, tqdm
 - **sentence-transformers**: for embedding (stella_en_400M_v5); NPU inference may require torch_npu, fallback to CPU
 - **faiss-cpu**: for K-means clustering
@@ -491,8 +500,9 @@ every number, and the paper-deviation ledger
 
 - **Ascend 910B NPUs + CANN** — training and eval go through nanochat-npu
   and torch_npu; there is no CUDA or CPU training path.
-- **nanochat-npu** (external backend repo) must be present at the
-  configured path with its base checkpoints.
+- **[nanochat-npu](https://github.com/liujin99/nanochat-npu)** (external
+  backend repo) must be present at the configured path with its base
+  checkpoints.
 - **Data pools are not redistributed** (data-governance policy): the
   100B STEM parquet pool, the ClimbMix general shards, and all model
   weights stay private. Mixtures are reproducible in *composition*

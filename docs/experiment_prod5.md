@@ -11,6 +11,20 @@
 > 跨轮比较 + 通道归因（V2）。
 > 关联：`docs/prod5_runbook.md`（发射操作手册）；D19 = `docs/paper_deviations.md`。
 
+> **English abstract** — Algorithm-fix validation round (2026-09, 7 arms):
+> the D19 final-selection fix (best-measured fallback + noise-calibrated
+> no-claim guard + top-k region consumption) got its first live test on a
+> fresh cold-start search — 115 measured points, 3 guided rounds, same pool
+> and cluster cache as prod4; all arms d28 (~2.5B) at a 3B-token budget.
+> Result: the reproduction holds end-to-end — the no-claim guard fired as
+> designed, and its best-measured pick (cfg#101, the `climb` arm) won the
+> fleet at STEM 0.2086 vs uniform 0.1657 (+0.043, z=5.1, the largest
+> CLIMB-vs-uniform margin across rounds), statistically tied with cfg90.
+> Gains concentrate in generative math (gsm8k 0.301 = 10× base); every
+> non-search baseline lands at or below the untrained base model. This
+> file is the authoritative Chinese record; the README carries the
+> condensed English version.
+
 ## TL;DR
 
 **CLIMB 大胜且复现成立，D19 终选三件首轮实战全 PASS**。三臂 CLIMB 全部显著胜
