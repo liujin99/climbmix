@@ -32,7 +32,8 @@ FAMILY = "WQY Zen Hei Deck"   # 改名避免与系统 wqy 同名 (findfont 二�
 # 必须集 (超集无害, 日后有中文字符进图也稳); make_deck 文案由
 # PowerPoint 渲染, 只作富余量收录 (其中的 ▪ − 等 wqy 缺字不要求)
 MUST_SOURCES = [os.path.join(HERE, "..", n) for n in
-                ("reinforcement_charts.py", "report_charts.py")]
+                ("reinforcement_charts.py", "report_charts.py",
+                 "d14_real_preview.py")]
 BONUS_SOURCES = [os.path.join(HERE, "..", "make_deck.py")]
 
 # 只进 stdout 不进图的字符 (wqy 缺这两个符号; U+2212 由

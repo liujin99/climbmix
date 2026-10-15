@@ -494,11 +494,15 @@ def chart_d8_dual(out_dir):
     #   "为什么"(为什么需要损失补位), "怎么做"只是混合公式 — 公式
     #   独立成右侧公式卡(p9 公式卡同款 FancyBbox), 轨迹板标题改
     #   "为什么补位", 让位给两信号对比本身。
+    # v10.28: 评审反馈 — ① 面板标题去口语("为什么/为什么补位")→
+    #   "根因1/根因2"; ② 右侧公式: 不换行(单行 11.5pt 实测 2.35in),
+    #   撤掉 FancyBbox 框, 区域与左右面板同高同底(y 0.20 / h 0.62),
+    #   下方注解从两段多行砍成一行。
     rng = np.random.default_rng(11)
     fig = plt.figure(figsize=(13, 3.4))
 
-    # 左 为什么: 相变曲线 — 我们在跳变左侧, 不同配比的得分几乎重叠
-    ax = fig.add_axes([0.045, 0.20, 0.375, 0.62])
+    # 左 根因1: 相变曲线 — 我们在跳变左侧, 不同配比的得分几乎重叠
+    ax = fig.add_axes([0.04, 0.20, 0.355, 0.62])
     x = np.linspace(0, 1, 300)
     y = 0.62 / (1 + np.exp(-(x - 0.62) * 16))
     ax.plot(x, y, color=NAVY, lw=2.4, zorder=3)
@@ -521,11 +525,11 @@ def chart_d8_dual(out_dir):
     ax.set_xticks([])
     ax.set_yticks([0, 0.3, 0.6], ["0", "30%", "60%"], fontsize=10)
     ax.set_xlabel("能力驱动量(模型规模 × 数学配比 × 数据量)", fontsize=10)
-    ax.set_title("为什么:相变区左侧,基准得分看不出配比好坏", fontsize=11.5,
+    ax.set_title("根因1:相变区左侧,基准得分看不出配比好坏", fontsize=11.5,
                  fontweight="bold")
 
-    # 中 为什么补位: 相变区之前 — 精度几乎不动, 损失缓慢下降
-    ax = fig.add_axes([0.455, 0.20, 0.32, 0.62])
+    # 中 根因2: 相变区之前 — 精度几乎不动, 损失缓慢下降
+    ax = fig.add_axes([0.43, 0.20, 0.31, 0.62])
     xs = np.arange(24)
     acc = rng.normal(0, 0.14, 24)                        # 精度: 原地抖动
     nll = 0.75 * np.exp(-xs / 8.0) - 0.45 + rng.normal(0, 0.012, 24)  # 损失: 先快后慢平滑下降
@@ -543,30 +547,21 @@ def chart_d8_dual(out_dir):
             color=NAVY, fontweight="bold", va="center", linespacing=1.4,
             zorder=4)
     ax.set_xlabel("候选配比(按序)", fontsize=10)
-    ax.set_title("为什么补位:精度几乎不动、损失平滑下降", fontsize=11.5,
+    ax.set_title("根因2:精度几乎不动、损失平滑下降", fontsize=11.5,
                  fontweight="bold")
 
-    # 右 怎么做: 双信号混合 — 公式独立成卡(评审: 公式只是示意,
-    #   不该挤占轨迹板; 与 p9 公式卡同款样式)
-    ax = fig.add_axes([0.815, 0.26, 0.165, 0.52])
+    # 右 做法: 双信号混合公式 — 独立成条(评审: 公式只是示意; 不框框,
+    #   区域与左右面板同底同高, 公式单行)
+    ax = fig.add_axes([0.775, 0.20, 0.205, 0.62])
     ax.set_axis_off()
-    ax.add_patch(FancyBboxPatch(
-        (0.02, 0.03), 0.96, 0.94, transform=ax.transAxes,
-        boxstyle="round,pad=0.02,rounding_size=0.04",
-        facecolor="#EDF5F6", edgecolor="#9DC8CC", lw=1.0, zorder=1))
-    ax.text(0.5, 0.885, "怎么做:双信号混合", ha="center", va="center",
-            fontsize=11.5, fontweight="bold", color=NAVY, zorder=3)
-    ax.text(0.5, 0.70,
-            r"$\mathrm{score} = \mathrm{w} \cdot \mathrm{acc}_z$",
-            ha="center", va="center", fontsize=11.5, color=NAVY, zorder=3)
-    ax.text(0.5, 0.54,
-            r"$\;+\;(1-\mathrm{w}) \cdot \mathrm{nll}_z$",
-            ha="center", va="center", fontsize=11.5, color=NAVY, zorder=3)
-    ax.text(0.5, 0.30, "w ≥ 0.5:精度为主、\n损失补位、永不接管",
-            ha="center", va="center", fontsize=9, color=DGRAY,
-            linespacing=1.5, zorder=3)
-    ax.text(0.5, 0.115, "w 按实测信噪比定\n(见下页)", ha="center",
-            va="center", fontsize=9, color=DGRAY, linespacing=1.5, zorder=3)
+    ax.set_title("做法:双信号混合", fontsize=11.5, fontweight="bold")
+    ax.text(0.5, 0.56,
+            r"$\mathrm{score} = \mathrm{w} \cdot \mathrm{acc}_z"
+            r" + (1-\mathrm{w}) \cdot \mathrm{nll}_z$",
+            ha="center", va="center", fontsize=11.5, color=NAVY,
+            transform=ax.transAxes, zorder=3)
+    ax.text(0.5, 0.38, "w ≥ 0.5,定法见下页", ha="center", va="center",
+            fontsize=9, color=DGRAY, transform=ax.transAxes, zorder=3)
 
     fig.text(0.5, 0.035, "左 = 相变示意(Phase Transitions, NeurIPS\'25 "
               "Spotlight — 阈值左侧能力缓慢积累、得分不动);中 = 信号轨迹示意"
