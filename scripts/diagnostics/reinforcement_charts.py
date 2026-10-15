@@ -506,6 +506,12 @@ def chart_d8(out_dir):
     #   只给了 σ²_noise 的); ③ 公式设计原因((1+f)/2 与 0.5 下限、
     #   1−noise/between 的信号占比含义、二项方差与 (1−c_b)² 的来历)
     #   写入 p9 PPT 备注(make_deck notes 字段)。
+    # v10.25: 评审反馈 — ① 公式字号仍不齐(评审"字的大小怪怪的,Var(acc)
+    #   有点大"): 根因 \frac 的分子/分母自动缩 ~70% — f1/f3 的核心内容
+    #   偏小,全尺寸的 f4 显大;改 \dfrac(全尺寸分数),卡片加高让位
+    #   (axes 0.30/0.50 → 0.28/0.54) — 四条公式的核心字一律 12pt 全
+    #   尺寸,仅真上下标缩小。② 备注补"为什么两个 σ 的算法不一样"
+    #   (σ²_noise 二项闭式解 vs σ²_between 无模型只能实测,见 make_deck)。
     fig = plt.figure(figsize=(13, 3.4))
 
     # 左 问题: 逐基准 真信号 vs 抽样噪声 (SNR 降序, 上=响)
@@ -536,25 +542,28 @@ def chart_d8(out_dir):
                loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=2,
                fontsize=8.5, frameon=False)
 
-    # 中 做法: 公式卡 (话语权按信噪比分配)
-    ax = fig.add_axes([0.365, 0.30, 0.175, 0.50])
+    # 中 做法: 公式卡 (话语权按信噪比分配) — v10.24: 四条公式统一
+    #   12pt/NAVY/正体(评审"字体不一致" — 斜体变量与正体函数名混排、
+    #   13/12pt 与 NAVY/灰混用), 补 σ²_between 定义(评审: 只给了
+    #   σ²_noise 的计算式), 公式设计原因进 p9 PPT 备注。
+    ax = fig.add_axes([0.365, 0.27, 0.175, 0.56])
     ax.set_axis_off()
     ax.add_patch(FancyBboxPatch(
         (0.02, 0.03), 0.96, 0.94, transform=ax.transAxes,
         boxstyle="round,pad=0.02,rounding_size=0.04",
         facecolor="#EDF5F6", edgecolor="#9DC8CC", lw=1.0, zorder=1))
-    ax.text(0.5, 0.92, "做法:话语权按信噪比", ha="center", va="center",
+    ax.text(0.5, 0.90, "做法:话语权按信噪比", ha="center", va="center",
             fontsize=12, fontweight="bold", color=NAVY, zorder=3)
-    ax.text(0.5, 0.765,
-            r"$\mathrm{w} = \mathrm{clip}\left(\frac{1+\mathrm{f}}{2},\; 0.5,\; 1\right)$",
+    ax.text(0.5, 0.735,
+            r"$\mathrm{w} = \mathrm{clip}\left(\dfrac{1+\mathrm{f}}{2},\; 0.5,\; 1\right)$",
             ha="center", va="center", fontsize=12, color=NAVY, zorder=3)
-    ax.text(0.5, 0.575,
+    ax.text(0.5, 0.55,
             r"$\mathrm{f} = 1 - \mathrm{\sigma}^2_{\mathrm{noise}} \,/\, \mathrm{\sigma}^2_{\mathrm{between}}$",
             ha="center", va="center", fontsize=12, color=NAVY, zorder=3)
-    ax.text(0.5, 0.35,
-            r"$\mathrm{\sigma}^2_{\mathrm{noise}} = \frac{\mathrm{p}\,(1-\mathrm{p})}{\mathrm{K}_b\,(1-\mathrm{c}_b)^2}$",
+    ax.text(0.5, 0.34,
+            r"$\mathrm{\sigma}^2_{\mathrm{noise}} = \dfrac{\mathrm{p}\,(1-\mathrm{p})}{\mathrm{K}_b\,(1-\mathrm{c}_b)^2}$",
             ha="center", va="center", fontsize=12, color=NAVY, zorder=3)
-    ax.text(0.5, 0.115,
+    ax.text(0.5, 0.125,
             r"$\mathrm{\sigma}^2_{\mathrm{between}} = \mathrm{Var}_b(\mathrm{acc})$",
             ha="center", va="center", fontsize=12, color=NAVY, zorder=3)
 
