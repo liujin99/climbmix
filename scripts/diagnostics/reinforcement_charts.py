@@ -410,6 +410,9 @@ def chart_d8_dual(out_dir):
     # v10.19: 右板修正(评审反馈) — 损失曲线改缓慢下降(原正弦的上升段
     #   占面过大, 与"配比变好 → 损失下降"不符); 标题/标签补"相变区之前";
     #   底注补 w 定法指向(按逐基准实测信噪比定, 见下页改进③)。
+    # v10.20: 右板再修(评审反馈"像两条不稳定的准确率曲线") — 损失改
+    #   NAVY 加粗、噪声 σ 0.045→0.012 的平滑稳定缓降, 精度细线抖动
+    #   (σ 0.14), 平滑度对比一目了然; 底注精简(评审反馈文字太多)。
     rng = np.random.default_rng(11)
     fig = plt.figure(figsize=(13, 3.4))
 
@@ -443,11 +446,11 @@ def chart_d8_dual(out_dir):
     # 右 怎么做: 相变区之前 — 精度几乎不动, 损失缓慢下降 → 双信号混合
     ax = fig.add_axes([0.545, 0.22, 0.40, 0.58])
     xs = np.arange(24)
-    acc = rng.normal(0, 0.12, 24)                        # 精度: 原地抖动
-    nll = 0.55 - 0.040 * xs + rng.normal(0, 0.045, 24)   # 损失: 缓慢下降
+    acc = rng.normal(0, 0.14, 24)                        # 精度: 原地抖动
+    nll = 0.60 - 0.045 * xs + rng.normal(0, 0.012, 24)   # 损失: 平滑稳定缓降
     ax.axhline(0, color="#CCCCCC", lw=0.7, zorder=1)
-    ax.plot(xs, acc, color=TEAL, lw=1.7, zorder=3)
-    ax.plot(xs, nll, color=GRAY, lw=2.0, zorder=3)
+    ax.plot(xs, acc, color=TEAL, lw=1.5, zorder=3)
+    ax.plot(xs, nll, color=NAVY, lw=2.6, zorder=4)
     ax.set_xlim(-0.5, 40)
     ax.set_ylim(-1.5, 1.9)
     ax.set_xticks([])
@@ -455,12 +458,12 @@ def chart_d8_dual(out_dir):
     ax.text(25.0, 0.42, "精度:几乎不动\n(相变区之前,区分度小)", fontsize=9.5,
             color=TEAL, fontweight="bold", va="center", linespacing=1.4,
             zorder=4)
-    ax.text(25.0, -0.52, "损失:缓慢下降\n(连续、平稳、可分)", fontsize=9.5,
-            color=DGRAY, fontweight="bold", va="center", linespacing=1.4,
+    ax.text(25.0, -0.52, "损失:平滑稳定下降\n(连续、可分)", fontsize=9.5,
+            color=NAVY, fontweight="bold", va="center", linespacing=1.4,
             zorder=4)
     ax.text(11.5, 1.68, "score = w·acc_z + (1−w)·nll_z", ha="center",
             fontsize=11.5, fontweight="bold", color=NAVY, zorder=4)
-    ax.text(11.5, -1.32, "w ≥ 0.5,按逐基准实测信噪比定(见下页)— 精度为主、永不接管",
+    ax.text(11.5, -1.32, "w ≥ 0.5,按实测信噪比定(见下页)",
             ha="center", fontsize=9.5, color=DGRAY, zorder=4)
     ax.set_xlabel("候选配比(按序)", fontsize=10)
     ax.set_title("怎么做:相变区之前 — 精度几乎不动、损失缓慢下降", fontsize=12,
