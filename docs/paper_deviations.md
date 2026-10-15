@@ -3,8 +3,8 @@
 > Paper: arXiv:2504.13161 (v2, 2025-11-30) — *Nemotron-CLIMB: CLustering-based
 > Iterative Data Mixture Bootstrapping for Language Model Pre-training*
 > 本文档记录我们复现中**有意偏离**论文的每一处、偏离原因、以及已核对一致的项。
-> 相关文档: `docs/scoring_metric_design.md`(评分指标 + proxy/target 训练量对比)、
-> `TODO.md`(决策记录)。
+> 相关文档: `docs/scoring_metric_design.md`(评分指标 + proxy/target 训练量对比)。
+> 决策记录（TODO.md）为内部文档，不随公开仓分发。
 
 论文原文关键段已核对(§2.2 子程序、§3.1 实现细节、§3 实验设置、附录 C/D)。
 
