@@ -9,9 +9,10 @@
 #    As-is = merge_clusters_by_distance  (论文式距离合并, 固定 K 语义)
 #    To-be = balanced_macro_clusters     (容量约束均衡, prod2 起生产路径)
 #  点 = 细簇(K_init=1000 kmeans 的簇), 大小 ∝ token, 位置 = 归一化质心的
-#  t-SNE 二维嵌入(孤岛外推出流形凸包 — t-SNE 不保全局距离, 高维中
-#  孤岛距流形 > τ), 分组 = 宏观簇边界 — 左图整条流形一圈(塌缩), 右图
-#  15 个均衡分片环。
+#  t-SNE 二维嵌入(原始输出, 零修正), 分组 = 宏观簇边界 — 左图整条流形
+#  一圈(塌缩; 孤岛 1% 不画圈), 右图 15 个均衡分片环(切片非天然聚类)。
+#  伴随输出 d14_merge_diag.png = 合并诊断曲线(merge_profile.json 数据,
+#  无投影无调整 — "最近邻距离全程未够到 τ"的硬证据, deck 附录用)。
 #
 #  用法:
 #    服务器(真实池; 注意 -o 放 run 目录根层, 别放 deck/ — make_deck
@@ -31,8 +32,10 @@
 # ═══════════════════════════════════════════════════════════════════════
 import argparse
 import glob
+import json
 import os
 import sys
+import tempfile
 
 import numpy as np
 
@@ -48,11 +51,10 @@ import matplotlib  # noqa: E402
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.patches import Ellipse, Polygon as MplPolygon  # noqa: E402
-from matplotlib.path import Path as MplPath  # noqa: E402
 from scipy.spatial import ConvexHull  # noqa: E402
 
 sys.path.insert(0, HERE)
-from reinforcement_charts import (BLUE, GRAY, NAVY, RED,  # noqa: E402
+from reinforcement_charts import (GRAY, NAVY, RED,  # noqa: E402
                                   setup_cjk_font, verify_layout)
 
 K_TARGET = 15
@@ -141,73 +143,53 @@ def embed_2d(nrm):
         from sklearn.manifold import TSNE
         emb = TSNE(n_components=2, init="pca", perplexity=30.0,
                    random_state=42).fit_transform(nrm)
-        return emb, ("位置 = t-SNE 二维(保邻域,距离无尺度;"
-                     "孤岛沿方向外推到流形外)")
+        return emb, "位置 = t-SNE 二维(保邻域,距离无尺度含义)"
     except ImportError:
         X = nrm - nrm.mean(0)
         _, _, Vt = np.linalg.svd(X, full_matrices=False)
         return X @ Vt[:2].T, "位置 = 归一化质心的 PCA 二维投影"
 
 
-def separate_islands(P, man_mask):
-    """孤岛外推:t-SNE 只保邻域、不保全局距离 — 高维中距流形 > τ 的
-    孤岛常被塞进主簇空隙/被巨簇边界罩住(评审:"13 个孤岛在大簇里面";
-    真实合并空间里它们从未被并入)。把落在流形凸包内的孤岛沿(质心→
-    孤岛)方向推到凸包外(留 12% 余量);挤在同一空隙的孤岛互相推开
-    (t-SNE 不保全局距离, 孤岛间距本身无尺度含义)。两面板共用同一
-    修正布局。返回 (P 修正副本, 外推个数)。"""
-    man = P[man_mask]
-    try:
-        hull = ConvexHull(man)
-    except Exception:
-        return P, 0
-    poly = MplPath(man[hull.vertices])
-    c = man.mean(0)
-
-    def _exit(p):
-        d = p - c
-        r0 = float(np.hypot(*d))
-        u = d / r0 if r0 > 1e-9 else np.array([1.0, 0.0])
-        lo, hi = 1.0, 4.0
-        while poly.contains_point(c + u * (r0 * hi)) and hi < 64:
-            hi *= 2.0
-        for _ in range(24):
-            mid = 0.5 * (lo + hi)
-            if poly.contains_point(c + u * (r0 * mid)):
-                lo = mid
-            else:
-                hi = mid
-        return c + u * (r0 * hi * 1.12)
-
-    out = P.copy()
-    idx = np.flatnonzero(~man_mask)
-    n = 0
-    for i in idx:
-        if poly.contains_point(out[i]):
-            out[i] = _exit(out[i])
-            n += 1
-    # 碰撞松弛: 同一空隙推出来的孤岛沿连线分开, 推回凸包则再次外推
-    if len(idx) > 1:
-        span = float(max(np.ptp(P[:, 0]), np.ptp(P[:, 1]), 1e-9))
-        sep = 0.055 * span
-        for _ in range(60):
-            Q = out[idx]
-            dd = np.linalg.norm(Q[:, None] - Q[None], axis=2)
-            np.fill_diagonal(dd, np.inf)
-            i, j = np.unravel_index(np.argmin(dd), dd.shape)
-            if dd[i, j] >= sep:
-                break
-            a, b = int(idx[i]), int(idx[j])
-            v = out[b] - out[a]
-            L = float(np.hypot(*v))
-            v = v / L if L > 1e-9 else np.array([1.0, 0.0])
-            push = 0.5 * (sep - dd[i, j]) + 0.01 * span
-            out[a] = out[a] - v * push
-            out[b] = out[b] + v * push
-            for q in (a, b):
-                if poly.contains_point(out[q]):
-                    out[q] = _exit(out[q])
-    return out, n
+def chart_merge_diag(prof, tau, out, src_note):
+    """附录硬证据:距离合并全程的最近邻距离曲线(数据 = merge_profile
+    .json,合并器自己的运行记录 — 无投影、无调整)。τ 线悬在曲线上方 =
+    合并从未被阈值叫停;一路并到簇数下限才停 → 塌缩是结构性的。"""
+    K = np.array([p["K"] for p in prof["profile"]], dtype=float)
+    d = np.array([p["closest_pair_dist"] for p in prof["profile"]])
+    kf = int(prof["K_final"])
+    fig = plt.figure(figsize=(13, 3.9))
+    ax = fig.add_axes([0.055, 0.175, 0.895, 0.60])
+    ax.plot(K, d, color=NAVY, lw=1.9, zorder=3)
+    ax.axhline(tau, color=RED, ls="--", lw=1.3, zorder=2)
+    ax.axhline(0.7, color=GRAY, ls=":", lw=1.0, zorder=2)
+    ax.axvline(kf, color=NAVY, lw=1.0, alpha=0.55, zorder=2)
+    ax.set_xlim(K.max() * 1.03, K.min() * 0.90)   # 左多右少 = 合并推进
+    ax.set_ylim(0, tau * 1.12)
+    ax.set_xlabel("簇数 K(左 → 右 = 合并推进)", fontsize=10.5, color=NAVY)
+    ax.set_ylabel("最近一对簇的距离", fontsize=10.5, color=NAVY)
+    ax.tick_params(labelsize=9.5, colors=NAVY)
+    ax.text(0.015, tau - 0.05, f"τ = {tau:g}(合并阈值)— 全程未触发",
+            transform=ax.get_yaxis_transform(), ha="left", va="top",
+            fontsize=10, color=RED)
+    ax.text(0.985, 0.06, f"K = {kf}:撞簇数下限才停(stop = "
+            f"{prof.get('stop_reason', 'floor')})", transform=ax.transAxes,
+            ha="right", va="bottom", fontsize=10, color=NAVY)
+    nk = prof.get("natural_K", {}).get("0.7")
+    if isinstance(nk, int):
+        ax.axvline(nk, color=GRAY, ls=":", lw=1.0, zorder=2)
+        ax.text(nk, tau * 1.06, f" natural_K(0.7) = {nk}",
+                ha="left", va="top", fontsize=9.5, color=GRAY)
+    fig.text(0.5, 0.955, "距离合并全程:最近邻距离从未够到 τ — 塌缩是结构性的",
+             ha="center", va="center", fontsize=13, fontweight="bold")
+    fig.text(0.5, 0.035, f"数据 = merge_profile.json(合并器运行记录,无投影、"
+             f"无调整);{src_note}", ha="center", va="center", fontsize=9,
+             color=GRAY)
+    ok = verify_layout(fig, "d14_diag")
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"  {'✓' if ok else '✗'} {out}"
+          + ("" if ok else "  (标签自检未过 — 贴回给维护者)"))
+    return ok
 
 
 def main():
@@ -240,8 +222,14 @@ def main():
                            minlength=len(cen)).astype(np.float64)
 
     print(f"[3/3] 跑两种划分(生产函数, K={args.K})…", flush=True)
+    fd, prof_path = tempfile.mkstemp(suffix=".json", prefix="d14prof_")
+    os.close(fd)
     _, _, dist_map = merge_clusters_by_distance(
-        labels, cen, merge_distance=args.tau, target_K=args.K)
+        labels, cen, merge_distance=args.tau, target_K=args.K,
+        profile_path=prof_path)
+    with open(prof_path) as f:
+        prof = json.load(f)
+    os.unlink(prof_path)
     _, _, bal_map = balanced_macro_clusters(
         labels, cen, token_counts=tok, K=args.K, slack=args.slack)
 
@@ -254,24 +242,19 @@ def main():
     print(f"    均衡划分: K={len(np.unique(bm))}, 最大簇 {b_sh.max():.1%}"
           f"(上限 {(1 + args.slack) / args.K:.1%})")
 
-    # ── 出图: 二维嵌入(t-SNE 优先; 孤岛外推出流形凸包, 见
-    #    separate_islands), 点 = 细簇(单一浅色), 分组靠圈/环, 不靠
-    #    颜色堆砌 ──
+    # ── 出图: 二维嵌入(t-SNE 优先, 原始输出零修正), 点 = 细簇(单一
+    #    浅色), 分组靠圈/环, 不靠颜色堆砌 ──
     setup_cjk_font()
     nrm = cen / np.clip(np.linalg.norm(cen, axis=1, keepdims=True), 1e-9, None)
     P, embed_note = embed_2d(nrm)
     giant = int(np.unique(dm)[np.argmax(d_sh)])
-    P, n_push = separate_islands(P, dm == giant)
-    if n_push:
-        print(f"    孤岛外推: {n_push} 个细簇推出流形凸包(t-SNE 会把它们"
-              f"塞进主簇空隙, 高维中它们在流形外)", flush=True)
     span = float(max(np.ptp(P[:, 0]), np.ptp(P[:, 1]), 1e-9))
     sizes = 3 + 22 * np.sqrt(fine_tok / fine_tok.max())
     fig = plt.figure(figsize=(13, 4.05))
 
-    # 左 As-is: 巨簇边界 = 流形凸包(紧贴实际跨度; 协方差椭圆会把周边
-    #   孤岛也罩进去 — 评审"13 个孤岛在大簇里面"的另一来源), 孤岛蓝圈
-    #   已保证在凸包外
+    # 左 As-is: 巨簇边界 = 流形凸包(紧贴实际跨度); 孤岛(1%)不画圈 —
+    #   画圈会把注意力引到"这几个点该不该并"上, 而这无关紧要(并进
+    #   去也只是 98.9% → 99.0%); 要害是 15 个旋钮只剩 1 个
     ax = fig.add_axes([0.035, 0.13, 0.42, 0.70])
     ax.set_axis_off()
     ax.set_xticks([])
@@ -283,17 +266,14 @@ def main():
     ax.add_patch(MplPolygon(man[ConvexHull(man).vertices], closed=True,
                             facecolor=(0.99, 0.93, 0.92, 0.55),
                             edgecolor=RED, lw=1.6, zorder=2))
-    isl = [k for k in np.unique(dm) if k != giant]
-    for k in isl:
-        blob_ellipse(ax, P[dm == k], BLUE, span, lw=1.1,
-                     fc=(0.92, 0.95, 1.0, 0.50), z=4)
-    isl_sh = float(d_sh[np.isin(np.unique(dm), isl)].sum()) if isl else 0.0
+    isl_n = len(np.unique(dm)) - 1
+    isl_sh = 1.0 - float(d_sh.max())
     ax.text(0.5, 0.985, f"As-is:论文式距离合并 — 最大簇 {d_sh.max():.1%}",
             ha="center", va="top", transform=ax.transAxes,
             fontsize=11.5, fontweight="bold", color=RED)
-    ax.text(0.5, 0.03, f"红圈 = 巨簇({len(np.flatnonzero(dm == giant))} 个"
-            f"细簇并成 1 簇,{d_sh.max():.1%})· 蓝圈 = 孤岛 {len(isl)} 簇"
-            f"({isl_sh:.1%})",
+    ax.text(0.5, 0.03, f"红框 = 巨簇({len(np.flatnonzero(dm == giant))} 个"
+            f"细簇并成 1 簇,{d_sh.max():.1%})· 孤岛 {isl_n} 簇"
+            f"({isl_sh:.1%})— 旋钮只剩 1 个",
             ha="center", va="bottom", transform=ax.transAxes,
             fontsize=9, color=RED)
 
@@ -312,7 +292,7 @@ def main():
     for i, k in enumerate(np.unique(bm)):
         col = cmap(i % 20)
         pts = P[bm == k]
-        if len(pts) > 25:  # 稳健环: 剔除离切片中位最远 10%(外推孤岛等)
+        if len(pts) > 25:  # 稳健环: 剔除离切片中位最远 10%(离群细簇)
             dd = np.hypot(*(pts - np.median(pts, axis=0)).T)
             pts = pts[dd <= np.quantile(dd, 0.90)]
         blob_ellipse(ax, pts, col, span, lw=1.2, n_sig=1.9)
@@ -324,14 +304,14 @@ def main():
     ax.text(0.5, 0.985, f"To-be:容量约束均衡 — 最大簇 {b_sh.max():.1%}",
             ha="center", va="top", transform=ax.transAxes,
             fontsize=11.5, fontweight="bold", color=NAVY)
-    ax.text(0.5, 0.03, f"同一批细簇切成大小相近的 {len(np.unique(bm))} 簇"
-            f"(上限 {(1 + args.slack) / args.K:.1%})— ◆ = 簇中心,每簇一个旋钮",
+    ax.text(0.5, 0.03, f"同一批细簇按容量切成大小相近的 {len(np.unique(bm))} 簇"
+            f"— 切片 ≠ 天然聚类;◆ = 簇中心,每簇一个旋钮",
             ha="center", va="bottom", transform=ax.transAxes,
             fontsize=9, color=NAVY)
 
     fig.text(0.5, 0.965, "同一个池,两种簇划分 — 细簇与合并均为真实运行结果",
              ha="center", va="center", fontsize=13, fontweight="bold")
-    fig.text(0.5, 0.02, "点 = 细簇(大小 ∝ token),虚线圈 = 宏观簇边界"
+    fig.text(0.5, 0.02, "点 = 细簇(大小 ∝ token),圈 = 宏观簇边界"
              "(◆ = 簇中心);" + embed_note + ";" + src_note,
              ha="center", va="center", fontsize=9, color=GRAY)
     ok = verify_layout(fig, "d14_real")
@@ -339,7 +319,10 @@ def main():
     plt.close(fig)
     print(f"  {'✓' if ok else '✗'} {args.out}"
           + ("" if ok else "  (标签自检未过 — 贴回给维护者)"))
-    return 0 if ok else 1
+    diag_out = os.path.join(os.path.dirname(os.path.abspath(args.out)),
+                            "d14_merge_diag.png")
+    ok2 = chart_merge_diag(prof, args.tau, diag_out, src_note)
+    return 0 if (ok and ok2) else 1
 
 
 if __name__ == "__main__":

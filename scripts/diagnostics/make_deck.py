@@ -47,7 +47,7 @@ CW = PAGE_W - 2 * ML                   # 内容宽
 
 CHARTS_USED = ["search_convergence.png", "proxy_target_consistency.png",
                "recipe_distribution.png", "cluster_content_map.png",
-               "reinforcement_d14_cluster_balance.png",
+               "d14_real_preview.png", "d14_merge_diag.png",
                "reinforcement_d8_dual_signal.png",
                "reinforcement_d8_scoring_snr.png",
                "reinforcement_d19_extrapolation.png",
@@ -55,15 +55,17 @@ CHARTS_USED = ["search_convergence.png", "proxy_target_consistency.png",
                "cluster_alpha_vs_score.png"]
 
 # deck 专属 (reinforcement 系图, 中文, 由 reinforcement_charts.py 写进
-# 汇报包目录); 其余 3 张 = report_charts 实验结果图 (英文, 住 run 目录,
-# 权威源在 run 目录 — 每次构建重新复制进汇报包, 不会用到旧副本;
-# cluster_alpha_vs_score = v10.28 附录新增: 逐簇 α-得分小倍数图,
-# 辅助说明"簇配比与模型能力相关")。
+# 汇报包目录); 其余 = run 目录产物 (英文实验图 + v10.31 起的 d14_real_
+# preview / d14_merge_diag, 由 d14_real_preview.py 写在 run 目录根层,
+# 每次构建重新复制进汇报包); cluster_alpha_vs_score = v10.28 附录新增:
+# 逐簇 α-得分小倍数图, 辅助说明"簇配比与模型能力相关"。
+# v10.31: p7 手绘示意图(reinforcement_d14_cluster_balance) 退出 deck,
+# 换成真实数据版 d14_real_preview(评审定夺); 手绘图函数保留在
+# reinforcement_charts.py 备查。
 # v10.4: arms_main_results(主结果页删, 数字全在结论先行表+总表) 与
 # cluster_alpha_vs_score(专业向小倍数图, 换成领导友好的配比全景) 不再
 # 进汇报包, 仍是 run 目录的实验产物
-DECK_OWNED = {"reinforcement_d14_cluster_balance.png",
-              "reinforcement_d8_dual_signal.png",
+DECK_OWNED = {"reinforcement_d8_dual_signal.png",
               "reinforcement_d8_scoring_snr.png",
               "reinforcement_d19_extrapolation.png",
               "recipe_distribution.png",
@@ -95,7 +97,14 @@ def resolve_chart(dirs, name):
                 return p
     return None
 
-# ── 幻灯片文案 (v10.30 评审反馈两条 — ① p7 真实数据预览图孤岛不
+# ── 幻灯片文案 (v10.31 评审定稿三条 — ① p7 手绘示意图换成真实数据版
+#    d14_real_preview(撤孤岛圈 + 撤外推,布局回到原始 t-SNE;左图讲
+#    "旋钮只剩 1 个", 右图点明"切片 ≠ 天然聚类"); p7 备注扩:孤岛
+#    为什么没被并(距离 > τ 规则内合法)+ 判定标准 = 旋钮不是"并错了"
+#    + 图/表双口径(重放 98.9% vs prod1 实测 99.05%)。② 新增附录
+#    p21"塌缩的运行记录" = d14_merge_diag(最近邻距离 vs K 曲线,
+#    merge_profile.json 数据, 无投影无调整的硬证据)。③ deck 21 页。
+#    v10.30 评审反馈两条 — ① p7 真实数据预览图孤岛不
 #    显眼(灰点线圈): 改蓝色实线圈 + 浅蓝底, 左图脚注标注孤岛簇数/
 #    占比(见 d14_real_preview.py, 属预览脚本不改 deck)。② 问: p7 有
 #    没有说明巨簇成因 — 原先仅 takeaway 一句"根因 = 连续流形", 现
@@ -429,10 +438,15 @@ SLIDES = [
                  "一个簇。结构性塌缩、调参救不了:τ 降到 0.7 时确实能在 K=49 "
                  "自然停下,但要凑满 15 簇仍得强行继续并(prod1 实测 K=14/21/24/"
                  "32,最大簇全是 ~99%)。真实池重放对照:距离合并 98.9% vs "
-                 "容量约束均衡 7.7%"),
-          emph=[2], y=1.72, row_h=0.44, size=12,
-          widths=[0.19, 0.25, 0.19, 0.12, 0.25],
-          image="reinforcement_d14_cluster_balance.png"),
+                 "容量约束均衡 7.7%。孤岛(14 簇,1.1%)为什么没被并:距离 > τ,"
+                 "合并在规则内『合法』— 塌缩的判定标准不是『并错了』,而是"
+                 "『并完后 15 个旋钮只剩 1 个』;孤岛救不回配比。图上口径 = "
+                 "真实池重放(K1000 缓存,98.9%);表上口径 = prod1 实测(99.05%,"
+                 "剪枝后)— 两口径并见,数字以表为准。图的二维位置 = t-SNE "
+                 "示意(保邻域、距离无尺度),孤岛未画圈"),
+           emph=[2], y=1.72, row_h=0.44, size=12,
+           widths=[0.19, 0.25, 0.19, 0.12, 0.25],
+           image="d14_real_preview.png"),
     dict(kind="table_image", title="四处机制改进优化 ②：评分双信号 — 解决相变区左侧、精度分辨不开配比",
          order_arrow=True,
          takeaway="435M 代理 + 少量中训练 — 数学基准在相变区左侧,得分看不出配比好坏;引入连续平稳的损失补位,但永不接管(w ≥ 0.5)",
@@ -652,7 +666,15 @@ SLIDES = [
          caption="读法:每格 = 一个语义簇(x = 该簇权重,y = 代理得分,虚线 = 线性拟合);"
                  "rho = Spearman 相关 — 绿 = 多喂升分(搜索重仓方向),红 = 降分,灰 = 方向不明;"
                  "图 = report_charts.py 实验产物(英文原样)"),
- ]
+    dict(kind="image", title="附录：塌缩的运行记录 — 距离合并全程未够到阈值",
+         takeaway="最近一对簇的距离 0.12 → 0.76,始终低于 τ = 0.9:合并从未被阈值叫停,"
+                  "一路撞到簇数下限 K=15 才停 — 塌缩是结构性的,调参救不了",
+         image="d14_merge_diag.png",
+         caption="读法:x = 合并进程中的簇数(左多右少),y = 当前最近一对簇的质心距离;"
+                 "红线 = τ = 0.9(全程未触发);灰点线 = τ′ = 0.7 — 即使收紧阈值,也要并到 "
+                 "natural_K = 49 才自然停,凑满 15 簇仍须强并;"
+                 "图 = 合并器运行记录(merge_profile.json,真实池重放),无投影、无调整"),
+  ]
 
 
 def png_size(path):
