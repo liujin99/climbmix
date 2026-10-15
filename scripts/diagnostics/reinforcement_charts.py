@@ -418,6 +418,9 @@ def chart_d8_dual(out_dir):
     #   下降(先快后慢), 贴近真实 loss 曲线形态。
     # v10.24: 公式与 p9 公式卡同步改正体(\mathrm 全覆盖) — 两页同一套
     #   符号, 风格一致。
+    # v10.26: 与 chart_d8 同套四级字号(评审"字一会大一会小")— 总标题
+    #   13.5→13、面板标题 12→11.5、公式 14→11.5(= p9 公式卡)、刻度
+    #   9→10、精度/损失标签 9.5→10、小注 9.5→9、图注 8→9。
     rng = np.random.default_rng(11)
     fig = plt.figure(figsize=(13, 3.4))
 
@@ -432,7 +435,7 @@ def chart_d8_dual(out_dir):
     ax.scatter(xs, np.clip(ys, -0.02, 0.70), s=16, color=RED, alpha=0.75,
                zorder=4)
     ax.text(0.775, 0.665, "相变跳变区\n(代理 + 少量中训练还没到)",
-            ha="center", va="top", fontsize=9.5, color=RED,
+            ha="center", va="top", fontsize=9, color=RED,
             linespacing=1.5, zorder=4)
     ax.annotate("不同配比的代理得分:几乎重叠\n→ 分辨不出配比好坏",
                 xy=(0.40, 0.075), xytext=(0.60, 0.30), fontsize=10,
@@ -443,9 +446,9 @@ def chart_d8_dual(out_dir):
     ax.set_xlim(0, 1)
     ax.set_ylim(-0.05, 0.72)
     ax.set_xticks([])
-    ax.set_yticks([0, 0.3, 0.6], ["0", "30%", "60%"], fontsize=9)
+    ax.set_yticks([0, 0.3, 0.6], ["0", "30%", "60%"], fontsize=10)
     ax.set_xlabel("能力驱动量(模型规模 × 数学配比 × 数据量)", fontsize=10)
-    ax.set_title("为什么:相变区左侧,基准得分看不出配比好坏", fontsize=12,
+    ax.set_title("为什么:相变区左侧,基准得分看不出配比好坏", fontsize=11.5,
                  fontweight="bold")
 
     # 右 怎么做: 相变区之前 — 精度几乎不动, 损失缓慢下降 → 双信号混合
@@ -460,28 +463,28 @@ def chart_d8_dual(out_dir):
     ax.set_ylim(-1.5, 1.9)
     ax.set_xticks([])
     ax.set_yticks([])
-    ax.text(25.0, 0.42, "精度:几乎不动\n(相变区之前,区分度小)", fontsize=9.5,
+    ax.text(25.0, 0.42, "精度:几乎不动\n(相变区之前,区分度小)", fontsize=10,
             color=TEAL, fontweight="bold", va="center", linespacing=1.4,
             zorder=4)
-    ax.text(25.0, -0.52, "损失:平滑下降\n(先快后慢,连续可分)", fontsize=9.5,
+    ax.text(25.0, -0.52, "损失:平滑下降\n(先快后慢,连续可分)", fontsize=10,
             color=NAVY, fontweight="bold", va="center", linespacing=1.4,
             zorder=4)
     ax.text(19.75, 1.60,
             r"$\mathrm{score} = \mathrm{w} \cdot \mathrm{acc}_z + (1-\mathrm{w}) \cdot \mathrm{nll}_z$",
-            ha="center", va="center", fontsize=14, color=NAVY, zorder=4)
+            ha="center", va="center", fontsize=11.5, color=NAVY, zorder=4)
     ax.text(11.5, -1.32, "w ≥ 0.5,按实测信噪比定(见下页)",
-            ha="center", fontsize=9.5, color=DGRAY, zorder=4)
+            ha="center", fontsize=9, color=DGRAY, zorder=4)
     ax.set_xlabel("候选配比(按序)", fontsize=10)
-    ax.set_title("怎么做:相变区之前 — 精度几乎不动、损失缓慢下降", fontsize=12,
+    ax.set_title("怎么做:相变区之前 — 精度几乎不动、损失缓慢下降", fontsize=11.5,
                  fontweight="bold")
 
     fig.text(0.5, 0.95, "评分双信号:为什么(左)· 怎么做(右)",
-             ha="center", va="center", fontsize=13.5, fontweight="bold")
+             ha="center", va="center", fontsize=13, fontweight="bold")
     fig.text(0.5, 0.035, "左 = 相变示意(Phase Transitions, NeurIPS\'25 "
              "Spotlight — 阈值左侧能力缓慢积累、得分不动);右 = 信号轨迹示意"
              "(acc_z、nll_z = 精度、损失的标准分;nll_z 取负 — 损失降 → "
              "nll_z 升);100 题 speedrun:SE ≈ ±4.6pt(实算)",
-             ha="center", va="center", fontsize=8, color=DGRAY)
+             ha="center", va="center", fontsize=9, color=DGRAY)
     ok = verify_layout(fig, "d8_dual")
     path = os.path.join(out_dir, "reinforcement_d8_dual_signal.png")
     fig.savefig(path, dpi=150)
@@ -512,35 +515,44 @@ def chart_d8(out_dir):
     #   (axes 0.30/0.50 → 0.28/0.54) — 四条公式的核心字一律 12pt 全
     #   尺寸,仅真上下标缩小。② 备注补"为什么两个 σ 的算法不一样"
     #   (σ²_noise 二项闭式解 vs σ²_between 无模型只能实测,见 make_deck)。
+    # v10.26: 评审反馈(评审"字一会大一会小,难受")— 全图改严格四级字号,
+    #   同角色同字号,左右图/公式卡/脚注对齐: 13 粗=总标题; 11.5 粗=三个
+    #   面板标题(卡标题 12→11.5), 公式 12→11.5(与 d8_dual 公式一致);
+    #   10=正文数据(基准名 9→10、信噪比数字 9.5→10、全部刻度、柱值
+    #   标签 9→10); 9=注释(柱内 pt 值 8→9、图例 8.5→9、符号行 8→9)。
+    #   左板 x 0.078→0.085(基准名放大让位); 公式卡五元素重排。
     fig = plt.figure(figsize=(13, 3.4))
 
-    # 左 问题: 逐基准 真信号 vs 抽样噪声 (SNR 降序, 上=响)
-    ax = fig.add_axes([0.078, 0.30, 0.225, 0.50])
+    # 左 问题: 逐基准 真信号 vs 抽样噪声 (SNR 降序, 上=响) — v10.26:
+    #   柱内 pt 值改右侧三列(信号/噪声/信噪比) — 9pt 柱内标签在信号≈
+    #   噪声的行(mmlu_stem 0.99/1.00、arc_challenge 1.57/1.91)垂直
+    #   重叠, 列式排版永不打架; 列头彩色(信号 TEAL/噪声 RED)替代图例。
+    ax = fig.add_axes([0.085, 0.30, 0.225, 0.50])
     n = len(D8_SNR)
     for i, (bench, sig, noi, snr) in enumerate(D8_SNR):
         y = n - 1 - i
         ax.barh(y + 0.20, sig, height=0.34, color=TEAL, zorder=3)
         ax.barh(y - 0.20, noi, height=0.34, color=RED, zorder=3)
-        ax.text(sig + 0.0006, y + 0.20, f"{sig * 100:.2f}pt", va="center",
-                fontsize=8, color=DGRAY, zorder=4)
-        ax.text(noi + 0.0006, y - 0.20, f"{noi * 100:.2f}pt", va="center",
-                fontsize=8, color=DGRAY, zorder=4)
-        ax.text(0.0508, y, f"{snr:.2f}", va="center", ha="left",
-                fontsize=9.5, fontweight="bold",
+        ax.text(0.0595, y, f"{sig * 100:.2f}", va="center", ha="right",
+                fontsize=9, color=DGRAY, zorder=4)
+        ax.text(0.0675, y, f"{noi * 100:.2f}", va="center", ha="right",
+                fontsize=9, color=DGRAY, zorder=4)
+        ax.text(0.0685, y, f"{snr:.2f}", va="center", ha="left",
+                fontsize=10, fontweight="bold",
                 color=TEAL if snr >= 1.0 else RED, zorder=4)
-    ax.axvline(0.0495, color=GRAY, lw=0.7, ls="--", zorder=1)
-    ax.text(0.0508, n - 1 + 0.66, "信噪比", ha="left", va="center",
+    ax.axvline(0.0510, color=GRAY, lw=0.7, ls="--", zorder=1)
+    ax.text(0.0595, n - 1 + 0.66, "信号", ha="right", va="center",
+            fontsize=9, fontweight="bold", color=TEAL, zorder=4)
+    ax.text(0.0675, n - 1 + 0.66, "噪声", ha="right", va="center",
+            fontsize=9, fontweight="bold", color=RED, zorder=4)
+    ax.text(0.0685, n - 1 + 0.66, "信噪比", ha="left", va="center",
             fontsize=9, fontweight="bold", color=DGRAY, zorder=4)
-    ax.set_xlim(0, 0.062)
+    ax.set_xlim(0, 0.080)
     ax.set_ylim(-0.55, n - 1 + 0.95)
-    ax.set_yticks(range(n - 1, -1, -1), [r[0] for r in D8_SNR], fontsize=9)
+    ax.set_yticks(range(n - 1, -1, -1), [r[0] for r in D8_SNR], fontsize=10)
     ax.set_xticks([])
-    ax.set_title("问题:各基准的真信号 vs 抽样噪声", fontsize=11.5,
+    ax.set_title("问题:各基准的真信号 vs 抽样噪声(pt)", fontsize=11.5,
                  fontweight="bold")
-    ax.legend(handles=[Patch(color=TEAL, label="真信号:候选间真实差异"),
-                        Patch(color=RED, label="抽样噪声:题量决定的标准误")],
-               loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=2,
-               fontsize=8.5, frameon=False)
 
     # 中 做法: 公式卡 (话语权按信噪比分配) — v10.24: 四条公式统一
     #   12pt/NAVY/正体(评审"字体不一致" — 斜体变量与正体函数名混排、
@@ -552,20 +564,20 @@ def chart_d8(out_dir):
         (0.02, 0.03), 0.96, 0.94, transform=ax.transAxes,
         boxstyle="round,pad=0.02,rounding_size=0.04",
         facecolor="#EDF5F6", edgecolor="#9DC8CC", lw=1.0, zorder=1))
-    ax.text(0.5, 0.90, "做法:话语权按信噪比", ha="center", va="center",
-            fontsize=12, fontweight="bold", color=NAVY, zorder=3)
-    ax.text(0.5, 0.735,
+    ax.text(0.5, 0.895, "做法:话语权按信噪比", ha="center", va="center",
+            fontsize=11.5, fontweight="bold", color=NAVY, zorder=3)
+    ax.text(0.5, 0.73,
             r"$\mathrm{w} = \mathrm{clip}\left(\dfrac{1+\mathrm{f}}{2},\; 0.5,\; 1\right)$",
-            ha="center", va="center", fontsize=12, color=NAVY, zorder=3)
-    ax.text(0.5, 0.55,
+            ha="center", va="center", fontsize=11.5, color=NAVY, zorder=3)
+    ax.text(0.5, 0.54,
             r"$\mathrm{f} = 1 - \mathrm{\sigma}^2_{\mathrm{noise}} \,/\, \mathrm{\sigma}^2_{\mathrm{between}}$",
-            ha="center", va="center", fontsize=12, color=NAVY, zorder=3)
-    ax.text(0.5, 0.34,
+            ha="center", va="center", fontsize=11.5, color=NAVY, zorder=3)
+    ax.text(0.5, 0.33,
             r"$\mathrm{\sigma}^2_{\mathrm{noise}} = \dfrac{\mathrm{p}\,(1-\mathrm{p})}{\mathrm{K}_b\,(1-\mathrm{c}_b)^2}$",
-            ha="center", va="center", fontsize=12, color=NAVY, zorder=3)
-    ax.text(0.5, 0.125,
+            ha="center", va="center", fontsize=11.5, color=NAVY, zorder=3)
+    ax.text(0.5, 0.12,
             r"$\mathrm{\sigma}^2_{\mathrm{between}} = \mathrm{Var}_b(\mathrm{acc})$",
-            ha="center", va="center", fontsize=12, color=NAVY, zorder=3)
+            ha="center", va="center", fontsize=11.5, color=NAVY, zorder=3)
 
     # 右 结果: gsm8k — 第3轮实验 误加权 vs 第5轮实验 改进后 (赢家 vs uniform)
     ax = fig.add_axes([0.615, 0.30, 0.355, 0.50])
@@ -575,16 +587,16 @@ def chart_d8(out_dir):
         ax.bar(gx + 0.17, uni, width=0.30, color=GRAY, zorder=3)
         tag = " (-56%)" if gi == 0 else " (2.9×)"
         ax.text(gx - 0.17, win + 0.012, f"{win * 100:.1f}%{tag}", ha="center",
-                va="bottom", fontsize=9, fontweight="bold", color=wc,
+                va="bottom", fontsize=10, fontweight="bold", color=wc,
                 zorder=4)
         ax.text(gx + 0.17, uni + 0.012, f"{uni * 100:.1f}%", ha="center",
-                va="bottom", fontsize=9, fontweight="bold", color=DGRAY,
+                va="bottom", fontsize=10, fontweight="bold", color=DGRAY,
                 zorder=4)
     ax.set_xticks([1.0, 2.55], [r[0] for r in D8_GSM8K], fontsize=10)
     ax.set_xlim(0.4, 3.15)
     ax.set_ylim(0, 0.42)
     ax.set_yticks([0, 0.1, 0.2, 0.3, 0.4],
-                  ["0", "10%", "20%", "30%", "40%"], fontsize=9)
+                  ["0", "10%", "20%", "30%", "40%"], fontsize=10)
     ax.grid(axis="y", alpha=0.3)
     ax.set_axisbelow(True)
     ax.set_title("结果:gsm8k — 赢家 vs uniform", fontsize=11.5,
@@ -593,7 +605,7 @@ def chart_d8(out_dir):
                        Patch(color=TEAL, label="第5轮实验赢家(改进后)"),
                        Patch(color=GRAY, label="uniform 对照")],
               loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=3,
-              fontsize=8.5, frameon=False)
+              fontsize=9, frameon=False)
 
     fig.text(0.5, 0.95, "评分按信噪比(SNR)加权:问题(左)· 做法(中)· 结果(右)",
               ha="center", va="center", fontsize=13, fontweight="bold")
@@ -603,7 +615,7 @@ def chart_d8(out_dir):
              " · $\\mathrm{\\sigma}^2_{\\mathrm{noise}}$ = 抽样噪声方差(题量决定)"
              " · $\\mathrm{\\sigma}^2_{\\mathrm{between}}$ = 候选间实测分的方差"
              " · $\\mathrm{f}$ = 信噪比(接近 1 = 信号远大于噪声)",
-             ha="center", va="center", fontsize=8, color=DGRAY)
+             ha="center", va="center", fontsize=9, color=DGRAY)
     ok = verify_layout(fig, "d8")
     path = os.path.join(out_dir, "reinforcement_d8_scoring_snr.png")
     fig.savefig(path, dpi=150)
