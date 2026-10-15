@@ -84,8 +84,11 @@ Key findings:
 - **Generative reasoning is still the engine** — gsm8k 0.301 (10× base,
   2.9× uniform) and math 0.058 (14.5× base); all four multiple-choice
   tasks statistically flat. The winning recipe puts 80% of its weight on
-  one short-document cluster (5.5% of the pool, 389 tok/doc — a 14.6×
-  upweight), and the top-2 winner tie differs almost only in a C10↔C0
+  the arithmetic-word-problems cluster (C10 — 5.5% of the pool,
+  389 tok/doc, a 14.6× upweight; clusters named by sampled inspection,
+  [Appendix E](docs/experiment_prod5.md)), 88.5% on the two math
+  clusters combined — an interpretable match to where the gains landed.
+  The top-2 winner tie differs almost only in a C10↔C0
   swap: the hot region is robust to local perturbation.
 
 Cross-round trajectory (CLIMB vs uniform, same-pool budget-matched):
@@ -164,6 +167,24 @@ with evidence chains: **[docs/KEY_FINDINGS.md](docs/KEY_FINDINGS.md)**.
 6. **Rigor is a machine, not a virtue** — seed pairs, remote-anchor
    reconciliation (4-decimal), protocol freeze windows, and data
    cross-accounting ran every round, zero incidents.
+7. **Check pool structure before running CLIMB on a narrow-domain pool**
+   — our 116M-doc STEM pool is one continuous manifold (99% of tokens),
+   and the paper's distance merging chain-collapsed at every K tried
+   (max-cluster share 99.0/98.5/98.3/97.5% at K=14/21/24/32, with
+   912/912 merges individually "legal" — structural, not tunable). The
+   paper's 800B general web pool has domain boundaries to cut on;
+   law/medicine/code-style narrow pools don't. We partition by
+   capacity-constrained balance instead
+   ([paper_deviations.md D14](docs/paper_deviations.md)).
+8. **Don't let quality scores steer budgets unvalidated** — the winning
+   recipe bet 80% on the *lowest*-quality-scoring of the three math
+   clusters the top recipes actually loaded, while the arm that bet on
+   the highest-scoring one halved its math score. A caution, not a law:
+   our scorer may simply be miscalibrated for mid-training value (prod5
+   ran with quality filtering off). The transferable rule: validate any
+   quality signal against measured mixtures first — same-format short
+   drills were useless in chemistry and decisive in arithmetic; domain,
+   not "text quality", carried the value.
 
 ## Algorithm Pipeline
 
@@ -227,6 +248,14 @@ fleet. See [Results](#results--round-reports).
 - **Stream-based mixing**: `stream_texts_uniform` + `endless_generator`, memory-efficient
 - **Val split convention**: last `shard_*.parquet` is validation (held out from train, DDP row-group safe)
 - **STEM benchmark**: `--eval-benchmarks=stem` → CSV "STEM" row parsed as `stem_metric`
+- **SNR-weighted dual-signal objective** ([D8](docs/paper_deviations.md)):
+  accuracy is the primary signal, held-out NLL secondary with weight
+  `w = clip((1+f)/2, 0.5, 1)` — loss supplements but never takes over;
+  `f = 1 − σ²_noise/σ²_between` is measured per benchmark on the live
+  fleet (zero hand-set weights). Why measured: a prior-based noise
+  estimate once over-estimated gsm8k noise ~20×, zero-weighted the
+  strongest signal, and the search silently flipped to pure-NLL ranking
+  ([scoring_metric_design.md](docs/scoring_metric_design.md))
 - **Annealing semantics**: lr_scale=1.0, warmup=0.0, warmdown=0.9 (CLIMB = annealing, not re-warmup)
 - **NPU support**: `device_type=npu`, embedding tries `torch_npu` first, fallback to CPU (192 threads)
 - **Self-contained**: `get_model_info.py` + `mix_general_data.py` in `scripts/`, no external repo dependency

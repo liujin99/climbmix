@@ -375,6 +375,31 @@ RUN_DIR/report.md §3）
 - 发射：launch_env.json / remote_config.json / .code_drift.json /
   .done_fleet
 
+**E. 15 语义簇命名表**（§2b 细鉴 v1.0.4 定稿；英文对照 2026-10-15 补）
+
+逐簇 50 篇抽样 + 对比 IDF 关键词命名（零 NPU、seed 固定可复现；完整
+关键词与样本摘录 = 服务器 cluster_semantics.md）；C10 勘误史与方法论见
+记录沿革 v1.0.4。climb α 列 = 终选配比（C10 0.8036 / C0 0.0814，其余
+13 簇 0.0088 地板）；数学相关簇置前。
+
+| 簇 | 命名（中 / EN） | climb α |
+|---|---|---|
+| C10 | 算术应用题 / arithmetic word problems | **0.8036**（池占比 5.5%，14.6×） |
+| C0 | 形式数学解题 / formal math solutions | 0.0814 |
+| C6 | 代数与数论长文 / algebra & number-theory long-form | 0.0088（cfg100 押注簇，质量分最高） |
+| C9 | 分数运算练习 / fraction-arithmetic drills | floor |
+| C8 | 高等数学论文 / advanced-math papers | floor |
+| C1 | 教学与实验长文 / teaching & lab long-form | floor |
+| C3 | 海洋与生态生物学 / marine & ecology biology | floor |
+| C4 | 材料化学综述 / materials-chemistry reviews | floor |
+| C7 | 化学常识概述 / chemistry common-sense overviews | floor |
+| C2 | SMILES 分子性质问答 / SMILES molecular QA | floor |
+| C5 | 粒子物理与宇宙学 / particle physics & cosmology | floor |
+| C12 | 凝聚态与量子光学 / condensed matter & quantum optics | floor |
+| C11 | 论坛问答与任务文本 / forum QA & task text | floor |
+| C13 | 材料计算问答 / computational-materials QA | floor |
+| C14 | 蛋白质与膜生化 / protein & membrane biochemistry | floor |
+
 ## 记录沿革
 
 - 2026-09-21 v0（预注册）：发射配置 + 判决问题 V1–V5 + gap/加冕规则 + 不改清单定稿。触发 = 用户裁决（E1 同 prod4 / E2 = 64,32,16 / 全新跑无注入 / 打磨收官后发射）。

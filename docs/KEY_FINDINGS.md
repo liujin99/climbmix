@@ -33,7 +33,7 @@
   top-k region consumption) was validated live in prod5 — the guard fired
   and its best-measured pick won the fleet.
 
-## Eight transferable design rules
+## Nine transferable design rules
 
 Condensed from experiment_prod4.md §6; each row's full evidence chain is in
 the source table.
@@ -48,6 +48,40 @@ the source table.
 | 6 | **Read arms by large-N / reproducible columns first** | gpqa (N=198) swings ±.03–.07 on a single seed and dominates composite noise; gsm8k and NLL columns are the reliable invariants |
 | 7 | **Pool supply constraints become active constraints at scale — and couple with mixture choice** | winner-cluster 20B oversampling ratio ≈ 2.6 vs cap 2; plan the policy before scaling budgets |
 | 8 | **Run a reproducibility machine every round** — seed pairs, remote-anchor reconciliation, protocol freeze windows, data cross-accounting | 4-decimal anchor matches, zero-incident rounds; every "weird number" so far was caught by the machine, not by luck |
+| 9 | **Measure per-benchmark noise, never assume it from priors — and floor the accuracy weight so NLL cannot take over** | a 0.25/K prior over-estimated gsm8k noise ~20× → w=0 → prod3's objective silently flipped to pure-NLL ranking → that round's winner cut gsm8k 0.119 → 0.052 at d28; with measured noise gsm8k earned the highest weight (0.93) and became the fleet's main score source |
+
+## Data-pool structure and data-quality findings
+
+Two findings about the pool itself, for anyone pointing CLIMB at a
+domain-specific corpus:
+
+- **Narrow-domain pools break distance merging — check pool structure
+  before search.** The 116M-doc STEM pool is a single continuous
+  manifold (99% of tokens) plus 13 format islands, so K-means +
+  distance-based merging chain-collapses at every K tried (max-cluster
+  share 99.0/98.5/98.3/97.5% at K=14/21/24/32; removing the floor
+  collapses to K=3/99.9%; 912/912 merges individually "legal" — no
+  threshold catches it). The paper's 800B general web pool has natural
+  domain boundaries for merging to cut on; law/medicine/code-style
+  narrow pools will not. Prevention: run a geometry diagnosis first
+  (fixed-K distance sweep + share profile), partition by
+  capacity-constrained balance (D14), and audit cluster semantics by
+  sampling — all 15 clusters were named by inspection
+  ([experiment_prod5.md](experiment_prod5.md) Appendix E), and what the
+  clusters actually contain is load-bearing for reading any recipe.
+- **Quality scores inverted against training value here — an
+  unvalidated signal, not a prior.** Among the three math clusters the
+  top recipes actually loaded (C10/C0/C6), the one the winner bet 80%
+  on has the *lowest* cluster-level quality scores (stem_relevance
+  3.88 / knowledge_value 3.65), while the arm that loaded the
+  highest-scoring cluster (4.45/4.07) halved its math score (2.60% vs
+  5.80%). Same-format short drills were useless in chemistry (floored)
+  and decisive in arithmetic (14.6× upweight): domain carried the
+  value, not "text quality". We report this as a caution about our
+  scorer, not a law about quality scores — the scorer may simply be
+  miscalibrated for mid-training value (prod5 in fact ran with quality
+  filtering off). The rule: validate any quality signal against
+  measured mixtures before it steers budgets.
 
 ## The predictor boundary (what the surrogate model can and cannot be trusted for)
 
