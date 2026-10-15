@@ -46,7 +46,6 @@ from climbmix.core.cluster_merge import (  # noqa: E402
 import matplotlib  # noqa: E402
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
-from matplotlib.colors import to_rgb  # noqa: E402
 from matplotlib.patches import Ellipse  # noqa: E402
 
 sys.path.insert(0, HERE)
@@ -106,7 +105,7 @@ def make_fixture():
         np.full(F_isl, 8_500, dtype=np.int64)])
     labels = np.repeat(np.arange(F_cont + F_isl), docs)
     return labels, cen.astype(np.float32), None, \
-        "本图 = 合成细簇(本地样式预览 — 塌缩/均衡机理相同, 数字非真实)"
+        "本图 = 合成细簇(本地样式预览,数字非真实)"
 
 
 def load_real(kmeans_glob, data_dir):
@@ -128,6 +127,22 @@ def load_real(kmeans_glob, data_dir):
                f"权重 = token")
     print(f"      labels={len(labels):,} docs, F={len(cen)}", flush=True)
     return labels, cen, tok, src
+
+
+def embed_2d(nrm):
+    """细簇质心 → 二维。优先 t-SNE:只保邻域结构,连续流形会摊成一条
+    "蛇"、容量切片成一串珠子;PCA 会把高维上分开的切片压成一团
+    (评审反馈"左图一个大圈、右图一堆重叠小圈"的根源 — 真实池在
+    PCA 前两维上是团圆的连续流形)。sklearn 缺席时退回 PCA。"""
+    try:
+        from sklearn.manifold import TSNE
+        emb = TSNE(n_components=2, init="pca", perplexity=30.0,
+                   random_state=42).fit_transform(nrm)
+        return emb, "位置 = t-SNE 二维(保邻域结构,距离无尺度含义)"
+    except ImportError:
+        X = nrm - nrm.mean(0)
+        _, _, Vt = np.linalg.svd(X, full_matrices=False)
+        return X @ Vt[:2].T, "位置 = 归一化质心的 PCA 二维投影"
 
 
 def main():
@@ -174,13 +189,11 @@ def main():
     print(f"    均衡划分: K={len(np.unique(bm))}, 最大簇 {b_sh.max():.1%}"
           f"(上限 {(1 + args.slack) / args.K:.1%})")
 
-    # ── 出图: 归一化质心 PCA 二维, 点 = 细簇(单一浅色), 分组靠虚线圈
+    # ── 出图: 二维嵌入(t-SNE 优先), 点 = 细簇(单一浅色), 分组靠虚线圈
     #    (2.2σ 协方差椭圆), 不靠颜色堆砌 ──
     setup_cjk_font()
     nrm = cen / np.clip(np.linalg.norm(cen, axis=1, keepdims=True), 1e-9, None)
-    X = nrm - nrm.mean(0)
-    _, _, Vt = np.linalg.svd(X, full_matrices=False)
-    P = X @ Vt[:2].T
+    P, embed_note = embed_2d(nrm)
     span = float(max(np.ptp(P[:, 0]), np.ptp(P[:, 1]), 1e-9))
     sizes = 3 + 22 * np.sqrt(fine_tok / fine_tok.max())
     fig = plt.figure(figsize=(13, 4.05))
@@ -207,7 +220,9 @@ def main():
             ha="center", va="bottom", transform=ax.transAxes,
             fontsize=9, color=RED)
 
-    # 右 To-be: 同一批细簇切成 15 个大小相近的簇, 每簇一个虚线圈
+    # 右 To-be: 同一批细簇切成 15 个大小相近的簇 — 每簇一圈(细虚线环,
+    #   不填色, 交叉相接时仍可辨) + 簇中心菱形锚点; 环必然沿流形相接:
+    #   切片是连续流形上的容量切分, 不是天然主题团(见发现③)
     ax = fig.add_axes([0.545, 0.13, 0.42, 0.70])
     ax.set_axis_off()
     ax.set_xticks([])
@@ -216,23 +231,27 @@ def main():
     cmap = plt.get_cmap("tab20")
     ax.scatter(P[:, 0], P[:, 1], s=sizes, color=GRAY, alpha=0.35, lw=0,
                zorder=3)
+    cents = []
     for i, k in enumerate(np.unique(bm)):
         col = cmap(i % 20)
-        blob_ellipse(ax, P[bm == k], col, span, lw=1.2,
-                     fc=(*to_rgb(col), 0.07))
+        blob_ellipse(ax, P[bm == k], col, span, lw=1.2, n_sig=1.9)
+        cents.append(P[bm == k].mean(0))
+    cents = np.array(cents)
+    ax.scatter(cents[:, 0], cents[:, 1], marker="D", s=46,
+               c=[cmap(i % 20) for i in range(len(cents))],
+               edgecolors="white", lw=0.7, zorder=6)
     ax.text(0.5, 0.985, f"To-be:容量约束均衡 — 最大簇 {b_sh.max():.1%}",
             ha="center", va="top", transform=ax.transAxes,
             fontsize=11.5, fontweight="bold", color=NAVY)
     ax.text(0.5, 0.03, f"同一批细簇切成大小相近的 {len(np.unique(bm))} 簇"
-            f"(上限 {(1 + args.slack) / args.K:.1%})— 每簇一个旋钮",
+            f"(上限 {(1 + args.slack) / args.K:.1%})— ◆ = 簇中心,每簇一个旋钮",
             ha="center", va="bottom", transform=ax.transAxes,
             fontsize=9, color=NAVY)
 
     fig.text(0.5, 0.965, "同一个池,两种簇划分 — 细簇与合并均为真实运行结果",
              ha="center", va="center", fontsize=13, fontweight="bold")
-    fig.text(0.5, 0.02, "点 = 细簇(大小 ∝ token,单一浅色),虚线圈 = 各宏观"
-             "簇的 2.2σ 协方差椭圆,位置 = 归一化质心的 PCA 二维投影;"
-             + src_note,
+    fig.text(0.5, 0.02, "点 = 细簇(大小 ∝ token),虚线圈 = 宏观簇边界"
+             "(◆ = 簇中心);" + embed_note + ";" + src_note,
              ha="center", va="center", fontsize=9, color=GRAY)
     ok = verify_layout(fig, "d14_real")
     fig.savefig(args.out, dpi=150)
