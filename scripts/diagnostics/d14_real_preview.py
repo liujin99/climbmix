@@ -49,7 +49,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.patches import Ellipse  # noqa: E402
 
 sys.path.insert(0, HERE)
-from reinforcement_charts import (GRAY, NAVY, RED,  # noqa: E402
+from reinforcement_charts import (BLUE, GRAY, NAVY, RED,  # noqa: E402
                                   setup_cjk_font, verify_layout)
 
 K_TARGET = 15
@@ -198,7 +198,8 @@ def main():
     sizes = 3 + 22 * np.sqrt(fine_tok / fine_tok.max())
     fig = plt.figure(figsize=(13, 4.05))
 
-    # 左 As-is: 巨簇一个红圈吞掉整条流形, 孤岛各自小灰圈 — 塌缩可见
+    # 左 As-is: 巨簇一个红圈吞掉整条流形, 孤岛各自蓝圈(实线 + 浅蓝底,
+    #   灰点线太不显眼) — 塌缩可见
     ax = fig.add_axes([0.035, 0.13, 0.42, 0.70])
     ax.set_axis_off()
     ax.set_xticks([])
@@ -209,14 +210,17 @@ def main():
                zorder=3)
     blob_ellipse(ax, P[dm == giant], RED, span, lw=1.6,
                  fc=(0.99, 0.93, 0.92, 0.55), z=2)
-    for k in np.unique(dm):
-        if k != giant:
-            blob_ellipse(ax, P[dm == k], GRAY, span, lw=0.9, ls=":", z=4)
+    isl = [k for k in np.unique(dm) if k != giant]
+    for k in isl:
+        blob_ellipse(ax, P[dm == k], BLUE, span, lw=1.1,
+                     fc=(0.92, 0.95, 1.0, 0.50), z=4)
+    isl_sh = float(d_sh[np.isin(np.unique(dm), isl)].sum()) if isl else 0.0
     ax.text(0.5, 0.985, f"As-is:论文式距离合并 — 最大簇 {d_sh.max():.1%}",
             ha="center", va="top", transform=ax.transAxes,
             fontsize=11.5, fontweight="bold", color=RED)
     ax.text(0.5, 0.03, f"红圈 = 巨簇({len(np.flatnonzero(dm == giant))} 个"
-            f"细簇链式并成 1 簇)· 点线小圈 = 孤岛 — 可用旋钮 ≈ 1",
+            f"细簇并成 1 簇,{d_sh.max():.1%})· 蓝圈 = 孤岛 {len(isl)} 簇"
+            f"({isl_sh:.1%})",
             ha="center", va="bottom", transform=ax.transAxes,
             fontsize=9, color=RED)
 
