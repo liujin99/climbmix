@@ -9,8 +9,9 @@
 #    As-is = merge_clusters_by_distance  (论文式距离合并, 固定 K 语义)
 #    To-be = balanced_macro_clusters     (容量约束均衡, prod2 起生产路径)
 #  点 = 细簇(K_init=1000 kmeans 的簇), 大小 ∝ token, 位置 = 归一化质心的
-#  PCA 二维投影, 颜色 = 宏观簇归属 — 左图整条流形一色(塌缩), 右图 15 色
-#  均衡分片。
+#  t-SNE 二维嵌入(孤岛外推出流形凸包 — t-SNE 不保全局距离, 高维中
+#  孤岛距流形 > τ), 分组 = 宏观簇边界 — 左图整条流形一圈(塌缩), 右图
+#  15 个均衡分片环。
 #
 #  用法:
 #    服务器(真实池; 注意 -o 放 run 目录根层, 别放 deck/ — make_deck
@@ -46,7 +47,9 @@ from climbmix.core.cluster_merge import (  # noqa: E402
 import matplotlib  # noqa: E402
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
-from matplotlib.patches import Ellipse  # noqa: E402
+from matplotlib.patches import Ellipse, Polygon as MplPolygon  # noqa: E402
+from matplotlib.path import Path as MplPath  # noqa: E402
+from scipy.spatial import ConvexHull  # noqa: E402
 
 sys.path.insert(0, HERE)
 from reinforcement_charts import (BLUE, GRAY, NAVY, RED,  # noqa: E402
@@ -138,11 +141,73 @@ def embed_2d(nrm):
         from sklearn.manifold import TSNE
         emb = TSNE(n_components=2, init="pca", perplexity=30.0,
                    random_state=42).fit_transform(nrm)
-        return emb, "位置 = t-SNE 二维(保邻域结构,距离无尺度含义)"
+        return emb, ("位置 = t-SNE 二维(保邻域,距离无尺度;"
+                     "孤岛沿方向外推到流形外)")
     except ImportError:
         X = nrm - nrm.mean(0)
         _, _, Vt = np.linalg.svd(X, full_matrices=False)
         return X @ Vt[:2].T, "位置 = 归一化质心的 PCA 二维投影"
+
+
+def separate_islands(P, man_mask):
+    """孤岛外推:t-SNE 只保邻域、不保全局距离 — 高维中距流形 > τ 的
+    孤岛常被塞进主簇空隙/被巨簇边界罩住(评审:"13 个孤岛在大簇里面";
+    真实合并空间里它们从未被并入)。把落在流形凸包内的孤岛沿(质心→
+    孤岛)方向推到凸包外(留 12% 余量);挤在同一空隙的孤岛互相推开
+    (t-SNE 不保全局距离, 孤岛间距本身无尺度含义)。两面板共用同一
+    修正布局。返回 (P 修正副本, 外推个数)。"""
+    man = P[man_mask]
+    try:
+        hull = ConvexHull(man)
+    except Exception:
+        return P, 0
+    poly = MplPath(man[hull.vertices])
+    c = man.mean(0)
+
+    def _exit(p):
+        d = p - c
+        r0 = float(np.hypot(*d))
+        u = d / r0 if r0 > 1e-9 else np.array([1.0, 0.0])
+        lo, hi = 1.0, 4.0
+        while poly.contains_point(c + u * (r0 * hi)) and hi < 64:
+            hi *= 2.0
+        for _ in range(24):
+            mid = 0.5 * (lo + hi)
+            if poly.contains_point(c + u * (r0 * mid)):
+                lo = mid
+            else:
+                hi = mid
+        return c + u * (r0 * hi * 1.12)
+
+    out = P.copy()
+    idx = np.flatnonzero(~man_mask)
+    n = 0
+    for i in idx:
+        if poly.contains_point(out[i]):
+            out[i] = _exit(out[i])
+            n += 1
+    # 碰撞松弛: 同一空隙推出来的孤岛沿连线分开, 推回凸包则再次外推
+    if len(idx) > 1:
+        span = float(max(np.ptp(P[:, 0]), np.ptp(P[:, 1]), 1e-9))
+        sep = 0.055 * span
+        for _ in range(60):
+            Q = out[idx]
+            dd = np.linalg.norm(Q[:, None] - Q[None], axis=2)
+            np.fill_diagonal(dd, np.inf)
+            i, j = np.unravel_index(np.argmin(dd), dd.shape)
+            if dd[i, j] >= sep:
+                break
+            a, b = int(idx[i]), int(idx[j])
+            v = out[b] - out[a]
+            L = float(np.hypot(*v))
+            v = v / L if L > 1e-9 else np.array([1.0, 0.0])
+            push = 0.5 * (sep - dd[i, j]) + 0.01 * span
+            out[a] = out[a] - v * push
+            out[b] = out[b] + v * push
+            for q in (a, b):
+                if poly.contains_point(out[q]):
+                    out[q] = _exit(out[q])
+    return out, n
 
 
 def main():
@@ -189,27 +254,35 @@ def main():
     print(f"    均衡划分: K={len(np.unique(bm))}, 最大簇 {b_sh.max():.1%}"
           f"(上限 {(1 + args.slack) / args.K:.1%})")
 
-    # ── 出图: 二维嵌入(t-SNE 优先), 点 = 细簇(单一浅色), 分组靠虚线圈
-    #    (2.2σ 协方差椭圆), 不靠颜色堆砌 ──
+    # ── 出图: 二维嵌入(t-SNE 优先; 孤岛外推出流形凸包, 见
+    #    separate_islands), 点 = 细簇(单一浅色), 分组靠圈/环, 不靠
+    #    颜色堆砌 ──
     setup_cjk_font()
     nrm = cen / np.clip(np.linalg.norm(cen, axis=1, keepdims=True), 1e-9, None)
     P, embed_note = embed_2d(nrm)
+    giant = int(np.unique(dm)[np.argmax(d_sh)])
+    P, n_push = separate_islands(P, dm == giant)
+    if n_push:
+        print(f"    孤岛外推: {n_push} 个细簇推出流形凸包(t-SNE 会把它们"
+              f"塞进主簇空隙, 高维中它们在流形外)", flush=True)
     span = float(max(np.ptp(P[:, 0]), np.ptp(P[:, 1]), 1e-9))
     sizes = 3 + 22 * np.sqrt(fine_tok / fine_tok.max())
     fig = plt.figure(figsize=(13, 4.05))
 
-    # 左 As-is: 巨簇一个红圈吞掉整条流形, 孤岛各自蓝圈(实线 + 浅蓝底,
-    #   灰点线太不显眼) — 塌缩可见
+    # 左 As-is: 巨簇边界 = 流形凸包(紧贴实际跨度; 协方差椭圆会把周边
+    #   孤岛也罩进去 — 评审"13 个孤岛在大簇里面"的另一来源), 孤岛蓝圈
+    #   已保证在凸包外
     ax = fig.add_axes([0.035, 0.13, 0.42, 0.70])
     ax.set_axis_off()
     ax.set_xticks([])
     ax.set_yticks([])
     ax.set_facecolor("#F7FBFB")
-    giant = int(np.unique(dm)[np.argmax(d_sh)])
+    man = P[dm == giant]
     ax.scatter(P[:, 0], P[:, 1], s=sizes, color=GRAY, alpha=0.35, lw=0,
                zorder=3)
-    blob_ellipse(ax, P[dm == giant], RED, span, lw=1.6,
-                 fc=(0.99, 0.93, 0.92, 0.55), z=2)
+    ax.add_patch(MplPolygon(man[ConvexHull(man).vertices], closed=True,
+                            facecolor=(0.99, 0.93, 0.92, 0.55),
+                            edgecolor=RED, lw=1.6, zorder=2))
     isl = [k for k in np.unique(dm) if k != giant]
     for k in isl:
         blob_ellipse(ax, P[dm == k], BLUE, span, lw=1.1,
@@ -238,8 +311,12 @@ def main():
     cents = []
     for i, k in enumerate(np.unique(bm)):
         col = cmap(i % 20)
-        blob_ellipse(ax, P[bm == k], col, span, lw=1.2, n_sig=1.9)
-        cents.append(P[bm == k].mean(0))
+        pts = P[bm == k]
+        if len(pts) > 25:  # 稳健环: 剔除离切片中位最远 10%(外推孤岛等)
+            dd = np.hypot(*(pts - np.median(pts, axis=0)).T)
+            pts = pts[dd <= np.quantile(dd, 0.90)]
+        blob_ellipse(ax, pts, col, span, lw=1.2, n_sig=1.9)
+        cents.append(pts.mean(0))
     cents = np.array(cents)
     ax.scatter(cents[:, 0], cents[:, 1], marker="D", s=46,
                c=[cmap(i % 20) for i in range(len(cents))],
