@@ -20,8 +20,9 @@
 #    finding_pool_manifold.png             发现③ 池结构机理示意
 #                                           (通用池成团 vs 窄域池流形+孤岛)
 #    reinforcement_d8_scoring_snr.png       ③ 左=原因(逐基准 真信号 vs 抽样
-#                                           噪声), 右=结果(gsm8k: prod3 误
-#                                           加权 vs prod5 修复后), 下=做法
+#                                           噪声), 中=做法(公式卡, mathtext),
+#                                           右=结果(gsm8k: prod3 误加权 vs
+#                                           prod5 修复后)
 #    reinforcement_d19_extrapolation.png    ③ 外推问题示意图(非真实数据):
 #                                           预测器在实测区内贴合, 在无数据
 #                                           区冲上虚假高峰(『外推最优点』=
@@ -463,8 +464,9 @@ def chart_d8_dual(out_dir):
     ax.text(25.0, -0.52, "损失:平滑下降\n(先快后慢,连续可分)", fontsize=9.5,
             color=NAVY, fontweight="bold", va="center", linespacing=1.4,
             zorder=4)
-    ax.text(11.5, 1.68, "score = w·acc_z + (1−w)·nll_z", ha="center",
-            fontsize=11.5, fontweight="bold", color=NAVY, zorder=4)
+    ax.text(19.75, 1.60,
+            r"$\mathrm{score} = w \cdot \mathrm{acc}_z + (1-w) \cdot \mathrm{nll}_z$",
+            ha="center", va="center", fontsize=14, color=NAVY, zorder=4)
     ax.text(11.5, -1.32, "w ≥ 0.5,按实测信噪比定(见下页)",
             ha="center", fontsize=9.5, color=DGRAY, zorder=4)
     ax.set_xlabel("候选配比(按序)", fontsize=10)
@@ -489,7 +491,10 @@ def chart_d8_dual(out_dir):
 # ── ③ D8: 问题(左)· 做法(中, 公式)· 结果(右) (v10.5: 删底部小结行,
 #    数字进 deck 表格; 图幅压扁) ────────────────────────────────────
 def chart_d8(out_dir):
-    fig = plt.figure(figsize=(13, 4.2))
+    # v10.22: 图幅 4.2→3.8 压扁 + 页表 row_h 0.56→0.50 — 上页显示宽
+    #   7.5→9.1in(评审"稍微放大一点"); 中部公式卡改正式数学公式
+    #   (mathtext, 评审"用一行来写不好看"), 行③ 的下划线式公式移入图内。
+    fig = plt.figure(figsize=(13, 3.8))
 
     # 左 问题: 逐基准 真信号 vs 抽样噪声 (SNR 降序, 上=响)
     ax = fig.add_axes([0.08, 0.32, 0.23, 0.48])
@@ -526,14 +531,17 @@ def chart_d8(out_dir):
         (0.02, 0.03), 0.96, 0.94, transform=ax.transAxes,
         boxstyle="round,pad=0.02,rounding_size=0.04",
         facecolor="#EDF5F6", edgecolor="#9DC8CC", lw=1.0, zorder=1))
-    ax.text(0.5, 0.88, "做法:话语权按信噪比", ha="center", va="center",
+    ax.text(0.5, 0.90, "做法:话语权按信噪比", ha="center", va="center",
             fontsize=12, fontweight="bold", color=NAVY, zorder=3)
-    ax.text(0.5, 0.63, "w ∝ 真信号 ÷ 抽样噪声", ha="center", va="center",
-            fontsize=12, fontweight="bold", color=NAVY, zorder=3)
-    ax.text(0.5, 0.30, "噪声地板按任务实测 · w_floor=0.5\n"
-            "NLL 只补位, 永不接管话语权",
-            ha="center", va="center", fontsize=10.5, color=DGRAY,
-            linespacing=1.8, zorder=3)
+    ax.text(0.5, 0.66,
+            r"$w = \mathrm{clip}\left(\frac{1+f}{2},\; 0.5,\; 1\right)$",
+            ha="center", va="center", fontsize=13, color=NAVY, zorder=3)
+    ax.text(0.5, 0.40,
+            r"$f = 1 - \sigma^2_{\mathrm{noise}} \,/\, \sigma^2_{\mathrm{between}}$",
+            ha="center", va="center", fontsize=12, color=NAVY, zorder=3)
+    ax.text(0.5, 0.14,
+            r"$\sigma^2_{\mathrm{noise}} = \frac{p\,(1-p)}{K_b\,(1-c_b)^2}$",
+            ha="center", va="center", fontsize=12, color=DGRAY, zorder=3)
 
     # 右 结果: gsm8k — 第3轮实验 误加权 vs 第5轮实验 改进后 (赢家 vs uniform)
     ax = fig.add_axes([0.565, 0.32, 0.365, 0.48])
