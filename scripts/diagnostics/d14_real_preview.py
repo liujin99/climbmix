@@ -46,12 +46,39 @@ from climbmix.core.cluster_merge import (  # noqa: E402
 import matplotlib  # noqa: E402
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.colors import to_rgb  # noqa: E402
+from matplotlib.patches import Ellipse  # noqa: E402
 
 sys.path.insert(0, HERE)
-from reinforcement_charts import (GRAY, NAVY, RED, TEAL,  # noqa: E402
+from reinforcement_charts import (GRAY, NAVY, RED,  # noqa: E402
                                   setup_cjk_font, verify_layout)
 
 K_TARGET = 15
+
+
+def blob_ellipse(ax, pts, edge, data_span, lw=1.1, ls="--", fc=None,
+                 n_sig=2.2, z=4):
+    """宏观簇边界 = 2.2σ 协方差椭圆(评审:"像论文那张图,能看出不同的
+    聚类簇,最好圈起来;纯颜色区分太眼花")。主轴方向 = 协方差特征向量;
+    少于 3 点退化为小圆。fc = (r,g,b,a) 元组时带浅色底。"""
+    n = len(pts)
+    if n == 0:
+        return
+    c = pts.mean(0)
+    if n < 3:
+        r = 0.02 * data_span if n == 1 else max(
+            0.02 * data_span, 1.4 * float(np.hypot(*(pts[1] - pts[0]))) / 2)
+        ax.add_patch(Ellipse(c, 2 * r, 2 * r, facecolor=fc or "none",
+                             edgecolor=edge, lw=lw, ls=ls, zorder=z))
+        return
+    cov = np.cov((pts - c).T)
+    vals, vecs = np.linalg.eigh(cov)
+    vals = np.clip(vals, (0.01 * data_span) ** 2, None)   # 退化方向兜底
+    ang = float(np.degrees(np.arctan2(vecs[1, 1], vecs[0, 1])))
+    ax.add_patch(Ellipse(
+        c, 2 * n_sig * float(np.sqrt(vals[1])),
+        2 * n_sig * float(np.sqrt(vals[0])), angle=ang,
+        facecolor=fc or "none", edgecolor=edge, lw=lw, ls=ls, zorder=z))
 
 
 def make_fixture():
@@ -147,41 +174,52 @@ def main():
     print(f"    均衡划分: K={len(np.unique(bm))}, 最大簇 {b_sh.max():.1%}"
           f"(上限 {(1 + args.slack) / args.K:.1%})")
 
-    # ── 出图: 归一化质心 PCA 二维, 点 = 细簇, 颜色 = 宏观归属 ──
+    # ── 出图: 归一化质心 PCA 二维, 点 = 细簇(单一浅色), 分组靠虚线圈
+    #    (2.2σ 协方差椭圆), 不靠颜色堆砌 ──
     setup_cjk_font()
     nrm = cen / np.clip(np.linalg.norm(cen, axis=1, keepdims=True), 1e-9, None)
     X = nrm - nrm.mean(0)
     _, _, Vt = np.linalg.svd(X, full_matrices=False)
     P = X @ Vt[:2].T
-    sizes = 4 + 70 * fine_tok / fine_tok.max()
+    span = float(max(np.ptp(P[:, 0]), np.ptp(P[:, 1]), 1e-9))
+    sizes = 3 + 22 * np.sqrt(fine_tok / fine_tok.max())
     fig = plt.figure(figsize=(13, 4.05))
 
-    # 左 As-is: 巨簇一色, 其余灰 — 塌缩直接可见
+    # 左 As-is: 巨簇一个红圈吞掉整条流形, 孤岛各自小灰圈 — 塌缩可见
     ax = fig.add_axes([0.035, 0.13, 0.42, 0.70])
     ax.set_axis_off()
     ax.set_xticks([])
     ax.set_yticks([])
     ax.set_facecolor("#F7FBFB")
     giant = int(np.unique(dm)[np.argmax(d_sh)])
-    cols = np.where(dm == giant, RED, GRAY)
-    ax.scatter(P[:, 0], P[:, 1], s=sizes, c=cols, alpha=0.55, lw=0)
+    ax.scatter(P[:, 0], P[:, 1], s=sizes, color=GRAY, alpha=0.35, lw=0,
+               zorder=3)
+    blob_ellipse(ax, P[dm == giant], RED, span, lw=1.6,
+                 fc=(0.99, 0.93, 0.92, 0.55), z=2)
+    for k in np.unique(dm):
+        if k != giant:
+            blob_ellipse(ax, P[dm == k], GRAY, span, lw=0.9, ls=":", z=4)
     ax.text(0.5, 0.985, f"As-is:论文式距离合并 — 最大簇 {d_sh.max():.1%}",
             ha="center", va="top", transform=ax.transAxes,
             fontsize=11.5, fontweight="bold", color=RED)
-    ax.text(0.5, 0.03, f"红 = 巨簇({len(np.flatnonzero(dm == giant))} 个细簇"
-            f" 并成 1 簇)· 灰 = 孤岛 — 可用旋钮 ≈ 1",
+    ax.text(0.5, 0.03, f"红圈 = 巨簇({len(np.flatnonzero(dm == giant))} 个"
+            f"细簇链式并成 1 簇)· 点线小圈 = 孤岛 — 可用旋钮 ≈ 1",
             ha="center", va="bottom", transform=ax.transAxes,
             fontsize=9, color=RED)
 
-    # 右 To-be: 15 色均衡分片
+    # 右 To-be: 同一批细簇切成 15 个大小相近的簇, 每簇一个虚线圈
     ax = fig.add_axes([0.545, 0.13, 0.42, 0.70])
     ax.set_axis_off()
     ax.set_xticks([])
     ax.set_yticks([])
     ax.set_facecolor("#F7FBFB")
     cmap = plt.get_cmap("tab20")
-    ax.scatter(P[:, 0], P[:, 1], s=sizes,
-               c=[cmap(int(b) % 20) for b in bm], alpha=0.65, lw=0)
+    ax.scatter(P[:, 0], P[:, 1], s=sizes, color=GRAY, alpha=0.35, lw=0,
+               zorder=3)
+    for i, k in enumerate(np.unique(bm)):
+        col = cmap(i % 20)
+        blob_ellipse(ax, P[bm == k], col, span, lw=1.2,
+                     fc=(*to_rgb(col), 0.07))
     ax.text(0.5, 0.985, f"To-be:容量约束均衡 — 最大簇 {b_sh.max():.1%}",
             ha="center", va="top", transform=ax.transAxes,
             fontsize=11.5, fontweight="bold", color=NAVY)
@@ -192,8 +230,9 @@ def main():
 
     fig.text(0.5, 0.965, "同一个池,两种簇划分 — 细簇与合并均为真实运行结果",
              ha="center", va="center", fontsize=13, fontweight="bold")
-    fig.text(0.5, 0.02, "点 = 细簇(大小 ∝ token),位置 = 归一化质心的 PCA "
-             "二维投影,颜色 = 宏观簇归属;" + src_note,
+    fig.text(0.5, 0.02, "点 = 细簇(大小 ∝ token,单一浅色),虚线圈 = 各宏观"
+             "簇的 2.2σ 协方差椭圆,位置 = 归一化质心的 PCA 二维投影;"
+             + src_note,
              ha="center", va="center", fontsize=9, color=GRAY)
     ok = verify_layout(fig, "d14_real")
     fig.savefig(args.out, dpi=150)
