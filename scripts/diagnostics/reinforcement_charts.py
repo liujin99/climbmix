@@ -477,8 +477,8 @@ def chart_d8_dual(out_dir):
              ha="center", va="center", fontsize=13.5, fontweight="bold")
     fig.text(0.5, 0.035, "左 = 相变示意(Phase Transitions, NeurIPS\'25 "
              "Spotlight — 阈值左侧能力缓慢积累、得分不动);右 = 信号轨迹示意"
-             "(nll_z = 损失取负标准分:损失降 → nll_z 升);100 题 speedrun:"
-             "SE ≈ ±4.6pt(实算)",
+             "(acc_z、nll_z = 精度、损失的标准分;nll_z 取负 — 损失降 → "
+             "nll_z 升);100 题 speedrun:SE ≈ ±4.6pt(实算)",
              ha="center", va="center", fontsize=8, color=DGRAY)
     ok = verify_layout(fig, "d8_dual")
     path = os.path.join(out_dir, "reinforcement_d8_dual_signal.png")
@@ -494,10 +494,14 @@ def chart_d8(out_dir):
     # v10.22: 图幅 4.2→3.8 压扁 + 页表 row_h 0.56→0.50 — 上页显示宽
     #   7.5→9.1in(评审"稍微放大一点"); 中部公式卡改正式数学公式
     #   (mathtext, 评审"用一行来写不好看"), 行③ 的下划线式公式移入图内。
-    fig = plt.figure(figsize=(13, 3.8))
+    # v10.23: 评审反馈 — 图再放大(3.8→3.4 压扁, 页表显示宽 9.1→10.2in),
+    #   三联面板拉开间隔(0.33/0.58in → 0.81/0.98in, 左板 y 刻度 10→9pt
+    #   给基准名让位); 图底加符号脚注(评审"公式符号需要标注":
+    #   p/K_b/c_b/σ²_noise/σ²_between/f)。
+    fig = plt.figure(figsize=(13, 3.4))
 
     # 左 问题: 逐基准 真信号 vs 抽样噪声 (SNR 降序, 上=响)
-    ax = fig.add_axes([0.08, 0.32, 0.23, 0.48])
+    ax = fig.add_axes([0.078, 0.30, 0.225, 0.50])
     n = len(D8_SNR)
     for i, (bench, sig, noi, snr) in enumerate(D8_SNR):
         y = n - 1 - i
@@ -515,7 +519,7 @@ def chart_d8(out_dir):
             fontsize=9, fontweight="bold", color=DGRAY, zorder=4)
     ax.set_xlim(0, 0.062)
     ax.set_ylim(-0.55, n - 1 + 0.95)
-    ax.set_yticks(range(n - 1, -1, -1), [r[0] for r in D8_SNR], fontsize=10)
+    ax.set_yticks(range(n - 1, -1, -1), [r[0] for r in D8_SNR], fontsize=9)
     ax.set_xticks([])
     ax.set_title("问题:各基准的真信号 vs 抽样噪声", fontsize=11.5,
                  fontweight="bold")
@@ -525,7 +529,7 @@ def chart_d8(out_dir):
                fontsize=8.5, frameon=False)
 
     # 中 做法: 公式卡 (话语权按信噪比分配)
-    ax = fig.add_axes([0.335, 0.32, 0.185, 0.48])
+    ax = fig.add_axes([0.365, 0.30, 0.175, 0.50])
     ax.set_axis_off()
     ax.add_patch(FancyBboxPatch(
         (0.02, 0.03), 0.96, 0.94, transform=ax.transAxes,
@@ -544,7 +548,7 @@ def chart_d8(out_dir):
             ha="center", va="center", fontsize=12, color=DGRAY, zorder=3)
 
     # 右 结果: gsm8k — 第3轮实验 误加权 vs 第5轮实验 改进后 (赢家 vs uniform)
-    ax = fig.add_axes([0.565, 0.32, 0.365, 0.48])
+    ax = fig.add_axes([0.615, 0.30, 0.355, 0.50])
     for gi, (glab, win, uni, wc) in enumerate(D8_GSM8K):
         gx = 1.0 + 1.55 * gi
         ax.bar(gx - 0.17, win, width=0.30, color=wc, zorder=3)
@@ -573,6 +577,12 @@ def chart_d8(out_dir):
 
     fig.text(0.5, 0.95, "评分按信噪比(SNR)加权:问题(左)· 做法(中)· 结果(右)",
               ha="center", va="center", fontsize=13, fontweight="bold")
+    fig.text(0.5, 0.04,
+             "符号:$p$ = 该基准实测平均精度 · $K_b$ = 题量 · $c_b$ = 蒙对率"
+             " · $\\sigma^2_{\\mathrm{noise}}$ = 抽样噪声方差(题量决定)"
+             " · $\\sigma^2_{\\mathrm{between}}$ = 候选间真实差异方差"
+             " · $f$ = 信噪比(接近 1 = 信号远大于噪声)",
+             ha="center", va="center", fontsize=8, color=DGRAY)
     ok = verify_layout(fig, "d8")
     path = os.path.join(out_dir, "reinforcement_d8_scoring_snr.png")
     fig.savefig(path, dpi=150)

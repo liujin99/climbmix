@@ -92,7 +92,16 @@ def resolve_chart(dirs, name):
                 return p
     return None
 
-# ── 幻灯片文案 (v10.22 评审反馈: ① p3 标题要素补全 — "语义聚类定义
+# ── 幻灯片文案 (v10.23 评审反馈: ① 标题标点改中文全角(:,();? —
+#    本条由脚本统一转换全部 title="…"); ② p17 去会务性话语 — 标题回
+#    "下一步", 删"具体安排开会讨论"与"更多事项会上补充"(评审: 那是
+#    对话里的指示, 不是幻灯片内容), _bullets 支持 rest 为空(不渲染
+#    悬空破折号); ③ p9 图再放大 — 图幅 13×3.8→3.4(上页显示宽
+#    9.1→10.2in), 三联面板间隔 0.33/0.58in → 0.85/1.05in(评审"间隔
+#    有点小"); ④ p9 公式补符号注释 — 图底脚注逐一定义 p / K_b / c_b /
+#    σ²_noise / σ²_between / f(评审: 读者想了解时必须讲清); p8 图注
+#    同步补 acc_z 定义。
+#    v10.22 评审反馈: ① p3 标题要素补全 — "语义聚类定义
 #    搜索空间,代理模型中训练实测打分,3 轮迭代搜索逼近最优"; ② 可信度
 #    页(辅助证明)后移为 Thank You 之后附录; ③ 下一步单独成页(bullets
 #    页, 意味着什么页删 plan 块, _stats 的 plan 渲染一并移除); ④ p9
@@ -252,13 +261,13 @@ def resolve_chart(dirs, name):
 #    D8/D14/D19) ──
 SLIDES = [
     dict(kind="title",
-         title="训练数据怎么配?让算法自己搜",
+         title="训练数据怎么配？让算法自己搜",
          subtitle="CLIMB 数据配比搜索 · 第5轮实验结果",
          meta="数据团队汇报 · 2026-10",
          stats=[("+17.7%", "STEM 平均分较最强传统配比(对 uniform 6 项全胜)"),
                  ("2.3×", "数学应用题 gsm8k:CLIMB 30.1%,最强传统 12.8%"),
                 ("88.5%", "赢家配方预算集中在 2 个数学簇")]),
-    dict(kind="table", title="结论先行:CLIMB 较最强传统配比 — 绝对值提升 3.1 个百分点、相对提升 17.7%",
+    dict(kind="table", title="结论先行：CLIMB 较最强传统配比 — 绝对值提升 3.1 个百分点、相对提升 17.7%",
          takeaway="三个搜索配方全部显著胜出;三种传统配比均未超过 base — 增益来自数据配比,而非继续训练本身",
          table=(["配方", "STEM", "Δ vs base", "相对提升", "结论"],
                 [["climb(搜索终选)", "**20.86%**", "+3.34pt", "**+19.1%**",
@@ -278,7 +287,7 @@ SLIDES = [
                "显著性(vs uniform,逐题二项 SE):三搜索臂 z = **+3.80 / +3.67 / +3.16**;"
                "climb **6 项全胜**(p=0.016)。cfg90 / cfg100 = 搜索 top-3 的另两个;"
                "domainfix / natural / uniform = 三种传统配比;得分 = Centered×100"),
-    dict(kind="flow", title="方法 — CLIMB:语义聚类定义搜索空间,代理模型中训练实测打分,3 轮迭代搜索逼近最优",
+    dict(kind="flow", title="方法 — CLIMB：语义聚类定义搜索空间，代理模型中训练实测打分，3 轮迭代搜索逼近最优",
          takeaway="采样候选配比 → 代理验证得实测得分 → 预测器拟合响应面引导下一轮 — 3 轮迭代(64/32/16)在 15 维配比空间逐步逼近最优",
          steps=[
              ("① 语义聚类", "data",
@@ -305,7 +314,7 @@ SLIDES = [
               "tokens(代理 ≈ 13B / 验证 ≈ 45B)。两层成本:搜索层 115 候选 × "
               "640M ≈ 74B tokens;验证层 6 臂 × 3B = 18B。论文机制在四处"
               "不设防 — 五轮实验逐一定位并改进,见后文『四处机制改进优化』"),
-    dict(kind="image", title="搜索过程:三轮迭代搜索有效提升配比质量 — 各轮最佳 0.97 → 1.20 → 1.45",
+    dict(kind="image", title="搜索过程：三轮迭代搜索有效提升配比质量 — 各轮最佳 0.97 → 1.20 → 1.45",
          takeaway="第 1 次迭代随机采样覆盖空间,第 2 次起学习器引导 — 轮最佳 0.97 → 1.20 → 1.45 单调提升,第 3 次迭代产出全场最优",
          bullets=[
               ("迭代收敛", "轮最佳 0.97 → 1.20 → 1.45(搜索效用分,z 尺度)单调改善;"
@@ -315,7 +324,7 @@ SLIDES = [
          ],
           image="search_convergence.png",
           caption="115 个候选配比的得分轨迹(各迭代最佳连成折线)"),
-    dict(kind="table", title="六项基准得分总表:数学两项第一(gsm8k 30.1%、math 5.8%),选择题各臂打平",
+    dict(kind="table", title="六项基准得分总表：数学两项第一（gsm8k 30.1%、math 5.8%），选择题各臂打平",
           takeaway="覆盖知识与推理两端:知识类 4 项选择题(科学常识 / 科学推理 / 学科知识 / 专家级科学),数学推理类 2 项(应用 / 竞赛,要写解题过程)",
           table=(["基准 · 能力(题量·题型)", "climb", "climb-cfg90", "climb-cfg100", "domainfix", "natural", "uniform", "base"],
                  [["arc_easy · 科学常识(2376·选择)", "72.94%", "72.47%", "72.14%", "72.73%", "72.10%", "72.69%", "**74.24%**"],
@@ -331,7 +340,7 @@ SLIDES = [
                  "『STEM 平均』= 6 任务 Centered 的算术平均;加粗 = 行最优 — "
                  "选择题 4 行的行最优都是 base(不训练):3B 继续训练的共性回退,"
                  "与配比无关;逐题 ±SE 明细见 report"),
-    dict(kind="table", title="能力归因:净增益全部来自数学推理 — gsm8k +17.3、math +3.0 个百分点",
+    dict(kind="table", title="能力归因：净增益全部来自数学推理 — gsm8k +17.3、math +3.0 个百分点",
           takeaway="提升全部落在数学推理能力 — 两项写过程基准对最强传统配比 2× 大赢;知识类四项全打平:增益在推理,不在知识",
           table=(["基准 · 能力(题量·题型)", "climb", "最强传统方法", "Δ", "结论"],
                  [["gsm8k · 应用数学推理(1319·写过程)", "30.10%", "12.81%(domainfix)", "+17.29pt", "2.3× 大赢"],
@@ -344,7 +353,7 @@ SLIDES = [
           widths=[0.33, 0.12, 0.24, 0.12, 0.19],
           note="传统方法 = 非搜索配比:domainfix(人工域配比)/ natural(池自然占比)/ uniform(15 簇等权),"
                "逐基准取最强;选择题 Δ 全部 ≪ SE(逐题 SE 见 report §3);vs base:gsm8k **10.4×**、math **14.5×**"),
-    dict(kind="table_image", title="四处机制改进优化 ①:簇大小强制均衡 — 解决距离合并链式塌缩",
+    dict(kind="table_image", title="四处机制改进优化 ①：簇大小强制均衡 — 解决距离合并链式塌缩",
           takeaway="失衡的代价:99.05% token 塌缩进单一巨簇,15 维配比退化成 1 个旋钮 — 搜索无从调优,climb 得分反而低于等权臂(−0.36pt);均衡划分恢复 15 个旋钮后,+1.02 → +4.29pt(根因 = 池是连续流形,详见『关键发现③』)",
          table=(["实验轮次", "簇划分策略", "最大簇 token 占比", "有效旋钮",
                  "同轮实验对决:climb vs 簇等权臂"],
@@ -357,7 +366,7 @@ SLIDES = [
           emph=[2], y=1.72, row_h=0.44, size=12,
           widths=[0.19, 0.25, 0.19, 0.12, 0.25],
           image="reinforcement_d14_cluster_balance.png"),
-    dict(kind="table_image", title="四处机制改进优化 ②:评分双信号 — 解决相变区左侧、精度分辨不开配比",
+    dict(kind="table_image", title="四处机制改进优化 ②：评分双信号 — 解决相变区左侧、精度分辨不开配比",
          order_arrow=True,
          takeaway="435M 代理 + 少量中训练 — 数学基准在相变区左侧,得分看不出配比好坏;引入连续平稳的损失补位,但永不接管(w ≥ 0.5)",
          table=(["环节", "发生了什么 / 我们做了什么"],
@@ -374,7 +383,7 @@ SLIDES = [
           y=1.72, row_h=0.50, size=11.5,
           widths=[0.20, 0.80],
           image="reinforcement_d8_dual_signal.png"),
-    dict(kind="table_image", title="四处机制改进优化 ③:权重按实测信噪比定 — 解决小题量基准被噪声淹没",
+    dict(kind="table_image", title="四处机制改进优化 ③：权重按实测信噪比定 — 解决小题量基准被噪声淹没",
          order_arrow=True,
          takeaway="题量小的基准,精度抽样噪声大 — 权重必须按实测噪声定,不能拍先验;第3轮先验误判让最强信号权重归零",
          table=(["环节", "发生了什么 / 我们做了什么"],
@@ -393,7 +402,7 @@ SLIDES = [
            y=1.72, row_h=0.50, size=11.5,
            widths=[0.20, 0.80],
            image="reinforcement_d8_scoring_snr.png"),
-    dict(kind="table_image", title="四处机制改进优化 ④:终选守卫 — 解决终选选中未实测配比的风险",
+    dict(kind="table_image", title="四处机制改进优化 ④：终选守卫 — 解决终选选中未实测配比的风险",
          order_arrow=True,
          takeaway="论文式终选只信预测、不信实测;我们的规则反过来:终选必须是实测第一 — 第5轮实验,终选即实测赢家,6/6 全胜",
          table=(["环节", "发生了什么 / 我们做了什么"],
@@ -410,7 +419,7 @@ SLIDES = [
          y=1.72, row_h=0.56, size=11.5,
          widths=[0.20, 0.80],
          image="reinforcement_d19_extrapolation.png"),
-    dict(kind="image", title="最终配比:88.5% 押两个数学簇 — 与任何人工先验都不同",
+    dict(kind="image", title="最终配比：88.5% 押两个数学簇 — 与任何人工先验都不同",
          takeaway="搜索给出的答案与任何人工先验都不同 — 80.4% 押一个池占比仅 5.5% 的簇",
          bullets=[
              ("赢家配方", "climb:**80.4% 给『算术应用题』(C10,池占比 5.5% 的 "
@@ -424,7 +433,7 @@ SLIDES = [
          caption="各策略 token 预算在 15 个语义簇上的分配(100% 堆叠,按赢家 α 降序,仅标注 ≥8% 的段);"
                  "数据:optimal_mixture_weights.json / topk_mixture_candidates.json / macro_info.json;"
                  "逐簇内容见下页"),
-    dict(kind="image", title="附:15 个语义簇 — 决定权重的是内容,不是体量",
+    dict(kind="image", title="附：15 个语义簇 — 决定权重的是内容，不是体量",
          takeaway="决定权重的是域与文档功能,不是体量 — C10 池占比仅 5.5%,却拿到 80.4% 预算;其余 13 簇(含 3 个数学簇)全部压在地板",
          image="cluster_content_map.png",
           caption="读法:条长 = 池内体量,右列 = 赢家 α,分隔线以下全部压到 0.1× 地板;"
@@ -432,7 +441,7 @@ SLIDES = [
                   "SMILES 分子性质问答 / 海洋与生态生物学 / 凝聚态与量子光学 / …);"
                   "每簇标签 = 簇名 + 中位长度;逐簇关键词与样本摘录存实验档案 "
                   "cluster_semantics.md(§2b,每簇 50 篇抽样,对比 IDF,零 NPU,seed 固定可复现)"),
-    dict(kind="table_image", title="关键发现 ①:文本质量分 ≠ 训练价值",
+    dict(kind="table_image", title="关键发现 ①：文本质量分 ≠ 训练价值",
           takeaway="赢家重仓的簇质量分反而最低,排序完全倒挂(下图)— 质量分衡量『像不像好文本』,不衡量『喂了有没有用』;同样是短练习题:化学没用(0.1× 地板)、算术大赚(14.6×)— 押对领域,比押『高分文本』重要",
           table=(["簇", "质量分(相关性 / 知识性)", "在配方中的角色", "实测效果"],
                    [["算术应用题(赢家重仓)", "3.88 / 3.65 — 三簇最低", "权重 0.80(池占比的 14.6×)",
@@ -442,7 +451,7 @@ SLIDES = [
                      "cfg100 的 math 直接减半(2.60% vs 5.80%)"]]),
            emph=[0], y=1.72, row_h=0.55, size=12, widths=[0.24, 0.25, 0.24, 0.27],
            image="finding_quality_value.png"),
-    dict(kind="image", title="关键发现 ②:搜索能可靠选出好配比,配比间名次差异在噪声带内",
+    dict(kind="image", title="关键发现 ②：搜索能可靠选出好配比，配比间名次差异在噪声带内",
           takeaway="top-3 配方全部显著胜出 — 『好配比』这层结论可靠;但配方间名次差落在种子噪声带内,排序不可较真;两次独立搜索也只保证同水平,不保证同一配方",
           bullets=[
               ("赢家明确", "代理分挑出的 3 个决赛配方,中等规模验证**全部显著胜出**"
@@ -455,7 +464,7 @@ SLIDES = [
           ],
           image="proxy_target_consistency.png",
           caption="climb 配方:代理分 vs 中等规模实测(分数兑现;名次带噪声)"),
-    dict(kind="table_image", title="关键发现 ③:窄域池预警 — 用 CLIMB 前先查『簇塌缩』",
+    dict(kind="table_image", title="关键发现 ③：窄域池预警 — 用 CLIMB 前先查『簇塌缩』",
           takeaway="这是『领域内配比』的共性陷阱,不是本池特例:窄域池数据同质 → 嵌入成一条连续流形(99% tokens)→ 论文的距离合并必然链式塌缩 — 在专用领域上用此算法,先查池结构",
           table=(["问题", "我们的实证答案"],
                   [["陷阱是什么", "距离合并必然链式塌缩:K=14/21/24/32 实测最大簇 "
@@ -474,16 +483,16 @@ SLIDES = [
          stats=[("+17.7%", "STEM 平均分较最强传统配比(对 uniform 6 项全胜)"),
                 ("2 次", "独立搜索同水平复现(20.9% / 21.4%)"),
                 ("≈3,900 NPU·h", "全部实验总开销(约 163 张卡 · 天)")]),
-    dict(kind="bullets", title="下一步(具体安排开会讨论)",
-         takeaway="三个方向 — 细节与排期会上对齐",
+    dict(kind="bullets", title="下一步",
+         takeaway="三个方向",
          bullets=[
              ("① 完成中等规模实验验证", ">1.5B 模型、>100B 数据"),
              ("② 新类型基准的适配与验证", "扩大评测覆盖的能力与题型"),
-             ("③ 超参数调优等事项", "更多事项会上补充"),
+             ("③ 超参数调优等事项", ""),
          ]),
     dict(kind="title", title="谢谢", subtitle="欢迎提问与讨论",
          meta="数据团队汇报 · 2026-10"),
-    dict(kind="table", title="附录:结论为什么可信 — 五道量化检查全部在案",
+    dict(kind="table", title="附录：结论为什么可信 — 五道量化检查全部在案",
            takeaway="评分先校准、数字能对账、误差逐题算、结论能复现、规则先于结果 — 五道检查全部量化、全部在案",
            table=(["检查", "做了什么 / 结果", "判定"],
                    [["评分先校准", "发现数学题的评分会误判:模型答完后停不下来,"
@@ -604,7 +613,8 @@ def _bullets(slide, s, y=Inches(1.72), size=15.5, gap=14):
         p.line_spacing = 1.18
         _run(p, "▪ ", size, bold=True, color=TEAL)
         _run(p, lead, size, bold=True, color=NAVY)
-        _md(p, " — " + rest, size, DARK, bold_color=NAVY)
+        if rest:
+            _md(p, " — " + rest, size, DARK, bold_color=NAVY)
 
 
 def _stats(slide, s):
