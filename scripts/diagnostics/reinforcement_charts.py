@@ -9,20 +9,23 @@
 #
 #  输出 (v10.2: 汇报包目录 RUN_DIR/deck/ 子目录, 与实验结果分离;
 #  make_deck.py 在同目录引用; -o 可覆盖):
-#    reinforcement_d14_cluster_balance.png  ① 左 as-is(论文距离合并, 为什么
-#                                           翻车)vs 右 to-be(强制均衡, 改进
-#                                           后), 双环形图 + 两侧实验佐证
-#    reinforcement_d8_dual_signal.png      ② 双信号两联: 左=为什么(相变区左侧,
-#                                           得分看不出配比好坏) 右=怎么做(精度
-#                                           不动 vs 损失缓降 → 混合, w ≥ 0.5)
+#    reinforcement_d14_cluster_balance.png  ① as-is vs to-be: 上排 = 簇结构
+#                                           示意(左 整条流形并成一簇 /
+#                                           右 切成大小相近的 15 簇),
+#                                           下排 = token 份额环形图,
+#                                           中间箭头 = 改进动作
+#    reinforcement_d8_dual_signal.png      ② 双信号三联: 左/中=为什么(相变
+#                                           区左侧得分不动; 精度不动 vs
+#                                           损失缓降), 右=怎么做(混合公式
+#                                           独立成卡)
 #    finding_quality_value.png             发现① 质量分 × 赢家权重 排序倒挂
 #                                           (左=质量分 降序, 右=climb 权重)
 #    finding_pool_manifold.png             发现③ 池结构机理示意
 #                                           (通用池成团 vs 窄域池流形+孤岛)
-#    reinforcement_d8_scoring_snr.png       ③ 左=原因(逐基准 真信号 vs 抽样
-#                                           噪声), 中=做法(公式卡, mathtext),
-#                                           右=结果(gsm8k: prod3 误加权 vs
-#                                           prod5 修复后)
+#    reinforcement_d8_scoring_snr.png       ③ 左=问题(各基准信号强度悬殊,
+#                                           第3轮重放), 中=做法(公式卡,
+#                                           mathtext), 右=结果(gsm8k:
+#                                           第3轮误加权 vs 第5轮改进后)
 #    reinforcement_d19_extrapolation.png    ③ 外推问题示意图(非真实数据):
 #                                           预测器在实测区内贴合, 在无数据
 #                                           区冲上虚假高峰(『外推最优点』=
@@ -84,8 +87,9 @@
 #                   巨簇 99.05% / 13 孤岛 0.95%; K=14/21/24/32 → 巨簇
 #                   ≥97.5%; cap ≤ 8.8%; prod1 -0.0036 (0.1623 vs 0.1659);
 #                   prod2 +0.0102 (0.1752 vs 0.1650); prod5 C10 5.5% → 80%
-#    D8  信号/噪声  experiment_prod2_k15bal.md §4.2 (30 候选实测):
-#                   sd_cfg / SE_binom / SNR 逐基准表 (基准名以该表为准, gpqa)
+#    D8  信号/噪声  scoring_metric_design.md §6.2 "prod3 实测 vs 预测"
+#                   (54 实测点, 修复后公式重放; v10.27 前用 prod2 §4.2
+#                   30 点表 — 其 gsm8k/math 噪声列带先验 bug, 已弃用)
 #        prod3 事故 TODO.md 2026-09-15 P0: gsm8k 赢家 0.052 vs 对照 0.119
 #                   (-56%, z=-6.2); math 0.018→0.004; 修复 = SNR 定权 +
 #                   实测噪声地板 + w_floor=0.5
@@ -112,7 +116,8 @@ try:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib import font_manager as fm
-    from matplotlib.patches import FancyBboxPatch, Patch
+    from matplotlib.patches import (Ellipse, FancyArrowPatch, FancyBboxPatch,
+                                    Patch)
 except ImportError:
     sys.exit("✗ 缺 matplotlib — pip install matplotlib (PEP 668 环境加 "
              "--break-system-packages), 装好后重跑本脚本")
@@ -131,13 +136,19 @@ CJK_KEYS = ("cjk", "zenhei", "wqy", "hei", "song", "kai", "noto sans sc",
 
 # ── 数据 (出处见文件头) ────────────────────────────────────────────────
 D14_GIANT, D14_ISLANDS = 99.05, 0.95
-D8_SNR = [  # bench, 真信号 sd_cfg, 抽样噪声 SE_binom, SNR (prod2 §4.2)
-    ("arc_easy", 0.0225, 0.0127, 1.77),
-    ("mmlu_stem", 0.0099, 0.0100, 1.00),
-    ("arc_challenge", 0.0157, 0.0191, 0.82),
-    ("gpqa", 0.0283, 0.0411, 0.69),
-    ("gsm8k", 0.0048, 0.0163, 0.29),
-    ("math", 0.0024, 0.0259, 0.09),
+D8_SNR = [  # bench, 信号 σ_between, 噪声 σ_noise, f = 1 − σ²n/σ²b —
+    #  v10.27: 换第3轮 54 实测点、修复后公式的重放值(原 prod2 §4.2 的
+    #  30 点表早于噪声修复, gsm8k/math 的噪声列带着先验 bug, 与本页
+    #  "gsm8k 最强信号 w=0.93" 的结果自相矛盾 — 评审正是因此觉得
+    #  "讲的是另一个问题")。出处 scoring_metric_design.md §6.2 "prod3
+    #  实测 vs 预测"表: σ²_between 取实测列, f 与 σ²_noise 由该表反解
+    #  (f = 2w−1, σ²_noise = (1−f)·σ²_between); σ 单位 = 去蒙对校正分。
+    ("gsm8k", 0.0107, 0.0041, +0.85),   # σ²b 1.14e-4 / σ²n 1.7e-5, 最强信号
+    ("arc_challenge", 0.0176, 0.0188, -0.14),
+    ("math", 0.0019, 0.0021, -0.22),
+    ("arc_easy", 0.0112, 0.0127, -0.30),
+    ("mmlu_stem", 0.0080, 0.0100, -0.56),
+    ("gpqa", 0.0302, 0.0405, -0.80),
 ]
 D8_GSM8K = [  # (标签, 赢家分, 对照 uniform 分, 赢家颜色) — gsm8k 跨协议可比
     ("第3轮实验 · 误加权", 0.052, 0.119, RED),
@@ -336,8 +347,10 @@ def verify_layout(fig, name):
     return True
 
 
-# ── ① D14: as-is vs to-be 双环形图 (v10.5: 佐证数字移入 deck 表格,
-#    图只管机理, 图幅压扁适配『表 + 图』同页) ────────────────────────
+# ── ① D14: as-is vs to-be (v10.27 评审反馈重设计: ① 两饼图中间加箭头
+#    表示前后改进关系; ② 链式塌缩不再只靠文字 — 上下各配 p15 同款聚类
+#    簇示意图, 问题(整条流形并成一簇)与改进后(切成大小相近的 15 簇)
+#    直接可见。v10.5: 佐证数字移入 deck 表格, 图只管机理) ─────────────
 def chart_d14(out_dir, run_dir):
     labels, shares = cluster_token_shares(run_dir)
     real = shares is not None
@@ -345,49 +358,104 @@ def chart_d14(out_dir, run_dir):
         labels = [f"C{i}" for i in range(15)]
         shares = np.full(15, 100.0 / 15)
     hi = labels.index("C10") if "C10" in labels else 9
-    fig = plt.figure(figsize=(13, 3.9))
+    rng = np.random.default_rng(14)
+    fig = plt.figure(figsize=(13, 4.05))
 
-    # 左 as-is: 论文距离合并 — 1 巨簇 + 13 孤岛 (失效机理: 塌缩)
-    ax = fig.add_axes([0.045, 0.14, 0.42, 0.70])
+    fig.text(0.5, 0.965, "同一个数据池,两种簇划分", ha="center", va="center",
+             fontsize=13, fontweight="bold")
+    fig.text(0.245, 0.905, "As-is:论文式距离合并 — 链式塌缩", ha="center",
+             va="center", fontsize=11.5, fontweight="bold", color=RED)
+    fig.text(0.755, 0.905, "To-be:容量约束均衡(K=15)", ha="center",
+             va="center", fontsize=11.5, fontweight="bold", color=NAVY)
+
+    def cloud(ax):
+        """p15 同款窄域池示意: 一条连续流形 + 3 个格式孤岛(无标签,
+        命名住在 p15 / §2b)。返回流形中心线, 供均衡切分定位。"""
+        ax.set_axis_off()
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_facecolor("#F7FBFB")
+        t = np.linspace(0.06, 0.94, 420)
+        ym = 0.50 + 0.11 * np.sin(2 * np.pi * t * 0.9)
+        ax.fill_between(t, ym - 0.17, ym + 0.17, color=TEAL, alpha=0.13,
+                        zorder=2)
+        ax.scatter(t, ym + rng.normal(0, 0.052, 420), s=4, color=TEAL,
+                   alpha=0.35, zorder=3)
+        for ix, iy, k in ((0.13, 0.87, 9), (0.55, 0.91, 6), (0.88, 0.85, 8)):
+            pts = rng.normal(0, 0.018, (k, 2)) + [ix, iy]
+            ax.scatter(pts[:, 0], pts[:, 1], s=6, color=GRAY, alpha=0.8,
+                       edgecolors="none", zorder=3)
+        # 固定 0-1 视窗: 自动缩放会把底部说明文字挤到轴外(与幻影刻度
+        # 相撞 — verify_layout 连 axis-off 轴的刻度标签一并检查)
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        return t, ym
+
+    # 左上 as-is 簇结构: 整条流形被一个红圈吞并(链式塌缩的结局)
+    ax = fig.add_axes([0.035, 0.50, 0.40, 0.335])
+    cloud(ax)
+    ax.add_patch(Ellipse((0.5, 0.50), 1.02, 0.58, fill=False, ls="--",
+                         color=RED, lw=1.4, zorder=4))
+    ax.text(0.5, 0.50, "并成 1 簇", ha="center", va="center", fontsize=10,
+            fontweight="bold", color=RED, zorder=5,
+            bbox=dict(fc="white", ec="none", alpha=0.8, pad=1.5))
+    ax.text(0.5, 0.035, "链式塌缩:整条流形并成一簇(99.05% tokens)",
+            ha="center", va="bottom", fontsize=9.5, color=RED, zorder=5)
+
+    # 右上 to-be 簇结构: 同一条流形, 按容量切成大小相近的簇(示意 7 段)
+    ax = fig.add_axes([0.565, 0.50, 0.40, 0.335])
+    t, ym = cloud(ax)
+    for xc in (0.13, 0.255, 0.38, 0.505, 0.63, 0.755, 0.88):
+        yc = float(np.interp(xc, t, ym))
+        ax.add_patch(Ellipse((xc, yc), 0.135, 0.30, fill=False, ls="--",
+                             color=TEAL, lw=1.1, zorder=4))
+    for ix, iy in ((0.13, 0.87), (0.55, 0.91), (0.88, 0.85)):
+        ax.add_patch(Ellipse((ix, iy), 0.075, 0.10, fill=False, ls=":",
+                             color=GRAY, lw=0.9, zorder=4))
+    ax.text(0.5, 0.035, "容量约束:切成大小相近的 15 簇 — 每簇一个旋钮",
+            ha="center", va="bottom", fontsize=9.5, color=NAVY, zorder=5)
+
+    # 中间箭头: 改进动作(前后关系, 评审要求)
+    fig.add_artist(FancyArrowPatch(
+        (0.452, 0.47), (0.548, 0.47), transform=fig.transFigure,
+        arrowstyle="-|>", mutation_scale=42, lw=2.5, color=TEAL, zorder=5))
+    fig.text(0.5, 0.55, "容量约束均衡", ha="center", va="center",
+             fontsize=10.5, fontweight="bold", color=TEAL)
+
+    # 左下 as-is 份额: 1 巨簇 + 13 孤岛 → 1 个可用旋钮
+    ax = fig.add_axes([0.135, 0.045, 0.20, 0.40])
     wedges, _ = ax.pie([D14_GIANT, D14_ISLANDS], colors=[RED, GRAY],
                        startangle=90, counterclock=False,
                        wedgeprops=dict(width=0.42, edgecolor="white"))
     ax.text(0, 0, "1 个\n可用旋钮", ha="center", va="center",
-            fontsize=15, fontweight="bold", color=RED)
+            fontsize=12, fontweight="bold", color=RED)
     w = wedges[0]
     th = math.radians((w.theta1 + w.theta2) / 2)
-    ax.text(0.79 * math.cos(th), 0.79 * math.sin(th), "巨簇\n99.05%",
-            ha="center", va="center", fontsize=10.5, fontweight="bold",
+    ax.text(0.78 * math.cos(th), 0.78 * math.sin(th), "巨簇\n99.05%",
+            ha="center", va="center", fontsize=9, fontweight="bold",
             color="white")
-    ax.set_title("As-is:论文式距离合并(链式塌缩)", fontsize=12,
-                 fontweight="bold")
     ax.set_xticks([])
     ax.set_yticks([])
 
-    # 右 to-be: 均衡划分 — 15 簇真实份额, C10 高亮 (改进后)
-    ax = fig.add_axes([0.545, 0.14, 0.42, 0.70])
+    # 右下 to-be 份额: 15 簇真实份额, C10 高亮(改进后)
+    ax = fig.add_axes([0.665, 0.045, 0.20, 0.40])
     colors = [ORANGE if i == hi else BLUE for i in range(len(shares))]
     explode = [0.05 if i == hi else 0.0 for i in range(len(shares))]
     wedges, _ = ax.pie(shares, colors=colors, explode=explode,
                        startangle=90, counterclock=False,
                        wedgeprops=dict(width=0.42, edgecolor="white"))
-    for i, w in enumerate(wedges):
-        if shares[i] < 3.0:
-            continue
-        th = math.radians((w.theta1 + w.theta2) / 2)
-        rr = 0.79 + (0.05 if i == hi else 0.0)
-        ax.text(rr * math.cos(th), rr * math.sin(th), labels[i],
-                ha="center", va="center", fontsize=7.5, fontweight="bold",
-                color="white")
+    # v10.27: 饼图缩小后相邻扇区标签互撞 — 只标高亮的赢家簇 C10
+    #   (其余簇的身份住 p11/p12; 均衡份额数字住页面表格)
+    w = wedges[hi]
+    th = math.radians((w.theta1 + w.theta2) / 2)
+    ax.text(0.83 * math.cos(th), 0.83 * math.sin(th), labels[hi],
+            ha="center", va="center", fontsize=8, fontweight="bold",
+            color="white")
     ax.text(0, 0, "15 个\n可用旋钮", ha="center", va="center",
-            fontsize=15, fontweight="bold", color=NAVY)
-    ax.set_title("To-be:强制簇大小均衡(容量约束)", fontsize=12,
-                 fontweight="bold")
+            fontsize=12, fontweight="bold", color=NAVY)
     ax.set_xticks([])
     ax.set_yticks([])
 
-    fig.text(0.5, 0.95, "同一个数据池,两种簇划分:各簇分到的 token 份额",
-             ha="center", va="center", fontsize=13, fontweight="bold")
     ok = verify_layout(fig, "d14")
     path = os.path.join(out_dir, "reinforcement_d14_cluster_balance.png")
     fig.savefig(path, dpi=150)
@@ -421,11 +489,16 @@ def chart_d8_dual(out_dir):
     # v10.26: 与 chart_d8 同套四级字号(评审"字一会大一会小")— 总标题
     #   13.5→13、面板标题 12→11.5、公式 14→11.5(= p9 公式卡)、刻度
     #   9→10、精度/损失标签 9.5→10、小注 9.5→9、图注 8→9。
+    # v10.27: 评审反馈 — ① 删总标题"评分双信号:为什么、怎么做"(页标题
+    #   已表达, 图内三个面板标题自足); ② 评审读法: 右板本质也在讲
+    #   "为什么"(为什么需要损失补位), "怎么做"只是混合公式 — 公式
+    #   独立成右侧公式卡(p9 公式卡同款 FancyBbox), 轨迹板标题改
+    #   "为什么补位", 让位给两信号对比本身。
     rng = np.random.default_rng(11)
     fig = plt.figure(figsize=(13, 3.4))
 
     # 左 为什么: 相变曲线 — 我们在跳变左侧, 不同配比的得分几乎重叠
-    ax = fig.add_axes([0.055, 0.22, 0.40, 0.58])
+    ax = fig.add_axes([0.045, 0.20, 0.375, 0.62])
     x = np.linspace(0, 1, 300)
     y = 0.62 / (1 + np.exp(-(x - 0.62) * 16))
     ax.plot(x, y, color=NAVY, lw=2.4, zorder=3)
@@ -451,40 +524,55 @@ def chart_d8_dual(out_dir):
     ax.set_title("为什么:相变区左侧,基准得分看不出配比好坏", fontsize=11.5,
                  fontweight="bold")
 
-    # 右 怎么做: 相变区之前 — 精度几乎不动, 损失缓慢下降 → 双信号混合
-    ax = fig.add_axes([0.545, 0.22, 0.40, 0.58])
+    # 中 为什么补位: 相变区之前 — 精度几乎不动, 损失缓慢下降
+    ax = fig.add_axes([0.455, 0.20, 0.32, 0.62])
     xs = np.arange(24)
     acc = rng.normal(0, 0.14, 24)                        # 精度: 原地抖动
     nll = 0.75 * np.exp(-xs / 8.0) - 0.45 + rng.normal(0, 0.012, 24)  # 损失: 先快后慢平滑下降
     ax.axhline(0, color="#CCCCCC", lw=0.7, zorder=1)
     ax.plot(xs, acc, color=TEAL, lw=1.5, zorder=3)
     ax.plot(xs, nll, color=NAVY, lw=2.6, zorder=4)
-    ax.set_xlim(-0.5, 40)
+    ax.set_xlim(-0.5, 42)
     ax.set_ylim(-1.5, 1.9)
     ax.set_xticks([])
     ax.set_yticks([])
-    ax.text(25.0, 0.42, "精度:几乎不动\n(相变区之前,区分度小)", fontsize=10,
+    ax.text(24.3, 0.42, "精度:几乎不动\n(相变区之前,区分度小)", fontsize=10,
             color=TEAL, fontweight="bold", va="center", linespacing=1.4,
             zorder=4)
-    ax.text(25.0, -0.52, "损失:平滑下降\n(先快后慢,连续可分)", fontsize=10,
+    ax.text(24.3, -0.52, "损失:平滑下降\n(先快后慢,连续可分)", fontsize=10,
             color=NAVY, fontweight="bold", va="center", linespacing=1.4,
             zorder=4)
-    ax.text(19.75, 1.60,
-            r"$\mathrm{score} = \mathrm{w} \cdot \mathrm{acc}_z + (1-\mathrm{w}) \cdot \mathrm{nll}_z$",
-            ha="center", va="center", fontsize=11.5, color=NAVY, zorder=4)
-    ax.text(11.5, -1.32, "w ≥ 0.5,按实测信噪比定(见下页)",
-            ha="center", fontsize=9, color=DGRAY, zorder=4)
     ax.set_xlabel("候选配比(按序)", fontsize=10)
-    ax.set_title("怎么做:相变区之前 — 精度几乎不动、损失缓慢下降", fontsize=11.5,
+    ax.set_title("为什么补位:精度几乎不动、损失平滑下降", fontsize=11.5,
                  fontweight="bold")
 
-    fig.text(0.5, 0.95, "评分双信号:为什么(左)· 怎么做(右)",
-             ha="center", va="center", fontsize=13, fontweight="bold")
+    # 右 怎么做: 双信号混合 — 公式独立成卡(评审: 公式只是示意,
+    #   不该挤占轨迹板; 与 p9 公式卡同款样式)
+    ax = fig.add_axes([0.815, 0.26, 0.165, 0.52])
+    ax.set_axis_off()
+    ax.add_patch(FancyBboxPatch(
+        (0.02, 0.03), 0.96, 0.94, transform=ax.transAxes,
+        boxstyle="round,pad=0.02,rounding_size=0.04",
+        facecolor="#EDF5F6", edgecolor="#9DC8CC", lw=1.0, zorder=1))
+    ax.text(0.5, 0.885, "怎么做:双信号混合", ha="center", va="center",
+            fontsize=11.5, fontweight="bold", color=NAVY, zorder=3)
+    ax.text(0.5, 0.70,
+            r"$\mathrm{score} = \mathrm{w} \cdot \mathrm{acc}_z$",
+            ha="center", va="center", fontsize=11.5, color=NAVY, zorder=3)
+    ax.text(0.5, 0.54,
+            r"$\;+\;(1-\mathrm{w}) \cdot \mathrm{nll}_z$",
+            ha="center", va="center", fontsize=11.5, color=NAVY, zorder=3)
+    ax.text(0.5, 0.30, "w ≥ 0.5:精度为主、\n损失补位、永不接管",
+            ha="center", va="center", fontsize=9, color=DGRAY,
+            linespacing=1.5, zorder=3)
+    ax.text(0.5, 0.115, "w 按实测信噪比定\n(见下页)", ha="center",
+            va="center", fontsize=9, color=DGRAY, linespacing=1.5, zorder=3)
+
     fig.text(0.5, 0.035, "左 = 相变示意(Phase Transitions, NeurIPS\'25 "
-             "Spotlight — 阈值左侧能力缓慢积累、得分不动);右 = 信号轨迹示意"
-             "(acc_z、nll_z = 精度、损失的标准分;nll_z 取负 — 损失降 → "
-             "nll_z 升);100 题 speedrun:SE ≈ ±4.6pt(实算)",
-             ha="center", va="center", fontsize=9, color=DGRAY)
+              "Spotlight — 阈值左侧能力缓慢积累、得分不动);中 = 信号轨迹示意"
+              "(acc_z、nll_z = 精度、损失的标准分;nll_z 取负 — 损失降 → "
+              "nll_z 升);100 题 speedrun:SE ≈ ±4.6pt(实算)",
+              ha="center", va="center", fontsize=9, color=DGRAY)
     ok = verify_layout(fig, "d8_dual")
     path = os.path.join(out_dir, "reinforcement_d8_dual_signal.png")
     fig.savefig(path, dpi=150)
@@ -521,37 +609,41 @@ def chart_d8(out_dir):
     #   10=正文数据(基准名 9→10、信噪比数字 9.5→10、全部刻度、柱值
     #   标签 9→10); 9=注释(柱内 pt 值 8→9、图例 8.5→9、符号行 8→9)。
     #   左板 x 0.078→0.085(基准名放大让位); 公式卡五元素重排。
+    # v10.27: 评审反馈 — 页的主线改为"不同基准信号强度不同 → 按强度分配
+    #   话语权": ① 左板数据换第3轮 54 实测点的修复后重放(原 prod2 30 点
+    #   表的 gsm8k/math 噪声带先验 bug, 左板"gsm8k 弱"与结果板"w=0.93
+    #   最强"自相矛盾 — 评审"讲的是另一个问题"的根源); 第三列改 f
+    #   (信号占比, 可为负), 排序按 f 降序; ② 总标题改"话语权按信噪比
+    #   分配"; 脚注补数据出处与 f 释义。
     fig = plt.figure(figsize=(13, 3.4))
 
-    # 左 问题: 逐基准 真信号 vs 抽样噪声 (SNR 降序, 上=响) — v10.26:
-    #   柱内 pt 值改右侧三列(信号/噪声/信噪比) — 9pt 柱内标签在信号≈
-    #   噪声的行(mmlu_stem 0.99/1.00、arc_challenge 1.57/1.91)垂直
+    # 左 问题: 逐基准 信号 vs 噪声 (f 降序, 上=强) — v10.26: 柱内 pt 值
+    #   改右侧三列(信号/噪声/f) — 9pt 柱内标签在信号≈噪声的行垂直
     #   重叠, 列式排版永不打架; 列头彩色(信号 TEAL/噪声 RED)替代图例。
-    ax = fig.add_axes([0.085, 0.30, 0.225, 0.50])
+    ax = fig.add_axes([0.085, 0.30, 0.235, 0.50])
     n = len(D8_SNR)
-    for i, (bench, sig, noi, snr) in enumerate(D8_SNR):
+    for i, (bench, sig, noi, f) in enumerate(D8_SNR):
         y = n - 1 - i
-        ax.barh(y + 0.20, sig, height=0.34, color=TEAL, zorder=3)
-        ax.barh(y - 0.20, noi, height=0.34, color=RED, zorder=3)
-        ax.text(0.0595, y, f"{sig * 100:.2f}", va="center", ha="right",
+        ax.barh(y + 0.20, sig * 100, height=0.34, color=TEAL, zorder=3)
+        ax.barh(y - 0.20, noi * 100, height=0.34, color=RED, zorder=3)
+        ax.text(4.72, y, f"{sig * 100:.2f}", va="center", ha="right",
                 fontsize=9, color=DGRAY, zorder=4)
-        ax.text(0.0675, y, f"{noi * 100:.2f}", va="center", ha="right",
+        ax.text(5.50, y, f"{noi * 100:.2f}", va="center", ha="right",
                 fontsize=9, color=DGRAY, zorder=4)
-        ax.text(0.0685, y, f"{snr:.2f}", va="center", ha="left",
+        ax.text(5.58, y, f"{f:+.2f}", va="center", ha="left",
                 fontsize=10, fontweight="bold",
-                color=TEAL if snr >= 1.0 else RED, zorder=4)
-    ax.axvline(0.0510, color=GRAY, lw=0.7, ls="--", zorder=1)
-    ax.text(0.0595, n - 1 + 0.66, "信号", ha="right", va="center",
+                color=TEAL if f >= 0 else RED, zorder=4)
+    ax.text(4.72, n - 1 + 0.66, "信号", ha="right", va="center",
             fontsize=9, fontweight="bold", color=TEAL, zorder=4)
-    ax.text(0.0675, n - 1 + 0.66, "噪声", ha="right", va="center",
+    ax.text(5.50, n - 1 + 0.66, "噪声", ha="right", va="center",
             fontsize=9, fontweight="bold", color=RED, zorder=4)
-    ax.text(0.0685, n - 1 + 0.66, "信噪比", ha="left", va="center",
+    ax.text(5.58, n - 1 + 0.66, "f", ha="left", va="center",
             fontsize=9, fontweight="bold", color=DGRAY, zorder=4)
-    ax.set_xlim(0, 0.080)
+    ax.set_xlim(0, 6.3)
     ax.set_ylim(-0.55, n - 1 + 0.95)
     ax.set_yticks(range(n - 1, -1, -1), [r[0] for r in D8_SNR], fontsize=10)
     ax.set_xticks([])
-    ax.set_title("问题:各基准的真信号 vs 抽样噪声(pt)", fontsize=11.5,
+    ax.set_title("问题:基准间信号强度悬殊", fontsize=11.5,
                  fontweight="bold")
 
     # 中 做法: 公式卡 (话语权按信噪比分配) — v10.24: 四条公式统一
@@ -607,15 +699,16 @@ def chart_d8(out_dir):
               loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=3,
               fontsize=9, frameon=False)
 
-    fig.text(0.5, 0.95, "评分按信噪比(SNR)加权:问题(左)· 做法(中)· 结果(右)",
+    fig.text(0.5, 0.95, "话语权按实测信噪比分配:问题(左)· 做法(中)· 结果(右)",
               ha="center", va="center", fontsize=13, fontweight="bold")
     fig.text(0.5, 0.04,
-             "符号:$\\mathrm{p}$ = 该基准实测平均精度 · $\\mathrm{K}_b$ = 题量 · "
-             "$\\mathrm{c}_b$ = 蒙对率 · $\\mathrm{acc}$ = 候选实测分(去蒙对校正)"
-             " · $\\mathrm{\\sigma}^2_{\\mathrm{noise}}$ = 抽样噪声方差(题量决定)"
-             " · $\\mathrm{\\sigma}^2_{\\mathrm{between}}$ = 候选间实测分的方差"
-             " · $\\mathrm{f}$ = 信噪比(接近 1 = 信号远大于噪声)",
-             ha="center", va="center", fontsize=9, color=DGRAY)
+              "符号:$\\mathrm{p}$ = 实测平均精度 · $\\mathrm{K}_b$ = 题量 · "
+              "$\\mathrm{c}_b$ = 蒙对率 · $\\mathrm{acc}$ = 候选实测分(去蒙对校正)"
+              " · $\\mathrm{\\sigma}^2_{\\mathrm{noise}}$ = 抽样噪声方差 · "
+              "$\\mathrm{\\sigma}^2_{\\mathrm{between}}$ = 候选间分差的方差"
+              " · $\\mathrm{f}$ = 信号占比(> 0 = 信号盖过噪声);"
+              "左图 = 第3轮 54 实测点重放,单位 pt",
+              ha="center", va="center", fontsize=9, color=DGRAY)
     ok = verify_layout(fig, "d8")
     path = os.path.join(out_dir, "reinforcement_d8_scoring_snr.png")
     fig.savefig(path, dpi=150)
