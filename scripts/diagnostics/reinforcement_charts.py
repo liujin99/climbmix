@@ -413,6 +413,8 @@ def chart_d8_dual(out_dir):
     # v10.20: 右板再修(评审反馈"像两条不稳定的准确率曲线") — 损失改
     #   NAVY 加粗、噪声 σ 0.045→0.012 的平滑稳定缓降, 精度细线抖动
     #   (σ 0.14), 平滑度对比一目了然; 底注精简(评审反馈文字太多)。
+    # v10.21: 损失曲线形态再修(评审反馈"不是一条直线") — 改指数型平滑
+    #   下降(先快后慢), 贴近真实 loss 曲线形态。
     rng = np.random.default_rng(11)
     fig = plt.figure(figsize=(13, 3.4))
 
@@ -447,7 +449,7 @@ def chart_d8_dual(out_dir):
     ax = fig.add_axes([0.545, 0.22, 0.40, 0.58])
     xs = np.arange(24)
     acc = rng.normal(0, 0.14, 24)                        # 精度: 原地抖动
-    nll = 0.60 - 0.045 * xs + rng.normal(0, 0.012, 24)   # 损失: 平滑稳定缓降
+    nll = 0.75 * np.exp(-xs / 8.0) - 0.45 + rng.normal(0, 0.012, 24)  # 损失: 先快后慢平滑下降
     ax.axhline(0, color="#CCCCCC", lw=0.7, zorder=1)
     ax.plot(xs, acc, color=TEAL, lw=1.5, zorder=3)
     ax.plot(xs, nll, color=NAVY, lw=2.6, zorder=4)
@@ -458,7 +460,7 @@ def chart_d8_dual(out_dir):
     ax.text(25.0, 0.42, "精度:几乎不动\n(相变区之前,区分度小)", fontsize=9.5,
             color=TEAL, fontweight="bold", va="center", linespacing=1.4,
             zorder=4)
-    ax.text(25.0, -0.52, "损失:平滑稳定下降\n(连续、可分)", fontsize=9.5,
+    ax.text(25.0, -0.52, "损失:平滑下降\n(先快后慢,连续可分)", fontsize=9.5,
             color=NAVY, fontweight="bold", va="center", linespacing=1.4,
             zorder=4)
     ax.text(11.5, 1.68, "score = w·acc_z + (1−w)·nll_z", ha="center",
