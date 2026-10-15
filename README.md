@@ -62,6 +62,8 @@ tokens per point + 6 target arms at 64-NPU world size + anchor).
 | uniform-cluster baseline (paper App. C.1) | 0.1657 | 0.1054 |
 | base model (no mid-training, reference) | 0.1752 | 0.0288 |
 
+![Where the gain lives: flat on multiple choice, decisive on write-out math](docs/assets/gain_profile.png)
+
 Key findings:
 
 - **The reproduction holds end-to-end** — a fresh cold-start search
