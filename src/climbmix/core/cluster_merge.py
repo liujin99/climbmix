@@ -783,7 +783,14 @@ def merge_clusters_by_distance(
 
     cluster_sizes = np.bincount(cluster_labels[cluster_labels >= 0], minlength=max_id).astype(np.int64)
 
-    dist_matrix = cdist(current_centroids[unique_ids], current_centroids[unique_ids], metric='euclidean')
+    # 绝对 id 索引的距离矩阵 (max_id × max_id)。旧实现只对 unique_ids
+    # 建 K×K 矩阵、后续却用绝对 id 索引 — 标签稠密(0..K-1, 生产路径
+    # prune 后必稠密)时两者恰好重合;标签有空洞时越界(等价性回归
+    # 2026-10-15 触发)。非簇行的 inf 永不被访问。
+    dist_matrix = np.full((max_id, max_id), np.inf, dtype=np.float64)
+    dist_matrix[np.ix_(unique_ids, unique_ids)] = cdist(
+        current_centroids[unique_ids], current_centroids[unique_ids],
+        metric='euclidean')
     np.fill_diagonal(dist_matrix, np.inf)
 
     active = np.zeros(max_id, dtype=bool)
@@ -869,11 +876,16 @@ def merge_clusters_by_distance(
     for new_id, final_id in enumerate(final_ids):
         final_to_consecutive[final_id] = new_id
 
-    merged_labels = np.full(len(cluster_labels), -1, dtype=np.int64)
+    # 逐文档重标号: LUT 单次扫描。旧实现按 old_id 逐个做全量布尔掩码,
+    # O(F×N) — 真实池(F=1000, N=116M)上要 ~985 次 1GB 级扫描、十分钟
+    # 以上静默 grinding(d14_real_preview 2026-10-15 卡点), 语义完全等价
+    # 的向量化后一次扫描完成。
+    lut = np.full(max_id + 1, -1, dtype=np.int64)
     for old_id, final_id in current_to_final.items():
-        mask = cluster_labels == old_id
-        new_id = final_to_consecutive.get(final_id, -1)
-        merged_labels[mask] = new_id
+        lut[old_id] = final_to_consecutive.get(final_id, -1)
+    merged_labels = np.full(len(cluster_labels), -1, dtype=np.int64)
+    valid_docs = cluster_labels >= 0
+    merged_labels[valid_docs] = lut[cluster_labels[valid_docs]]
 
     merged_centroid_list = [current_centroids[final_id] for final_id in final_ids]
     merged_centroids = np.array(merged_centroid_list, dtype=np.float32)
