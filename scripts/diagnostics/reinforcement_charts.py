@@ -416,6 +416,8 @@ def chart_d8_dual(out_dir):
     #   (σ 0.14), 平滑度对比一目了然; 底注精简(评审反馈文字太多)。
     # v10.21: 损失曲线形态再修(评审反馈"不是一条直线") — 改指数型平滑
     #   下降(先快后慢), 贴近真实 loss 曲线形态。
+    # v10.24: 公式与 p9 公式卡同步改正体(\mathrm 全覆盖) — 两页同一套
+    #   符号, 风格一致。
     rng = np.random.default_rng(11)
     fig = plt.figure(figsize=(13, 3.4))
 
@@ -465,7 +467,7 @@ def chart_d8_dual(out_dir):
             color=NAVY, fontweight="bold", va="center", linespacing=1.4,
             zorder=4)
     ax.text(19.75, 1.60,
-            r"$\mathrm{score} = w \cdot \mathrm{acc}_z + (1-w) \cdot \mathrm{nll}_z$",
+            r"$\mathrm{score} = \mathrm{w} \cdot \mathrm{acc}_z + (1-\mathrm{w}) \cdot \mathrm{nll}_z$",
             ha="center", va="center", fontsize=14, color=NAVY, zorder=4)
     ax.text(11.5, -1.32, "w ≥ 0.5,按实测信噪比定(见下页)",
             ha="center", fontsize=9.5, color=DGRAY, zorder=4)
@@ -498,6 +500,12 @@ def chart_d8(out_dir):
     #   三联面板拉开间隔(0.33/0.58in → 0.81/0.98in, 左板 y 刻度 10→9pt
     #   给基准名让位); 图底加符号脚注(评审"公式符号需要标注":
     #   p/K_b/c_b/σ²_noise/σ²_between/f)。
+    # v10.24: 评审反馈 — ① 公式卡字体统一(评审"字体不一致"): 四条公式
+    #   一律 12pt/NAVY/正体(\mathrm 全覆盖 — 原斜体变量与正体函数名混
+    #   排, 且 13/12pt、NAVY/灰混用); ② 补 σ²_between 的计算式(评审:
+    #   只给了 σ²_noise 的); ③ 公式设计原因((1+f)/2 与 0.5 下限、
+    #   1−noise/between 的信号占比含义、二项方差与 (1−c_b)² 的来历)
+    #   写入 p9 PPT 备注(make_deck notes 字段)。
     fig = plt.figure(figsize=(13, 3.4))
 
     # 左 问题: 逐基准 真信号 vs 抽样噪声 (SNR 降序, 上=响)
@@ -535,17 +543,20 @@ def chart_d8(out_dir):
         (0.02, 0.03), 0.96, 0.94, transform=ax.transAxes,
         boxstyle="round,pad=0.02,rounding_size=0.04",
         facecolor="#EDF5F6", edgecolor="#9DC8CC", lw=1.0, zorder=1))
-    ax.text(0.5, 0.90, "做法:话语权按信噪比", ha="center", va="center",
+    ax.text(0.5, 0.92, "做法:话语权按信噪比", ha="center", va="center",
             fontsize=12, fontweight="bold", color=NAVY, zorder=3)
-    ax.text(0.5, 0.66,
-            r"$w = \mathrm{clip}\left(\frac{1+f}{2},\; 0.5,\; 1\right)$",
-            ha="center", va="center", fontsize=13, color=NAVY, zorder=3)
-    ax.text(0.5, 0.40,
-            r"$f = 1 - \sigma^2_{\mathrm{noise}} \,/\, \sigma^2_{\mathrm{between}}$",
+    ax.text(0.5, 0.765,
+            r"$\mathrm{w} = \mathrm{clip}\left(\frac{1+\mathrm{f}}{2},\; 0.5,\; 1\right)$",
             ha="center", va="center", fontsize=12, color=NAVY, zorder=3)
-    ax.text(0.5, 0.14,
-            r"$\sigma^2_{\mathrm{noise}} = \frac{p\,(1-p)}{K_b\,(1-c_b)^2}$",
-            ha="center", va="center", fontsize=12, color=DGRAY, zorder=3)
+    ax.text(0.5, 0.575,
+            r"$\mathrm{f} = 1 - \mathrm{\sigma}^2_{\mathrm{noise}} \,/\, \mathrm{\sigma}^2_{\mathrm{between}}$",
+            ha="center", va="center", fontsize=12, color=NAVY, zorder=3)
+    ax.text(0.5, 0.35,
+            r"$\mathrm{\sigma}^2_{\mathrm{noise}} = \frac{\mathrm{p}\,(1-\mathrm{p})}{\mathrm{K}_b\,(1-\mathrm{c}_b)^2}$",
+            ha="center", va="center", fontsize=12, color=NAVY, zorder=3)
+    ax.text(0.5, 0.115,
+            r"$\mathrm{\sigma}^2_{\mathrm{between}} = \mathrm{Var}_b(\mathrm{acc})$",
+            ha="center", va="center", fontsize=12, color=NAVY, zorder=3)
 
     # 右 结果: gsm8k — 第3轮实验 误加权 vs 第5轮实验 改进后 (赢家 vs uniform)
     ax = fig.add_axes([0.615, 0.30, 0.355, 0.50])
@@ -578,10 +589,11 @@ def chart_d8(out_dir):
     fig.text(0.5, 0.95, "评分按信噪比(SNR)加权:问题(左)· 做法(中)· 结果(右)",
               ha="center", va="center", fontsize=13, fontweight="bold")
     fig.text(0.5, 0.04,
-             "符号:$p$ = 该基准实测平均精度 · $K_b$ = 题量 · $c_b$ = 蒙对率"
-             " · $\\sigma^2_{\\mathrm{noise}}$ = 抽样噪声方差(题量决定)"
-             " · $\\sigma^2_{\\mathrm{between}}$ = 候选间真实差异方差"
-             " · $f$ = 信噪比(接近 1 = 信号远大于噪声)",
+             "符号:$\\mathrm{p}$ = 该基准实测平均精度 · $\\mathrm{K}_b$ = 题量 · "
+             "$\\mathrm{c}_b$ = 蒙对率 · $\\mathrm{acc}$ = 候选实测分(去蒙对校正)"
+             " · $\\mathrm{\\sigma}^2_{\\mathrm{noise}}$ = 抽样噪声方差(题量决定)"
+             " · $\\mathrm{\\sigma}^2_{\\mathrm{between}}$ = 候选间实测分的方差"
+             " · $\\mathrm{f}$ = 信噪比(接近 1 = 信号远大于噪声)",
              ha="center", va="center", fontsize=8, color=DGRAY)
     ok = verify_layout(fig, "d8")
     path = os.path.join(out_dir, "reinforcement_d8_scoring_snr.png")
