@@ -51,8 +51,9 @@ CHARTS_USED = ["search_convergence.png", "proxy_target_consistency.png",
                "d14_real_preview.png", "d14_merge_diag.png",
                "reinforcement_d8_dual_signal.png",
                "reinforcement_d8_scoring_snr.png",
-               "reinforcement_d19_extrapolation.png",
-               "finding_quality_value.png", "finding_pool_manifold.png",
+                "reinforcement_d19_extrapolation.png",
+                "calibration_prod4_oof.png",
+                "finding_quality_value.png", "finding_pool_manifold.png",
                "cluster_alpha_vs_score.png"]
 
 # deck 专属 (reinforcement 系图, 中文, 由 reinforcement_charts.py 写进
@@ -67,9 +68,12 @@ CHARTS_USED = ["search_convergence.png", "proxy_target_consistency.png",
 # v10.4: arms_main_results(主结果页删, 数字全在结论先行表+总表) 与
 # cluster_alpha_vs_score(专业向小倍数图, 换成领导友好的配比全景) 不再
 # 进汇报包, 仍是 run 目录的实验产物
+# v10.39: calibration_prod4_oof = 附录新增校准散点(reinforcement 系,
+#    deck 专属)。
 DECK_OWNED = {"reinforcement_d8_dual_signal.png",
               "reinforcement_d8_scoring_snr.png",
               "reinforcement_d19_extrapolation.png",
+              "calibration_prod4_oof.png",
               "recipe_distribution.png",
               "cluster_content_map.png",
               "finding_quality_value.png", "finding_pool_manifold.png"}
@@ -103,7 +107,11 @@ def resolve_chart(dirs, name):
                 return p
     return None
 
-# ── 幻灯片文案 (v10.38 — p10 主图回退:四轮真实数据改造(校准散点/
+# ── 幻灯片文案 (v10.39 — 新增附录页 p22『预测器有多大误差』: 用户裁决
+#    v1.0.42 校准散点进附录(先出图过目后定); 图 = chart_d20_calibration
+#    整页版式 12.5×5.6(不再挤扁条, 加 xlabel、字号放大), 111 实测配置
+#    OOF 预测 vs 实测 + ±σ=0.42 带外推终选空心圈 + L1a 落款; 页数 21→22。
+#    v10.38 — p10 主图回退:四轮真实数据改造(校准散点/
 #    多项式混合/折线混合)均被评审否决 — 真实数据画不出『外推上翘』形
 #    状(15 维稀疏无点云切片、本地重放无上翘、服务器拟合曲线未存档),
 #    恢复 v10.5 原虚构示意图(图内自带『示意,非真实数据』标注);p10
@@ -759,8 +767,25 @@ SLIDES = [
          caption="读法:x = 合并进程中的簇数(左多右少),y = 当前最近一对簇的质心距离;"
                  "红线 = τ = 0.9(全程未触发);灰点线 = τ′ = 0.7 — 即使收紧阈值,也要并到 "
                  "natural_K = 49 才自然停,凑满 15 簇仍须强并;"
-                 "图 = 合并器运行记录(merge_profile.json,真实池重放),无投影、无调整"),
-  ]
+                  "图 = 合并器运行记录(merge_profile.json,真实池重放),无投影、无调整"),
+    dict(kind="image", title="附录：预测器有多大误差 — 111 个配置的预测 vs 实测（σ≈0.42）",
+         takeaway="预测固有误差 σ≈0.42：外推终选的预测『领先』远小于噪声；"
+                  "实测最优 cfg25 测前预测仅 +0.10 — 好点测前也认不出，必须实测",
+         image="calibration_prod4_oof.png",
+         caption="读法:横轴 = 5 折 out-of-fold 预测,纵轴 = 实测;虚线 = 理想(预测=实测),"
+                 "青色带 = ±σ(预测固有误差);红圈 = 外推终选(预测最优、从未实测),"
+                 "箭头指向其正式实测结果(L1a 19.72/19.90,输给 cfg72 21.42 / cfg25 20.66);"
+                 "图 = 真实数据重放,非示意",
+         notes="细节备查(本页 = p10『外推不可信』的定量底牌):"
+               "① 校准协议:5 折 out-of-fold 重放(镜像 predictor_audit A2 协议,"
+               "生产同款 LightGBM,确定性)→ σ = 预测固有误差 0.42;服务器 22 对"
+               "复评 σ=0.4522、bias −0.1155,同量级;② cfg25:OOF 预测 +0.10、"
+               "实测 +1.26,残差 ≈ 2.8σ — 实测最优点在测之前同样预测不出来,"
+               "这是『必须实测、不能只信预测』最硬的佐证;③ 外推终选怎么来:"
+               "全设计空间 4 组 Dirichlet × 25,000 = 10 万候选,终轮模型打分取 "
+               "argmin(论文 §3.3),落在从未实测的 C10 高 × C5 高角落;"
+               "④ 守卫口径:预测领先 < σ 即 no-claim(prod5 已上线)。"),
+   ]
 
 
 def png_size(path):
