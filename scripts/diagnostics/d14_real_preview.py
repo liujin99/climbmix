@@ -145,12 +145,13 @@ def embed_2d(nrm):
         from sklearn.manifold import TSNE
         emb = TSNE(n_components=2, init="pca", perplexity=30.0,
                    random_state=42).fit_transform(nrm)
-        return emb, "位置 = t-SNE 二维(保邻域,距离无尺度含义)"
+        return emb, ("位置 = t-SNE 二维(保邻域,距离无尺度;"
+                     "孤岛沿方向外推到流形外)")
     except ImportError:
         X = nrm - nrm.mean(0)
         _, _, Vt = np.linalg.svd(X, full_matrices=False)
-        return X @ Vt[:2].T, ("位置 = t-SNE 二维(保邻域,距离无尺度;"
-                             "孤岛沿方向外推到流形外)")
+        return X @ Vt[:2].T, ("位置 = 归一化质心的 PCA 二维投影(降级);"
+                             "孤岛沿方向外推到流形外")
 
 
 def separate_islands(P, man_mask, span):
