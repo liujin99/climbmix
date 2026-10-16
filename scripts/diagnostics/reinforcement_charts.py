@@ -821,24 +821,25 @@ def chart_d19(out_dir):
     ax.axvspan(XS, 11.0, color=RED, alpha=0.07, zorder=1)
     ax.axvline(XS, color=DGRAY, lw=0.9, ls="--", zorder=2)
     xg = np.linspace(1.2, 7.45, 160)
-    ax.plot(xg, pg(xg), "--", color=GRAY, lw=1.5, zorder=3,
+    ax.plot(xg, pg(xg), "--", color=GRAY, lw=2.2, zorder=3,
             label="真实趋势(实测点勾画,止于覆盖边界)")
-    ax.plot(xg, pb(xg), "-", color=BLUE, lw=1.7, zorder=4,
+    ax.plot(xg, pb(xg), "-", color=BLUE, lw=2.6, zorder=4,
             label="预测器(终轮模型真实重放)")
     ax.plot([7.45, XW], [float(pb(7.45)), pred_w], "--", color=BLUE,
-            lw=1.7, zorder=4)                     # 外推段(模型的嘴)
-    ax.scatter(xp, yp, s=30, color=NAVY, zorder=5,
+            lw=2.6, zorder=4)                     # 外推段(模型的嘴)
+    ax.scatter(xp, yp, s=62, color=NAVY, edgecolors="white",
+               linewidth=0.6, zorder=5,
                label="实测配置(真实效用;横轴位置示意)")
-    ax.scatter([xp[i25]], [yp[i25]], s=150, facecolors="none",
-               edgecolors=TEAL, linewidth=1.8, zorder=6)
+    ax.scatter([xp[i25]], [yp[i25]], s=190, facecolors="none",
+               edgecolors=TEAL, linewidth=2.2, zorder=6)
     ax.text(xp[i25] - 0.12, 1.47,
             f"实测最优 cfg25:实测 {a25:+.2f}(可信,模型只给 {p25:+.2f})",
             ha="right", va="center", fontsize=8.5, fontweight="bold",
             color=TEAL, zorder=7)
     ax.errorbar([XW], [pred_w], yerr=sigma, fmt="none", ecolor=RED,
                 elinewidth=1.4, capsize=5, zorder=5)
-    ax.scatter([XW], [pred_w], s=150, color=RED, edgecolors="white",
-               linewidth=1.2, zorder=6)
+    ax.scatter([XW], [pred_w], s=190, color=RED, edgecolors="white",
+               linewidth=1.4, zorder=6)
     ax.text(XW + 0.18, pred_w + 0.46, "外推终选(从未实测)",
             ha="left", va="center", fontsize=8.5, fontweight="bold",
             color=RED, zorder=7)
@@ -848,17 +849,20 @@ def chart_d19(out_dir):
     ax.text(XW + 0.18, pred_w - 0.46,
             f"领先差距 {abs(pred_w - p25):.2f} ≪ σ {sigma:.2f} = 噪声抽签",
             ha="left", va="center", fontsize=8.5, color=RED, zorder=7)
-    y_open = 0.05
-    ax.plot([XW, XW], [y_open, pred_w], ":", color=RED, lw=1.6, zorder=5)
-    ax.scatter([XW], [y_open], s=130, facecolors="none", edgecolors=RED,
-               linewidth=2.0, zorder=6)
-    ax.text(9.4, -0.42, "正式实测(L1a):输自家实测点 1.7pt(见下)",
-            ha="center", va="center", fontsize=8.5, fontweight="bold",
+    y_open = -0.75
+    ax.annotate("", xy=(XW, y_open + 0.30), xytext=(XW, pred_w - 0.05),
+                arrowprops=dict(arrowstyle="-|>", color=RED, lw=2.2,
+                                linestyle=":", mutation_scale=24),
+                zorder=5)
+    ax.scatter([XW], [y_open], s=160, facecolors="none", edgecolors=RED,
+               linewidth=2.2, zorder=6)
+    ax.text(XW + 0.28, y_open, "正式实测(L1a):输自家实测点 1.7pt(见下)",
+            ha="left", va="center", fontsize=8.5, fontweight="bold",
             color=RED, zorder=7)
     ax.text(4.2, 1.78, "实测过的区域(预测可信)", ha="center", va="center",
-            fontsize=10, fontweight="bold", color=DGRAY, zorder=7)
+            fontsize=11, fontweight="bold", color=DGRAY, zorder=7)
     ax.text(9.3, 1.78, "从未实测 = 外推(预测不可信)", ha="center",
-            va="center", fontsize=10, fontweight="bold", color=RED,
+            va="center", fontsize=11, fontweight="bold", color=RED,
             zorder=7)
     ax.set_xlim(0.8, 11.0)
     ax.set_ylim(-1.15, 2.05)
@@ -870,7 +874,7 @@ def chart_d19(out_dir):
     ax.set_title("为什么外推不可信:拟合模型只对见过的区域负责"
                  "(prod4 真实数据,横轴示意)", fontsize=10.5,
                  fontweight="bold")
-    ax.legend(fontsize=8, loc="upper left", framealpha=0.9)
+    ax.legend(fontsize=8.5, loc="upper left", framealpha=0.92)
     fig.text(0.5, 0.235,
               "正式实测(prod4 L1a,3B 目标模型,gsm8k):外推终选 19.72 / "
               "19.90(双种子)— 输自家实测点 cfg72 21.42 / cfg25 20.66"
