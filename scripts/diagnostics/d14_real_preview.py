@@ -11,9 +11,9 @@
 #  点 = 细簇(K_init=1000 kmeans 的簇), 大小 ∝ token, 位置 = 归一化质心的
 #  t-SNE 二维嵌入(孤岛外推到流形外, 图内脚注声明), 分组 = 宏观簇边界
 #  — 左图整条流形一圈(塌缩)+ 孤岛蓝圈, 右图 15 个均衡分片环(切片非
-#  天然聚类)。中缝 = 改进动作箭头; 各栏右上角嵌旋钮配比小饼(同一运行
-#  的真实 token 份额, 辅助; 左 1 巨 + 14 孤岛 = 1 个旋钮, 右 15 均分 =
-#  15 个旋钮, 右饼分片与右图环同色同序)。
+#  天然聚类)。中缝 = 改进动作箭头; 各栏右上角角标式旋钮小饼(大半移出
+#  面板; 同一运行的真实 token 份额, 辅助; 左 1 巨 + 14 孤岛 = 1 个旋
+#  钮, 右 15 均分 = 15 个旋钮, 右饼分片与右图环同色同序)。
 #  伴随输出 d14_merge_diag.png = 合并诊断曲线(merge_profile.json 数据,
 #  无投影无调整 — "最近邻距离全程未够到 τ"的硬证据, deck 附录用)。
 #
@@ -397,36 +397,39 @@ def main():
              f"聚类);圈外灰点 = 孤岛,已并入所属分片;每簇一个旋钮",
              ha="center", va="center", fontsize=9, color=NAVY)
 
-    # 旋钮饼 = 各栏右上角的辅助小图(评审两轮: 先"把两个饼状旋钮图放进
-    #   来, 可以缩小一点", 再"中缝夹箭头的排法有点丑, 放到聚类簇图的
-    #   右上/右下角, 整体再小一点")— 饼 = 同一次运行的真实 token 份额,
-    #   环状样式沿用旧手绘图(reinforcement_d14_cluster_balance); 左饼
-    #   红巨簇 + 蓝孤岛(与左图圈色一致, 白字标巨簇份额), 右饼 15 片与
-    #   右图环同色同序; 直径 ≈ 1.07in(放置尺寸), 底衬圆 = 面板底色,
-    #   隔开底下的散点
+    # 旋钮饼 = 各栏右上角的角标式小图(评审三轮: "放进来可缩小" → "中缝
+    #   夹箭头有点丑, 放右上/右下角再小点" → "还是太大、盖住了原图, 往
+    #   外挪挪")— 饼心钉在面板右上角、大半移出面板(左饼挑进中缝上空,
+    #   右饼挑出右边距), 饼直径 ≈ 0.78in(放置尺寸), 对面板的遮挡 ~5% →
+    #   ~2%; 饼 = 同一次运行的真实 token 份额, 环状样式沿用旧手绘图
+    #   (reinforcement_d14_cluster_balance); 左饼红巨簇 + 蓝孤岛(与左图
+    #   圈色一致, 白字标巨簇份额), 右饼 15 片与右图环同色同序; 底衬圆 =
+    #   面板底色, 隔开底下的散点; 显式 lims ±1.16 = 底衬圆贴满轴框
     def _pie(x0, vals, colors, center, ccol, wlab=None):
-        ax = fig.add_axes([x0, 0.4686, 0.0885, 0.3194])
-        ax.add_patch(plt.Circle((0, 0), 1.14, facecolor="#F7FBFB",
+        ax = fig.add_axes([x0, 0.6246, 0.075, 0.2708])
+        ax.add_patch(plt.Circle((0, 0), 1.16, facecolor="#F7FBFB",
                                 edgecolor="#C4D2D2", lw=0.9, zorder=0))
         wedges, _ = ax.pie(vals, colors=colors, startangle=90,
                            counterclock=False,
                            wedgeprops=dict(width=0.42, edgecolor="white"))
+        ax.set_xlim(-1.16, 1.16)
+        ax.set_ylim(-1.16, 1.16)
         ax.text(0, 0, center, ha="center", va="center", fontsize=9,
                 fontweight="bold", color=ccol)
         if wlab is not None:
             w = wedges[0]
             th = float(np.radians((w.theta1 + w.theta2) / 2))
             ax.text(0.78 * np.cos(th), 0.78 * np.sin(th), wlab,
-                    ha="center", va="center", fontsize=8.5,
+                    ha="center", va="center", fontsize=8,
                     fontweight="bold", color="white")
         ax.set_axis_off()
         return ax
 
     gi = int(np.argmax(d_sh))
-    _pie(0.3545, [d_sh[gi]] + [s for i, s in enumerate(d_sh) if i != gi],
+    _pie(0.4205, [d_sh[gi]] + [s for i, s in enumerate(d_sh) if i != gi],
          [RED] + [BLUE] * (len(d_sh) - 1),
          "1 个\n旋钮", RED, wlab=f"{d_sh.max():.1%}")
-    _pie(0.8645, b_sh, [cmap(i % 20) for i in range(len(b_sh))],
+    _pie(0.9125, b_sh, [cmap(i % 20) for i in range(len(b_sh))],
          f"{len(b_sh)} 个\n旋钮", NAVY)
 
     # 中缝: 改进动作箭头(评审: "as is 和 to be 中间加个箭头, 显示前后
