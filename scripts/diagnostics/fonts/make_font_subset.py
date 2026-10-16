@@ -36,9 +36,9 @@ MUST_SOURCES = [os.path.join(HERE, "..", n) for n in
                  "d14_real_preview.py")]
 BONUS_SOURCES = [os.path.join(HERE, "..", "make_deck.py")]
 
-# 只进 stdout 不进图的字符 (wqy 缺这两个符号; U+2212 由
+# 只进 stdout/注释不进图的字符 (wqy 缺这些符号; U+2212 由
 # axes.unicode_minus=False 规避, ASCII 负号替代)
-SKIP_CHARS = {"✓", "✗"}
+SKIP_CHARS = {"✓", "✗", "−"}
 
 # 富余区段 (码位闭区间): 常见符号/全角, 防文案小改就出方框
 EXTRA_RANGES = [

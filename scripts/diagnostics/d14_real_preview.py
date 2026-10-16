@@ -249,8 +249,14 @@ def chart_merge_diag(prof, tau, out, src_note):
     nk = prof.get("natural_K", {}).get("0.7")
     if isinstance(nk, int):
         ax.axvline(nk, color=GRAY, ls=":", lw=1.0, zorder=2)
-        ax.text(nk, tau * 1.06, f" natural_K(0.7) = {nk}",
-                ha="left", va="top", fontsize=9.5, color=GRAY)
+        # 横轴反向(左 = 大 K):nk 小 = 靠右缘, 文字须向左摆防越界
+        xl, xr = ax.get_xlim()
+        at_right = (xl - nk) / (xl - xr) > 0.55
+        ax.text(nk, tau * 1.06,
+                f"natural_K(0.7) = {nk} " if at_right
+                else f" natural_K(0.7) = {nk}",
+                ha="right" if at_right else "left", va="top",
+                fontsize=9.5, color=GRAY)
     fig.text(0.5, 0.955, "距离合并全程:最近邻距离从未够到 τ — 塌缩是结构性的",
              ha="center", va="center", fontsize=13, fontweight="bold")
     fig.text(0.5, 0.035, f"数据 = merge_profile.json(合并器运行记录,无投影、"
@@ -365,7 +371,7 @@ def main():
     fig.text(0.245, 0.862, f"As-is:论文式距离合并 — 最大簇 {d_sh.max():.1%}",
              ha="center", va="center", fontsize=11.5, fontweight="bold",
              color=RED)
-    fig.text(0.245, 0.075, f"点 = 细簇:红框 = {len(np.flatnonzero(dm == giant))}"
+    fig.text(0.245, 0.105, f"点 = 细簇:红框 = {len(np.flatnonzero(dm == giant))}"
              f" 个并成 1 簇({d_sh.max():.1%}),蓝圈 = 孤岛 {isl_n} 簇"
              f"({isl_sh:.1%})— 旋钮只剩 1 个",
              ha="center", va="center", fontsize=9, color=RED)
@@ -393,7 +399,7 @@ def main():
     fig.text(0.755, 0.862, f"To-be:容量约束均衡 — 最大簇 {b_sh.max():.1%}",
              ha="center", va="center", fontsize=11.5, fontweight="bold",
              color=NAVY)
-    fig.text(0.755, 0.075, f"同批细簇切成 {len(np.unique(bm))} 簇(切片 ≠ 天然"
+    fig.text(0.755, 0.105, f"同批细簇切成 {len(np.unique(bm))} 簇(切片 ≠ 天然"
              f"聚类);圈外灰点 = 孤岛,已并入所属分片;每簇一个旋钮",
              ha="center", va="center", fontsize=9, color=NAVY)
 
@@ -441,7 +447,7 @@ def main():
     fig.text(0.5, 0.565, "容量重切", ha="center", va="center",
              fontsize=10, fontweight="bold", color=TEAL)
 
-    fig.text(0.5, 0.02, "点 = 细簇(大小 ∝ token),圈 = 宏观簇边界"
+    fig.text(0.5, 0.025, "点 = 细簇(大小 ∝ token),圈 = 宏观簇边界"
              "(◆ = 簇中心),饼 = 簇配比(token 份额);" + embed_note + ";"
              + src_note,
              ha="center", va="center", fontsize=9, color=GRAY)
