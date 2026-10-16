@@ -26,13 +26,14 @@
 #                                           第3轮重放), 中=做法(公式卡,
 #                                           mathtext), 右=结果(gsm8k:
 #                                           第3轮误加权 vs 第5轮改进后)
-#    reinforcement_d19_extrapolation.png    ③ 外推问题(真实数据, 原示意图
-#                                           v10.34 退役): 左 = prod4 舰队
-#                                           111 实测点 × 终轮预测器 5 折
-#                                           out-of-fold 重放(残差 σ ≈ 0.45
-#                                           = 守卫 margin 依据), 右 = L1a
-#                                           正式实测: 外推终选双种子垫底,
-#                                           输自家实测点 1.7pt
+#    reinforcement_d19_extrapolation.png    ③ 外推问题(真实数据, 单面板,
+#                                           评审"一眼看懂"): 预测 vs 实测
+#                                           散点(prod4 舰队 111 实测点,
+#                                           5 折 out-of-fold 重放)+ ±σ
+#                                           误差带 + 外推终选开放标记
+#                                           (终轮模型预测高位、从未实测)
+#                                           → 箭头落款: L1a 正式实测输
+#                                           自家实测点 1.7pt
 #    recipe_distribution.png       ④ 配比全景对比(v10.4): 赢家/cfg90/cfg100/
 #                                  uniform/池自然占比 在 15 语义簇上的 100%
 #                                  堆叠 + domainfix 域标签配比单列(域空间,
@@ -706,8 +707,8 @@ def chart_d8(out_dir):
               "(去蒙对校正) · $\\mathrm{f}$ = 信号占比(> 0 = 信号盖过噪声)",
               ha="center", va="center", fontsize=9, color=DGRAY)
     fig.text(0.5, 0.028,
-              "白话:$\\mathrm{\\sigma}^2_{\\mathrm{noise}}$ = 同一配比重测分数"
-              "的抖动(题少则抖大) · $\\mathrm{\\sigma}^2_{\\mathrm{between}}$ = "
+              "$\\mathrm{\\sigma}^2_{\\mathrm{noise}}$ = 同一配比重复测量的分数"
+              "波动(题量越少,波动越大) · $\\mathrm{\\sigma}^2_{\\mathrm{between}}$ = "
               "候选间实测分差的方差;左图 = 第3轮 54 实测点重放,单位 pt",
               ha="center", va="center", fontsize=9, color=DGRAY)
     ok = verify_layout(fig, "d8")
@@ -721,16 +722,16 @@ def chart_d8(out_dir):
 # ── ③ D19: 外推问题示意图 (非真实数据; v10.5: prod4 数字移入 deck
 #    表格, 图幅压扁, 口语标注改专业表述) ─────────────────────────────
 def chart_d19(out_dir):
-    # 真实数据版(评审: 原示意图退役, 与 p7 同款换真实数据)。左 = prod4
-    #   搜索舰队 111 个实测配置 × 生产同款 LightGBM 5 折 out-of-fold 重放
-    #   (每点的预测来自未见过它的模型): 预测 − 实测的残差散布 = 预测分的
-    #   固有误差 σ ≈ 0.45 — 守卫 margin max(0.30, σ) 的定标依据;右 = prod4
-    #   L1a 正式实测(同池 3B 目标模型 gsm8k): 预测器设计空间 argmax 选出
-    #   的外推点(搜索阶段从未实测)双种子垫底热区, 输自家实测点 1.7pt。
-    #   不画外推点的预测值 — 它跨 lightgbm 版本不可复现(本地重放 −0.17
-    #   ~ +0.79, 服务器模型曾排设计空间第一; 预测极值点 = 实现敏感 =
-    #   外推脆弱性的独立证据, 详见 make_deck p10 备注; 但任何重放下
-    #   claimed gain 均为负, 守卫必触发)。
+    # 真实数据版 II(评审: 上一版双面板残差图费解 → 回到原示意图"一眼
+    #   看懂"的语法, 单面板): 预测 vs 实测散点 = 真实拟合水平(111 个实测
+    #   配置, 生产同款 LightGBM 5 折 out-of-fold 重放, 每点的预测来自未
+    #   见过它的模型), y = x 对角线 = 理想预测, ±σ 带 = 预测固有误差
+    #   (守卫 margin max(0.30, σ) 的定标依据);外推终选 = 终轮模型(选出
+    #   它的那个模型)的预测高位、却从未实测 — 开放红圈悬在图顶, 红箭头
+    #   指向落款: 正式实测(prod4 L1a, 3B 目标, gsm8k)输自家实测点 1.70pt。
+    #   外推点横坐标 = 终轮模型重放预测(本地 +0.79, 与 cfg25 的 +0.86 在
+    #   版本噪声内 — 服务器模型曾将其排为设计空间第一, argmax 跨
+    #   lightgbm 版本不可复现 = 外推脆弱性的独立证据, 详见 p10 备注)。
     csv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "data", "prod4_search_dump.csv")
     if not os.path.isfile(csv_path):
@@ -763,8 +764,7 @@ def chart_d19(out_dir):
     ids = [cid for _, cid, _ in rows]
     n = len(rows)
     # 5 折 out-of-fold(镜像 predictor_audit.py A2 协议 B: rng 7 分折,
-    #   折内 rng 42 切 20% 早停 → 同树数全量重拟合 — 生产终选同款协议;
-    #   确定性: 同机同库结果逐位可复现)
+    #   折内 rng 42 切 20% 早停 → 同树数全量重拟合; 确定性)
     fold_idx = np.random.default_rng(7).permutation(n)
     oof = np.zeros(n)
     for te in np.array_split(fold_idx, 5):
@@ -779,79 +779,88 @@ def chart_d19(out_dir):
                val_losses=tgt[trn][iva])
         pb = pa.refit_on_full([cfgs[i] for i in trn], tgt[trn])
         oof[te] = pb.predict([cfgs[i] for i in te])
-    pred_u = -oof                                  # 预测效用
-    resid = pred_u - actual                        # 残差 = 预测 − 实测
-    sigma = float(np.std(resid, ddof=1))
+    pred_u = -oof                                  # 预测效用(OOF)
+    sigma = float(np.std(pred_u - actual, ddof=1))
+    # 终轮模型(prod4 终选所用: rng 42 全舰队切 20% 早停; A2 全量重拟合
+    #   晚于 prod4)→ 外推终选点的预测(权重 = optimal_mixture_weights:
+    #   C5 .3540 / C10 .4737 / C12 .0641 + 12 簇 0.009 地板)
+    nv = max(5, int(n * 0.2))
+    perm = np.random.default_rng(42).permutation(n)
+    itr, iva = perm[:n - nv], perm[n - nv:]
+    p_term = LightGBMPredictor(K, PredictorConfig())
+    p_term.fit([cfgs[i] for i in itr], tgt[itr],
+               val_configs=[cfgs[i] for i in iva], val_losses=tgt[iva])
+    winner_w = np.array([0.009, 0.009, 0.009, 0.009, 0.009, 0.354,
+                         0.009, 0.009, 0.009, 0.009, 0.4737, 0.009,
+                         0.0641, 0.009, 0.009])
+    pred_w = -float(p_term.predict([MixtureConfig(mixture_weights=
+                       MixtureWeights(weights=winner_w))])[0])
 
     fig = plt.figure(figsize=(13, 2.43))
-
-    # 左 预测器的真实水平 — 宽矮画幅用残差图(y=x 散点在此高度被压扁):
-    #   零线上下散布, ±σ 带即"预测分的固有误差", cfg25/cfg72 高亮
-    ax = fig.add_axes([0.045, 0.21, 0.345, 0.59])
-    xlo, xhi = float(pred_u.min()) - 0.08, float(pred_u.max()) + 0.08
-    ax.axhspan(-sigma, sigma, color=RED, alpha=0.07, zorder=1)
-    ax.axhline(0, color=GRAY, lw=1.0, ls="--", zorder=2)
-    ax.axhline(sigma, color=RED, lw=0.8, ls=":", zorder=2)
-    ax.axhline(-sigma, color=RED, lw=0.8, ls=":", zorder=2)
-    ax.scatter(pred_u, resid, s=20, color=NAVY, alpha=0.7, lw=0.4,
+    ax = fig.add_axes([0.055, 0.30, 0.885, 0.48])
+    xlo = float(min(pred_u.min(), 0.0)) - 0.25
+    xhi = max(float(pred_u.max()), pred_w) + 0.32
+    ylo, yhi = float(min(actual.min(), 0.0)) - 0.17, 1.95
+    d0, d1 = max(xlo, ylo), min(xhi, yhi)
+    xs = np.linspace(d0, d1, 60)
+    ax.fill_between(xs, xs - sigma, xs + sigma, color=TEAL, alpha=0.10,
+                    zorder=1)
+    ax.plot(xs, xs, "--", color=GRAY, lw=1.1, zorder=2)
+    ax.scatter(pred_u, actual, s=20, color=NAVY, alpha=0.75, lw=0.4,
                edgecolors="white", zorder=3)
-    for cid, lab in ((25, "cfg25(实测最优)"), (72, "cfg72(终选最近邻)")):
+    for cid, lab in ((25, "cfg25(实测最优)"), (72, "cfg72(实测 #2)")):
         i = ids.index(cid)
-        ax.scatter([pred_u[i]], [resid[i]], s=130, facecolors="none",
+        ax.scatter([pred_u[i]], [actual[i]], s=130, facecolors="none",
                    edgecolors=TEAL, lw=1.8, zorder=5)
-        ax.annotate(lab, (pred_u[i], resid[i]), xytext=(0, 12),
+        ax.annotate(lab, (pred_u[i], actual[i]), xytext=(0, 8),
                     textcoords="offset points", fontsize=8.5,
                     color=TEAL, ha="center", fontweight="bold", zorder=6)
-    ylo = min(float(resid.min()), -sigma) - 0.30
-    yhi = max(float(resid.max()), sigma) + 0.30
+    yw = 1.60
+    ax.scatter([pred_w], [yw], s=150, facecolors="none", edgecolors=RED,
+               lw=2.0, zorder=6)
+    ax.text(pred_w - 0.07, yw, "外推终选:预测最优、从未实测",
+            ha="right", va="center", fontsize=9.5, fontweight="bold",
+            color=RED, zorder=6)
     ax.set_xlim(xlo, xhi)
     ax.set_ylim(ylo, yhi)
     ax.tick_params(labelsize=9)
-    ax.set_xlabel("预测效用(重放)", fontsize=9.5, color=NAVY)
-    ax.set_ylabel("残差 = 预测 − 实测", fontsize=9.5, color=NAVY)
-    ax.set_title(f"预测器的真实水平:残差 σ ≈ {sigma:.2f}"
-                 f"({n} 个实测配置)", fontsize=10.5, fontweight="bold")
-    ax.text(0.985, 0.90, f"±σ = ±{sigma:.2f}", transform=ax.transAxes,
-            ha="right", va="top", fontsize=8.5, color=RED)
-
-    # 右 外推点的正式实测(prod4 L1a): 灰带 = uniform 家族(参考), 红条 =
-    #   预测选出的外推点(双种子), 青条 = 自家实测点 — 外推垫底热区
-    ax = fig.add_axes([0.545, 0.21, 0.415, 0.59])
-    ax.axhspan(16.47, 18.33, color=GRAY, alpha=0.25, zorder=1)
-    arms = [("外推终选\n(从未实测)", 19.72, RED),
-            ("终选-rep\n(种子 43)", 19.90, "#E2A69E"),
-            ("cfg25\n(实测最优)", 20.66, TEAL),
-            ("cfg72\n(实测 #2)", 21.42, TEAL)]
-    for i, (lab, v, col) in enumerate(arms):
-        ax.bar(i, v, width=0.62, color=col, zorder=3)
-        ax.text(i, v + 0.22, f"{v:.2f}%", ha="center", va="bottom",
-                fontsize=10, fontweight="bold",
-                color=col if col != "#E2A69E" else RED, zorder=4)
-    ax.set_xlim(-0.55, 3.6)
-    ax.set_ylim(15.0, 22.8)
-    ax.set_xticks(range(4), [a[0] for a in arms], fontsize=8.5)
-    ax.set_yticks([16, 18, 20, 22], ["16%", "18%", "20%", "22%"],
-                  fontsize=9)
-    ax.grid(axis="y", alpha=0.3)
-    ax.set_axisbelow(True)
-    ax.set_ylabel("gsm8k 准确率(3B 目标模型)", fontsize=9.5, color=NAVY)
-    ax.set_title("外推点的正式实测:垫底热区(prod4 L1a)",
-                 fontsize=10.5, fontweight="bold")
-    ax.text(0.03, 0.965, "预测选出的外推点:双种子垫底 — "
-            "输自家实测点 1.70pt", transform=ax.transAxes, ha="left",
-            va="top", fontsize=9.5, fontweight="bold", color=RED, zorder=5)
-
-    fig.text(0.5, 0.022,
-              "左:prod4 搜索舰队 111 实测配置,预测 = 生产同款 LightGBM "
-              "5 折 out-of-fold 重放(每点由未见过它的模型预测);右:prod4 "
-              "L1a 臂实测,同池同预算 3B 目标模型 gsm8k 准确率,rep = 换种子;"
-              "灰带 = uniform 家族 16.5–18.3(参考)",
+    # x 轴不加 xlabel(横坐标含义由脚注"横坐标 = …"承载) — 底部空间
+    #   要留给落款行 + 脚注两行
+    ax.set_ylabel("实测效用", fontsize=9.5, color=NAVY)
+    ax.set_title("拟合的真实水平:预测 vs 实测(prod4 搜索,"
+                 f"{n} 个实测配置)", fontsize=10.5, fontweight="bold")
+    ax.legend(handles=[plt.Line2D([], [], color=NAVY, marker="o", ls="",
+                                  label="实测配置(111 个)"),
+                       plt.Line2D([], [], color=GRAY, ls="--",
+                                  label="预测 = 实测(理想)"),
+                       Patch(facecolor=TEAL, alpha=0.18,
+                             label=f"±σ = ±{sigma:.2f}(预测固有误差)")],
+              loc="lower left", fontsize=8.5, framealpha=0.92)
+    # "打回原形"箭头: 外推点 → 底部落款(正式实测结果)
+    p0 = fig.transFigure.inverted().transform(
+        ax.transData.transform((pred_w, yw - 0.10)))
+    fig.add_artist(FancyArrowPatch(
+        p0, (0.28, 0.178), transform=fig.transFigure, arrowstyle="-|>",
+        mutation_scale=20, lw=1.5, color=RED,
+        connectionstyle="arc3,rad=-0.12", zorder=6))
+    fig.text(0.5, 0.135,
+              "正式实测(prod4 L1a,3B 目标模型,gsm8k):外推终选 19.72 / "
+              "19.90(双种子)— 输自家实测点 cfg72 21.42 / cfg25 20.66"
+              "(−1.70pt);uniform 家族带 16.5–18.3(参考)",
+              ha="center", va="center", fontsize=9.5, fontweight="bold",
+              color=RED)
+    fig.text(0.5, 0.05,
+              f"横坐标 = 5 折 out-of-fold 重放(生产同款 LightGBM,每点由"
+              f"未见过它的模型预测);σ ≈ {sigma:.2f} = 预测固有误差 = 守卫 "
+              "margin 定标依据;外推点 = 终轮模型预测(曾排设计空间第一,"
+              "本地重放 +0.59 ~ +0.79,跨版本不可复现;到最近实测点 "
+              "L1 = 0.65 / 0.87)",
               ha="center", va="center", fontsize=8.5, color=DGRAY)
     ok = verify_layout(fig, "d19")
     path = os.path.join(out_dir, "reinforcement_d19_extrapolation.png")
     fig.savefig(path, dpi=150)
     plt.close(fig)
-    print(f"  ✓ {path}")
+    print(f"  ✓ {path}  [外推点重放预测 {pred_w:+.2f} | OOF σ {sigma:.2f}]")
     return ok
 
 
