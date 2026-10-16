@@ -397,16 +397,17 @@ def main():
              f"聚类);圈外灰点 = 孤岛,已并入所属分片;每簇一个旋钮",
              ha="center", va="center", fontsize=9, color=NAVY)
 
-    # 旋钮饼 = 各栏右上角的角标式小图(评审三轮: "放进来可缩小" → "中缝
+    # 旋钮饼 = 各栏右上角的角标式小图(评审四轮: "放进来可缩小" → "中缝
     #   夹箭头有点丑, 放右上/右下角再小点" → "还是太大、盖住了原图, 往
-    #   外挪挪")— 饼心钉在面板右上角、大半移出面板(左饼挑进中缝上空,
-    #   右饼挑出右边距), 饼直径 ≈ 0.78in(放置尺寸), 对面板的遮挡 ~5% →
-    #   ~2%; 饼 = 同一次运行的真实 token 份额, 环状样式沿用旧手绘图
-    #   (reinforcement_d14_cluster_balance); 左饼红巨簇 + 蓝孤岛(与左图
-    #   圈色一致, 白字标巨簇份额), 右饼 15 片与右图环同色同序; 底衬圆 =
-    #   面板底色, 隔开底下的散点; 显式 lims ±1.16 = 底衬圆贴满轴框
+    #   外挪挪" → "再缩小一点")— 饼心钉在面板右上角、大半移出面板(左饼
+    #   挑进中缝上空, 右饼挑出右边距), 饼直径 ≈ 0.62in(放置尺寸), 对
+    #   面板的遮挡 ~2% → ~1%; 饼 = 同一次运行的真实 token 份额, 环状样式
+    #   沿用旧手绘图(reinforcement_d14_cluster_balance); 左饼红巨簇 +
+    #   蓝孤岛(与左图圈色一致, 白字标巨簇份额), 右饼 15 片与右图环同色
+    #   同序; 底衬圆 = 面板底色, 隔开底下的散点; 显式 lims ±1.16 = 底衬
+    #   圆贴满轴框
     def _pie(x0, vals, colors, center, ccol, wlab=None):
-        ax = fig.add_axes([x0, 0.6246, 0.075, 0.2708])
+        ax = fig.add_axes([x0, 0.6516, 0.060, 0.2167])
         ax.add_patch(plt.Circle((0, 0), 1.16, facecolor="#F7FBFB",
                                 edgecolor="#C4D2D2", lw=0.9, zorder=0))
         wedges, _ = ax.pie(vals, colors=colors, startangle=90,
@@ -414,22 +415,22 @@ def main():
                            wedgeprops=dict(width=0.42, edgecolor="white"))
         ax.set_xlim(-1.16, 1.16)
         ax.set_ylim(-1.16, 1.16)
-        ax.text(0, 0, center, ha="center", va="center", fontsize=9,
+        ax.text(0, 0, center, ha="center", va="center", fontsize=8,
                 fontweight="bold", color=ccol)
         if wlab is not None:
             w = wedges[0]
             th = float(np.radians((w.theta1 + w.theta2) / 2))
             ax.text(0.78 * np.cos(th), 0.78 * np.sin(th), wlab,
-                    ha="center", va="center", fontsize=8,
+                    ha="center", va="center", fontsize=7.5,
                     fontweight="bold", color="white")
         ax.set_axis_off()
         return ax
 
     gi = int(np.argmax(d_sh))
-    _pie(0.4205, [d_sh[gi]] + [s for i, s in enumerate(d_sh) if i != gi],
+    _pie(0.428, [d_sh[gi]] + [s for i, s in enumerate(d_sh) if i != gi],
          [RED] + [BLUE] * (len(d_sh) - 1),
          "1 个\n旋钮", RED, wlab=f"{d_sh.max():.1%}")
-    _pie(0.9125, b_sh, [cmap(i % 20) for i in range(len(b_sh))],
+    _pie(0.920, b_sh, [cmap(i % 20) for i in range(len(b_sh))],
          f"{len(b_sh)} 个\n旋钮", NAVY)
 
     # 中缝: 改进动作箭头(评审: "as is 和 to be 中间加个箭头, 显示前后
