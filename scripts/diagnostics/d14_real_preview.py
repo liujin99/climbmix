@@ -441,8 +441,6 @@ def main():
     fig.text(0.5, 0.565, "容量重切", ha="center", va="center",
              fontsize=10, fontweight="bold", color=TEAL)
 
-    fig.text(0.5, 0.952, "同一个池,两种簇划分 — 细簇与合并均为真实运行结果",
-             ha="center", va="center", fontsize=13, fontweight="bold")
     fig.text(0.5, 0.02, "点 = 细簇(大小 ∝ token),圈 = 宏观簇边界"
              "(◆ = 簇中心),饼 = 簇配比(token 份额);" + embed_note + ";"
              + src_note,
