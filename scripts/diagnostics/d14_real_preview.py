@@ -16,17 +16,19 @@
 #  无投影无调整 — "最近邻距离全程未够到 τ"的硬证据, deck 附录用)。
 #
 #  用法:
-#    服务器(真实池; 注意 -o 放 run 目录根层, 别放 deck/ — make_deck
-#    会清掉 CHARTS_USED 之外的 png):
+#    服务器(真实池; 两图 = deck 副产物, -o 直接写进汇报包目录 —
+#    make_deck 已把两图纳入 CHARTS_USED 不会清掉, 取图 deck 目录优先、
+#    run 根层副本仅兜底旧布局):
 #      python3 scripts/diagnostics/d14_real_preview.py \
 #        --kmeans '/l00916525/prod/climbmix/cache/embeddings/*/kmeans_K1000.npz' \
-#        -o result/prod5_20260929_201108/d14_real_preview.png
+#        -o result/prod5_20260929_201108/deck/d14_real_preview.png
+#      # (伴随输出 d14_merge_diag.png 自动落在同目录)
 #      # 需要真实 token 权重(而非文档数)时加:
 #      #   --data-dir /home/ma-user/work/100B_stem_parquet_filtered
 #      # (元数据加载约几分钟; 两种权重下结构结论相同)
 #    本地(合成细簇, 看样式; 结构机理相同, 数字非真实):
 #      python3 scripts/diagnostics/d14_real_preview.py --fixture \
-#        -o /tmp/opencode/d14_real_preview_fixture.png
+#        -o /tmp/opencode/rc2/deck/d14_real_preview.png
 #
 #  注: 预览跳过质量剪枝(prune) — 两种方法跑在同一批细簇上, 公平对比;
 #  生产路径的剪枝是质量侧通道, 不影响"塌缩 vs 均衡"的结构对比。
@@ -309,9 +311,10 @@ def main():
     print(f"    均衡划分: K={len(np.unique(bm))}, 最大簇 {b_sh.max():.1%}"
           f"(上限 {(1 + args.slack) / args.K:.1%})")
 
-    # ── 出图: 二维嵌入(t-SNE 优先, 原始输出零修正), 点 = 细簇珠(白描边
-    #    互相分开 — 否则 986 个点糊成一片, 读者看不出"框里有许
-    #    多细簇"), 分组靠圈/环 ──
+    # ── 出图: 二维嵌入(t-SNE 优先; 孤岛外推到流形外), 点 = 细簇珠(白描
+    #    边互相分开 — 否则 986 个点糊成一片, 读者看不出"框里有许多
+    #    细簇"), 分组靠圈/环; -o 可指向尚不存在的 deck/ 目录 ──
+    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     setup_cjk_font()
     nrm = cen / np.clip(np.linalg.norm(cen, axis=1, keepdims=True), 1e-9, None)
     P, embed_note = embed_2d(nrm)

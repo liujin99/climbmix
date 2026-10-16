@@ -12,9 +12,10 @@
 → detail/)。文案 = 本文件 SLIDES 常量 (审稿在对话里, 落地在这里)。
 
 输出 (v10.2 实验结果/汇报分离): 汇报包 = run 目录下的 deck/ 子目录 —
-pptx + 全部 7 张图都在里面 (5 张 deck 专属图由 reinforcement_charts.py
-生成, 2 张实验结果图每次构建时从 run 目录复制进来, 包自含、可整目录
-打包外发); run 目录根层只留实验结果。
+pptx + 全部 12 张图都在里面 (7 张 deck 专属图由 reinforcement_charts.py
+生成, 2 张 d14 副产物图由 d14_real_preview.py 直接写进汇报包, 3 张实验
+结果图每次构建时从 run 目录复制进来, 包自含、可整目录打包外发);
+run 目录根层只留实验结果。
 16:9, 中文字体 Microsoft YaHei。
 """
 import argparse
@@ -55,10 +56,11 @@ CHARTS_USED = ["search_convergence.png", "proxy_target_consistency.png",
                "cluster_alpha_vs_score.png"]
 
 # deck 专属 (reinforcement 系图, 中文, 由 reinforcement_charts.py 写进
-# 汇报包目录); 其余 = run 目录产物 (英文实验图 + v10.31 起的 d14_real_
-# preview / d14_merge_diag, 由 d14_real_preview.py 写在 run 目录根层,
-# 每次构建重新复制进汇报包); cluster_alpha_vs_score = v10.28 附录新增:
-# 逐簇 α-得分小倍数图, 辅助说明"簇配比与模型能力相关"。
+# 汇报包目录); deck 副产物 (d14 两图, 只服务 deck, 由 d14_real_preview.py
+# 直接写进汇报包目录 — v10.32 用户裁决 "毕竟是 deck 的副产物", run 根层
+# 旧副本兜底兼容); 其余 = run 目录产物 (英文实验图);
+# cluster_alpha_vs_score = v10.28 附录新增: 逐簇 α-得分小倍数图,
+# 辅助说明"簇配比与模型能力相关"。
 # v10.31: p7 手绘示意图(reinforcement_d14_cluster_balance) 退出 deck,
 # 换成真实数据版 d14_real_preview(评审定夺); 手绘图函数保留在
 # reinforcement_charts.py 备查。
@@ -71,6 +73,10 @@ DECK_OWNED = {"reinforcement_d8_dual_signal.png",
               "recipe_distribution.png",
               "cluster_content_map.png",
               "finding_quality_value.png", "finding_pool_manifold.png"}
+
+# deck 副产物 (v10.32): 正位 = 汇报包目录, 由 d14_real_preview.py 直接
+# 写入; 取图 deck 优先、run 根层兜底 (旧布局曾写 run 根层)
+DECK_BYPRODUCT = {"d14_real_preview.png", "d14_merge_diag.png"}
 
 # 流程页小插图 (deck_assets/, 无文字的意象图; 缺件回退矢量图标)
 ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -97,7 +103,10 @@ def resolve_chart(dirs, name):
                 return p
     return None
 
-# ── 幻灯片文案 (v10.31 评审定稿三条 — ① p7 手绘示意图换成真实数据版
+# ── 幻灯片文案 (v10.32 布局归位 — d14 两图定为 deck 副产物(用户裁决
+#    "毕竟是 deck 的副产物"): 正位 = 汇报包目录, 取图 deck 优先、run
+#    根层兜底旧布局; d14_real_preview.py 的 -o 改指 deck/, 输出目录自动
+#    创建。v10.31 评审定稿三条 — ① p7 手绘示意图换成真实数据版
 #    d14_real_preview(撤孤岛圈 + 撤外推,布局回到原始 t-SNE;左图讲
 #    "旋钮只剩 1 个", 右图点明"切片 ≠ 天然聚类"); p7 备注扩:孤岛
 #    为什么没被并(距离 > τ 规则内合法)+ 判定标准 = 旋钮不是"并错了"
@@ -1142,10 +1151,11 @@ def build(run_dir, out):
         if not img:
             continue
         n_img += 1
-        # deck 专属图先找汇报包 (旧布局曾写 run 根层, 兜底兼容并迁移);
-        # 实验结果图只认 run 目录 (权威源, 防止用到汇报包里的旧副本)
-        p = resolve_chart([ddir, run_dir] if img in DECK_OWNED else [run_dir],
-                          img)
+        # deck 专属图/deck 副产物图先找汇报包 (旧布局曾写 run 根层,
+        # 兜底兼容并迁移); 实验结果图只认 run 目录 (权威源, 防止用到
+        # 汇报包里的旧副本)
+        p = resolve_chart([ddir, run_dir] if img in (DECK_OWNED
+                           | DECK_BYPRODUCT) else [run_dir], img)
         s["_path"] = p
         if p is None:
             missing.append(img)
@@ -1161,8 +1171,9 @@ def build(run_dir, out):
             os.remove(f)
     if missing:
         print(f"✗ 缺图 {len(missing)} 张: {', '.join(missing)}")
-        print("  (实验结果图应在 run 目录、deck 专属图应在汇报包目录;"
-              " 先跑 report_charts.py + reinforcement_charts.py)")
+        print("  (实验结果图应在 run 目录、deck 专属图与 d14 副产物图应在"
+              "汇报包目录; 先跑 report_charts.py + reinforcement_charts.py"
+              " / d14_real_preview.py)")
         if os.environ.get("DECK_STRICT", "1") == "1":
             return 1
     prs = Presentation()
