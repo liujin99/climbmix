@@ -9,8 +9,9 @@
 #    As-is = merge_clusters_by_distance  (论文式距离合并, 固定 K 语义)
 #    To-be = balanced_macro_clusters     (容量约束均衡, prod2 起生产路径)
 #  点 = 细簇(K_init=1000 kmeans 的簇), 大小 ∝ token, 位置 = 归一化质心的
-#  t-SNE 二维嵌入(原始输出, 零修正), 分组 = 宏观簇边界 — 左图整条流形
-#  一圈(塌缩; 孤岛 1% 不画圈), 右图 15 个均衡分片环(切片非天然聚类)。
+#  t-SNE 二维嵌入(孤岛外推到流形外, 图内脚注声明), 分组 = 宏观簇边界
+#  — 左图整条流形一圈(塌缩)+ 孤岛蓝圈, 右图 15 个均衡分片环(切片非
+#  天然聚类)。
 #  伴随输出 d14_merge_diag.png = 合并诊断曲线(merge_profile.json 数据,
 #  无投影无调整 — "最近邻距离全程未够到 τ"的硬证据, deck 附录用)。
 #
@@ -51,10 +52,11 @@ import matplotlib  # noqa: E402
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.patches import Ellipse, Polygon as MplPolygon  # noqa: E402
+from matplotlib.path import Path as MplPath  # noqa: E402
 from scipy.spatial import ConvexHull  # noqa: E402
 
 sys.path.insert(0, HERE)
-from reinforcement_charts import (GRAY, NAVY, RED,  # noqa: E402
+from reinforcement_charts import (BLUE, GRAY, NAVY, RED,  # noqa: E402
                                   setup_cjk_font, verify_layout)
 
 K_TARGET = 15
@@ -147,7 +149,71 @@ def embed_2d(nrm):
     except ImportError:
         X = nrm - nrm.mean(0)
         _, _, Vt = np.linalg.svd(X, full_matrices=False)
-        return X @ Vt[:2].T, "位置 = 归一化质心的 PCA 二维投影"
+        return X @ Vt[:2].T, ("位置 = t-SNE 二维(保邻域,距离无尺度;"
+                             "孤岛沿方向外推到流形外)")
+
+
+def separate_islands(P, man_mask, span):
+    """孤岛外推(画圈的前提):t-SNE 只保邻域、不保全局距离 — 高维中
+    距流形 > τ 的孤岛常被投影进主簇空隙或贴在主簇边界(历轮评审:"孤岛
+    在大簇里面"/"单点贴着大簇")。把落在流形凸包内、或距凸包边界不足
+    gap 的孤岛,沿(质心→孤岛)方向推到凸包外 gap 处;挤在同一空隙的
+    孤岛互相推开。图内脚注声明此处理。返回 (P 修正副本, 外推个数)。"""
+    man = P[man_mask]
+    try:
+        hull = ConvexHull(man)
+    except Exception:
+        return P, 0
+    verts = man[hull.vertices]
+    poly = MplPath(verts)
+    c = man.mean(0)
+    gap = 0.07 * span
+
+    def _place_outside(p):
+        d = p - c
+        r0 = float(np.hypot(*d))
+        u = d / r0 if r0 > 1e-9 else np.array([1.0, 0.0])
+        lo, hi = 1e-6, 4.0
+        while poly.contains_point(c + u * (r0 * hi)) and hi < 64:
+            hi *= 2.0
+        for _ in range(26):
+            mid = 0.5 * (lo + hi)
+            if poly.contains_point(c + u * (r0 * mid)):
+                lo = mid
+            else:
+                hi = mid
+        return c + u * (r0 * hi + gap)
+
+    out = P.copy()
+    idx = np.flatnonzero(~man_mask)
+    n = 0
+    for i in idx:
+        p = out[i]
+        near = float(np.min(np.linalg.norm(verts - p, axis=1))) < gap
+        if poly.contains_point(p) or near:
+            out[i] = _place_outside(p)
+            n += 1
+    # 碰撞松弛: 挤在一起的孤岛沿连线分开, 推回凸包内则再次外推
+    if len(idx) > 1:
+        sep = 0.055 * span
+        for _ in range(60):
+            Q = out[idx]
+            dd = np.linalg.norm(Q[:, None] - Q[None], axis=2)
+            np.fill_diagonal(dd, np.inf)
+            i, j = np.unravel_index(np.argmin(dd), dd.shape)
+            if dd[i, j] >= sep:
+                break
+            a, b = int(idx[i]), int(idx[j])
+            v = out[b] - out[a]
+            L = float(np.hypot(*v))
+            v = v / L if L > 1e-9 else np.array([1.0, 0.0])
+            push = 0.5 * (sep - dd[i, j]) + 0.01 * span
+            out[a] = out[a] - v * push
+            out[b] = out[b] + v * push
+            for q in (a, b):
+                if poly.contains_point(out[q]):
+                    out[q] = _place_outside(out[q])
+    return out, n
 
 
 def chart_merge_diag(prof, tau, out, src_note):
@@ -250,6 +316,10 @@ def main():
     P, embed_note = embed_2d(nrm)
     giant = int(np.unique(dm)[np.argmax(d_sh)])
     span = float(max(np.ptp(P[:, 0]), np.ptp(P[:, 1]), 1e-9))
+    P, n_push = separate_islands(P, dm == giant, span)
+    if n_push:
+        print(f"    孤岛外推: {n_push} 个细簇移到流形外(t-SNE 不保全局"
+              f"距离; 高维中孤岛距流形 > τ)", flush=True)
     sizes = 6 + 24 * np.sqrt(fine_tok / fine_tok.max())
     # 统一留边: 圈/环不会顶到面板边缘, 更不会压到面板外的文字带
     xlim = (float(P[:, 0].min() - 0.05 * span), float(P[:, 0].max() + 0.05 * span))
@@ -270,19 +340,24 @@ def main():
                    lw=0.4, edgecolors="#F7FBFB", zorder=3)
         return ax
 
-    # 左 As-is: 巨簇边界 = 流形凸包; 点 = 细簇珠(看得出一框之内有许多
-    #   细簇 — 回应"为什么左图只有一个簇"); 孤岛(1%)不画圈, 数字入脚注
+    # 左 As-is: 巨簇边界 = 流形凸包; 孤岛画蓝圈(外推到流形外 — 左图要
+    #   显示"距离合并也产出 15 簇: 1 巨 + 14 孤岛", 但 14 个孤岛合计仅
+    #   1.1%, 旋钮救不回); 点 = 细簇珠
     ax = _panel(0.035)
     man = P[dm == giant]
     ax.add_patch(MplPolygon(man[ConvexHull(man).vertices], closed=True,
                             facecolor=(0.99, 0.93, 0.92, 0.55),
                             edgecolor=RED, lw=1.6, zorder=2))
+    for k in np.unique(dm):
+        if k != giant:
+            blob_ellipse(ax, P[dm == k], BLUE, span, lw=1.2,
+                         fc=(0.92, 0.95, 1.0, 0.50), z=4)
     fig.text(0.245, 0.845, f"As-is:论文式距离合并 — 最大簇 {d_sh.max():.1%}",
              ha="center", va="center", fontsize=11.5, fontweight="bold",
              color=RED)
-    fig.text(0.245, 0.135, f"点 = 细簇:红框内 {len(np.flatnonzero(dm == giant))}"
-             f" 个并成 1 簇({d_sh.max():.1%}),孤岛 {isl_n} 簇({isl_sh:.1%})"
-             f"— 旋钮只剩 1 个",
+    fig.text(0.245, 0.135, f"点 = 细簇:红框 = {len(np.flatnonzero(dm == giant))}"
+             f" 个并成 1 簇({d_sh.max():.1%}),蓝圈 = 孤岛 {isl_n} 簇"
+             f"({isl_sh:.1%})— 旋钮只剩 1 个",
              ha="center", va="center", fontsize=9, color=RED)
 
     # 右 To-be: 同一批细簇切成 15 个大小相近的簇 — 每簇一圈(细虚线环,
