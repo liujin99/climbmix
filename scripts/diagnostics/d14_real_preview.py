@@ -11,9 +11,9 @@
 #  点 = 细簇(K_init=1000 kmeans 的簇), 大小 ∝ token, 位置 = 归一化质心的
 #  t-SNE 二维嵌入(孤岛外推到流形外, 图内脚注声明), 分组 = 宏观簇边界
 #  — 左图整条流形一圈(塌缩)+ 孤岛蓝圈, 右图 15 个均衡分片环(切片非
-#  天然聚类)。中缝 = 改进动作箭头 + 两枚簇配比饼(同一运行的真实 token
-#  份额; 左 1 巨 + 14 孤岛 = 1 个旋钮, 右 15 均分 = 15 个旋钮, 右饼
-#  分片与右图环同色同序)。
+#  天然聚类)。中缝 = 改进动作箭头; 各栏右上角嵌旋钮配比小饼(同一运行
+#  的真实 token 份额, 辅助; 左 1 巨 + 14 孤岛 = 1 个旋钮, 右 15 均分 =
+#  15 个旋钮, 右饼分片与右图环同色同序)。
 #  伴随输出 d14_merge_diag.png = 合并诊断曲线(merge_profile.json 数据,
 #  无投影无调整 — "最近邻距离全程未够到 τ"的硬证据, deck 附录用)。
 #
@@ -332,14 +332,14 @@ def main():
     xlim = (float(P[:, 0].min() - 0.05 * span), float(P[:, 0].max() + 0.05 * span))
     ylim = (float(P[:, 1].min() - 0.06 * span), float(P[:, 1].max() + 0.06 * span))
     # 13×3.60(宽高比 ≈ 3.6)= 贴满 p7 图带(约 12.1×3.35in)的比例 —
-    # 中缝塞进饼 + 箭头后两栏各让出 0.08 宽, 散点面板尺寸几乎不变,
-    # 整图放置宽度反升(10.76 → ~12.1in)
+    # 整图放置宽度 10.76 → ~12.1in; 旋钮饼嵌在各栏右上角(评审: 中缝
+    # 两饼夹箭头"有点丑", 改角落小图 + 缩小 — 毕竟是辅助说明)
     fig = plt.figure(figsize=(13, 3.60))
     isl_n = len(np.unique(dm)) - 1
     isl_sh = 1.0 - float(d_sh.max())
 
     def _panel(x0):
-        ax = fig.add_axes([x0, 0.155, 0.34, 0.645])
+        ax = fig.add_axes([x0, 0.155, 0.42, 0.645])
         ax.set_axis_off()
         ax.set_xticks([])
         ax.set_yticks([])
@@ -353,7 +353,7 @@ def main():
     # 左 As-is: 巨簇边界 = 流形凸包; 孤岛画蓝圈(外推到流形外 — 左图要
     #   显示"距离合并也产出 15 簇: 1 巨 + 14 孤岛", 但 14 个孤岛合计仅
     #   1.1%, 旋钮救不回); 点 = 细簇珠
-    ax = _panel(0.015)
+    ax = _panel(0.035)
     man = P[dm == giant]
     ax.add_patch(MplPolygon(man[ConvexHull(man).vertices], closed=True,
                             facecolor=(0.99, 0.93, 0.92, 0.55),
@@ -375,7 +375,7 @@ def main():
     #   切片是连续流形上的容量切分, 不是天然主题团(见发现③)。孤岛不画
     #   圈(在均衡划分里是分片成员, 不是簇)— 归属由右脚注一句说明(评审:
     #   连接线方案否决 — 14 条细线解释 1.1% 的点, 喧宾夺主)
-    ax = _panel(0.645)
+    ax = _panel(0.545)
     cmap = plt.get_cmap("tab20")
     cents = []
     for i, k in enumerate(np.unique(bm)):
@@ -397,40 +397,45 @@ def main():
              f"聚类);圈外灰点 = 孤岛,已并入所属分片;每簇一个旋钮",
              ha="center", va="center", fontsize=9, color=NAVY)
 
-    # 中缝: 改进动作箭头(评审: "as is 和 to be 中间加个箭头, 显示前后
-    #   关系")+ 两枚簇配比饼(评审: "把之前那两个饼状旋钮图放进来作辅助,
-    #   可以缩小一点")— 饼 = 同一次运行的真实 token 份额, 环状样式沿用
-    #   旧手绘图(reinforcement_d14_cluster_balance); 左饼红巨簇 + 蓝孤岛
-    #   (与左图圈色一致), 右饼 15 片与右图环同色同序; 竖排加饼会把整图
-    #   压小 ~30%, 故两饼夹箭头横排在中缝(饼直径 ≈ 1.35in 放置尺寸)
+    # 旋钮饼 = 各栏右上角的辅助小图(评审两轮: 先"把两个饼状旋钮图放进
+    #   来, 可以缩小一点", 再"中缝夹箭头的排法有点丑, 放到聚类簇图的
+    #   右上/右下角, 整体再小一点")— 饼 = 同一次运行的真实 token 份额,
+    #   环状样式沿用旧手绘图(reinforcement_d14_cluster_balance); 左饼
+    #   红巨簇 + 蓝孤岛(与左图圈色一致, 白字标巨簇份额), 右饼 15 片与
+    #   右图环同色同序; 直径 ≈ 1.07in(放置尺寸), 底衬圆 = 面板底色,
+    #   隔开底下的散点
     def _pie(x0, vals, colors, center, ccol, wlab=None):
-        ax = fig.add_axes([x0, 0.278, 0.112, 0.404])
+        ax = fig.add_axes([x0, 0.4686, 0.0885, 0.3194])
+        ax.add_patch(plt.Circle((0, 0), 1.14, facecolor="#F7FBFB",
+                                edgecolor="#C4D2D2", lw=0.9, zorder=0))
         wedges, _ = ax.pie(vals, colors=colors, startangle=90,
                            counterclock=False,
                            wedgeprops=dict(width=0.42, edgecolor="white"))
-        ax.text(0, 0, center, ha="center", va="center", fontsize=9.5,
+        ax.text(0, 0, center, ha="center", va="center", fontsize=9,
                 fontweight="bold", color=ccol)
         if wlab is not None:
             w = wedges[0]
             th = float(np.radians((w.theta1 + w.theta2) / 2))
             ax.text(0.78 * np.cos(th), 0.78 * np.sin(th), wlab,
-                    ha="center", va="center", fontsize=8,
+                    ha="center", va="center", fontsize=8.5,
                     fontweight="bold", color="white")
-        ax.set_xticks([])
-        ax.set_yticks([])
+        ax.set_axis_off()
         return ax
 
     gi = int(np.argmax(d_sh))
-    _pie(0.362, [d_sh[gi]] + [s for i, s in enumerate(d_sh) if i != gi],
+    _pie(0.3545, [d_sh[gi]] + [s for i, s in enumerate(d_sh) if i != gi],
          [RED] + [BLUE] * (len(d_sh) - 1),
-         "1 个\n可用旋钮", RED, wlab=f"巨簇\n{d_sh.max():.1%}")
-    _pie(0.526, b_sh, [cmap(i % 20) for i in range(len(b_sh))],
-         f"{len(b_sh)} 个\n可用旋钮", NAVY)
+         "1 个\n旋钮", RED, wlab=f"{d_sh.max():.1%}")
+    _pie(0.8645, b_sh, [cmap(i % 20) for i in range(len(b_sh))],
+         f"{len(b_sh)} 个\n旋钮", NAVY)
+
+    # 中缝: 改进动作箭头(评审: "as is 和 to be 中间加个箭头, 显示前后
+    #   关系")— 饼移去角落后中缝只剩箭头, 加长加粗
     fig.add_artist(FancyArrowPatch(
-        (0.478, 0.48), (0.522, 0.48), transform=fig.transFigure,
-        arrowstyle="-|>", mutation_scale=26, lw=2.2, color=TEAL, zorder=5))
+        (0.458, 0.48), (0.542, 0.48), transform=fig.transFigure,
+        arrowstyle="-|>", mutation_scale=30, lw=2.4, color=TEAL, zorder=5))
     fig.text(0.5, 0.565, "容量重切", ha="center", va="center",
-             fontsize=9.5, fontweight="bold", color=TEAL)
+             fontsize=10, fontweight="bold", color=TEAL)
 
     fig.text(0.5, 0.952, "同一个池,两种簇划分 — 细簇与合并均为真实运行结果",
              ha="center", va="center", fontsize=13, fontweight="bold")
