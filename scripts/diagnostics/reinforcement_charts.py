@@ -31,6 +31,10 @@
 #                                           p10 备注): 双区域 + 真实趋势/
 #                                           预测器双曲线 + 实测点(示意)+
 #                                           外推红点 + 正式实测落差
+#    calibration_prod4_oof.png            ③b 预测器校准(真实数据, 附录
+#                                           候选, 未接 deck): 111 实测配置
+#                                           OOF 预测 vs 实测 + ±σ 带 + 外
+#                                           推终选空心圈 + L1a 落款
 #    recipe_distribution.png       ④ 配比全景对比(v10.4): 赢家/cfg90/cfg100/
 #                                  uniform/池自然占比 在 15 语义簇上的 100%
 #                                  堆叠 + domainfix 域标签配比单列(域空间,
@@ -799,6 +803,146 @@ def chart_d19(out_dir):
     return ok
 
 
+# ── ③b D20: 预测器校准散点 (真实数据, 附录候选; v1.0.47: v1.0.42 的
+#    p10 校准图复活, 用户要求先出图过目再定是否进附录; 未接 make_deck)
+#    ─────────────────────────────────────────────────────────────────
+def chart_d20_calibration(out_dir):
+    csv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "data", "prod4_search_dump.csv")
+    if not os.path.isfile(csv_path):
+        print(f"  ✗ chart_d20: 缺舰队数据 {csv_path}")
+        return False
+    import csv as _csv
+    import warnings as _w
+    _w.filterwarnings("ignore", message="X does not have valid feature names")
+    rows = []
+    with open(csv_path) as f:
+        rd = _csv.reader(f)
+        next(rd)
+        for line in rd:
+            if line:
+                v = [float(x) for x in line]
+                rows.append((v[:15], int(v[15]), v[16]))
+    if len(rows) < 20:
+        print(f"  ✗ chart_d20: 舰队仅 {len(rows)} 点, 数据异常")
+        return False
+    sys.path.insert(0, os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "..", "src"))
+    from climbmix.core.types import (MixtureConfig, MixtureWeights,  # noqa: E402
+                                     PredictorConfig)
+    from climbmix.core.predictor import LightGBMPredictor  # noqa: E402
+    K = len(rows[0][0])
+    cfgs = [MixtureConfig(mixture_weights=MixtureWeights(weights=np.array(w)),
+            config_id=cid) for w, cid, _ in rows]
+    actual = np.array([s for _, _, s in rows])     # 实测效用(高 = 好)
+    tgt = -actual                                  # 预测器目标空间(低 = 好)
+    ids = [cid for _, cid, _ in rows]
+    n = len(rows)
+    # 5 折 out-of-fold(镜像 predictor_audit.py A2 协议 B: rng 7 分折,
+    #   折内 rng 42 切 20% 早停 → 同树数全量重拟合; 确定性)
+    fold_idx = np.random.default_rng(7).permutation(n)
+    oof = np.zeros(n)
+    for te in np.array_split(fold_idx, 5):
+        trn = np.setdiff1d(fold_idx, te)
+        m = len(trn)
+        nv = max(5, int(m * 0.2))
+        perm = np.random.default_rng(42).permutation(m)
+        itr, iva = perm[:m - nv], perm[m - nv:]
+        pa = LightGBMPredictor(K, PredictorConfig())
+        pa.fit([cfgs[trn[i]] for i in itr], tgt[trn][itr],
+               val_configs=[cfgs[trn[i]] for i in iva],
+               val_losses=tgt[trn][iva])
+        pb = pa.refit_on_full([cfgs[i] for i in trn], tgt[trn])
+        oof[te] = pb.predict([cfgs[i] for i in te])
+    pred_u = -oof                                  # 预测效用(OOF)
+    sigma = float(np.std(pred_u - actual, ddof=1))
+    # 终轮模型(prod4 终选所用: rng 42 全舰队切 20% 早停)→ 外推终选点
+    #   的预测(权重 = optimal_mixture_weights: C5 .3540 / C10 .4737 /
+    #   C12 .0641 + 12 簇 0.009 地板)
+    nv = max(5, int(n * 0.2))
+    perm = np.random.default_rng(42).permutation(n)
+    itr, iva = perm[:n - nv], perm[n - nv:]
+    p_term = LightGBMPredictor(K, PredictorConfig())
+    p_term.fit([cfgs[i] for i in itr], tgt[itr],
+               val_configs=[cfgs[i] for i in iva], val_losses=tgt[iva])
+    winner_w = np.array([0.009, 0.009, 0.009, 0.009, 0.009, 0.354,
+                         0.009, 0.009, 0.009, 0.009, 0.4737, 0.009,
+                         0.0641, 0.009, 0.009])
+    pred_w = -float(p_term.predict([MixtureConfig(mixture_weights=
+                       MixtureWeights(weights=winner_w))])[0])
+
+    fig = plt.figure(figsize=(13, 2.43))
+    ax = fig.add_axes([0.055, 0.30, 0.885, 0.48])
+    xlo = float(min(pred_u.min(), 0.0)) - 0.25
+    xhi = max(float(pred_u.max()), pred_w) + 0.32
+    ylo, yhi = float(min(actual.min(), 0.0)) - 0.17, 1.95
+    d0, d1 = max(xlo, ylo), min(xhi, yhi)
+    xs = np.linspace(d0, d1, 60)
+    ax.fill_between(xs, xs - sigma, xs + sigma, color=TEAL, alpha=0.10,
+                    zorder=1)
+    ax.plot(xs, xs, "--", color=GRAY, lw=1.1, zorder=2)
+    ax.scatter(pred_u, actual, s=20, color=NAVY, alpha=0.75, lw=0.4,
+               edgecolors="white", zorder=3)
+    for cid, lab in ((25, "cfg25(实测最优)"), (72, "cfg72(实测 #2)")):
+        i = ids.index(cid)
+        ax.scatter([pred_u[i]], [actual[i]], s=130, facecolors="none",
+                   edgecolors=TEAL, lw=1.8, zorder=5)
+        ax.annotate(lab, (pred_u[i], actual[i]), xytext=(0, 8),
+                    textcoords="offset points", fontsize=8.5,
+                    color=TEAL, ha="center", fontweight="bold", zorder=6)
+    yw = 1.60
+    ax.scatter([pred_w], [yw], s=150, facecolors="none", edgecolors=RED,
+               lw=2.0, zorder=6)
+    ax.text(pred_w - 0.07, yw, "外推终选:预测最优、从未实测",
+            ha="right", va="center", fontsize=9.5, fontweight="bold",
+            color=RED, zorder=6)
+    ax.set_xlim(xlo, xhi)
+    ax.set_ylim(ylo, yhi)
+    ax.tick_params(labelsize=9)
+    # x 轴不加 xlabel(横坐标含义由脚注"横坐标 = …"承载)— 底部空间
+    #   要留给落款行 + 脚注两行
+    ax.set_ylabel("实测效用", fontsize=9.5, color=NAVY)
+    ax.set_title(f"预测 vs 实测(prod4 全部 {n} 个实测配置):预测固有误差 "
+                 f"σ≈{sigma:.2f} — 领先不足 σ 即拟合噪声",
+                 fontsize=10.5, fontweight="bold")
+    ax.legend(handles=[plt.Line2D([], [], color=NAVY, marker="o", ls="",
+                                  label=f"实测配置({n} 个)"),
+                       plt.Line2D([], [], color=GRAY, ls="--",
+                                  label="预测 = 实测(理想)"),
+                       Patch(facecolor=TEAL, alpha=0.18,
+                             label=f"±σ = ±{sigma:.2f}(预测固有误差)")],
+              loc="lower left", fontsize=8.5, framealpha=0.92)
+    # "打回原形"箭头: 外推点 → 底部落款(正式实测结果)
+    p0 = fig.transFigure.inverted().transform(
+        ax.transData.transform((pred_w, yw - 0.10)))
+    fig.add_artist(FancyArrowPatch(
+        p0, (0.28, 0.178), transform=fig.transFigure, arrowstyle="-|>",
+        mutation_scale=20, lw=1.5, color=RED,
+        connectionstyle="arc3,rad=-0.12", zorder=6))
+    fig.text(0.5, 0.135,
+              "正式实测(prod4 L1a,3B 目标模型,gsm8k):外推终选 19.72 / "
+              "19.90(双种子)— 输自家实测点 cfg72 21.42 / cfg25 20.66"
+              "(−1.70pt);uniform 家族带 16.5–18.3(参考)",
+              ha="center", va="center", fontsize=9.5, fontweight="bold",
+              color=RED)
+    fig.text(0.5, 0.05,
+              f"横坐标 = 5 折 out-of-fold 重放(生产同款 LightGBM,每点由"
+              f"未见过它的模型预测);σ ≈ {sigma:.2f} = 预测固有误差 = 守卫 "
+              "margin 定标依据;外推点 = 终轮模型预测(曾排设计空间第一,"
+              "本地重放 +0.59 ~ +0.79,跨版本不可复现;到最近实测点 "
+              "L1 = 0.65 / 0.87)",
+              ha="center", va="center", fontsize=8.5, color=DGRAY)
+    ok = verify_layout(fig, "d20")
+    path = os.path.join(out_dir, "calibration_prod4_oof.png")
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    i25 = ids.index(25)
+    print(f"  ✓ {path}  [prod4 校准 | σ={sigma:.2f} | 外推终选预测 "
+          f"{pred_w:+.2f} | cfg25 OOF {pred_u[i25]:+.2f} vs 实测 "
+          f"{actual[i25]:+.2f}]")
+    return ok
+
+
 # ── ④ 配比全景对比: 赢家 vs 传统方法 vs 池 (v10.4) ───────────────────
 def find_run_file(run_dir, name):
     for sub in ("", "state/", "detail/"):
@@ -1384,6 +1528,7 @@ def main():
            chart_d8_dual(out_dir),
            chart_d8(out_dir),
            chart_d19(out_dir),
+           chart_d20_calibration(out_dir),
            chart_recipe(out_dir, args.run_dir),
            chart_cluster_content(out_dir, args.run_dir),
            chart_finding_quality(out_dir),
