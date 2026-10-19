@@ -808,7 +808,11 @@ def chart_d19(out_dir):
 #    加 xlabel、字号放大, 不再挤扁条; v1.0.49: 五步定位 — 本页讲的是
 #    第④步『预测器拟合』的固有误差(点云 = ②③ 实测记录, 横轴 = ④ OOF
 #    审计, 红圈 = ④ 后终选, 落款 = ⑤ 中等规模结局), cfg25 标注双口径
-#    (③ 实测最优 / ④ 测前仅 +0.10))
+#    (③ 实测最优 / ④ 测前仅 +0.10); v1.0.54: 框定改写 — 本图 =
+#    LightGBM 拟合体检(校准散点, 非搜索轨迹/非⑤验证图): 标题/xlabel
+#    明写 LightGBM『测前模拟』+ 非当年选点口径, ylabel 明写真实训练
+#    打分; 红圈/落款挂 prod4 无守卫外推(接 p10 改进④), cfg25 标签挂
+#    实测值 +1.26, winner y 1.72→1.78 避让加宽标签
 #    ─────────────────────────────────────────────────────────────────
 def chart_d20_calibration(out_dir):
     csv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -887,7 +891,7 @@ def chart_d20_calibration(out_dir):
     ax.plot(xs, xs, "--", color=GRAY, lw=1.1, zorder=2)
     ax.scatter(pred_u, actual, s=26, color=NAVY, alpha=0.75, lw=0.4,
                 edgecolors="white", zorder=3)
-    for cid, lab, dy in ((25, "cfg25(③ 实测最优)\n④ 测前预测仅 +0.10", 12),
+    for cid, lab, dy in ((25, "cfg25:③ 实测最优 +1.26(LightGBM 测前仅 +0.10)", 12),
                           (72, "cfg72(③ 实测 #2)", 8)):
         i = ids.index(cid)
         ax.scatter([pred_u[i]], [actual[i]], s=150, facecolors="none",
@@ -895,20 +899,20 @@ def chart_d20_calibration(out_dir):
         ax.annotate(lab, (pred_u[i], actual[i]), xytext=(0, dy),
                     textcoords="offset points", fontsize=10, va="bottom",
                     color=TEAL, ha="center", fontweight="bold", zorder=6)
-    yw = 1.72
+    yw = 1.78
     ax.scatter([pred_w], [yw], s=170, facecolors="none", edgecolors=RED,
                 lw=2.0, zorder=6)
-    ax.text(pred_w - 0.07, yw, "外推终选(④ 后):预测最优、从未实测",
+    ax.text(pred_w - 0.07, yw, "prod4 外推终选:LightGBM 预测第一、从未实测",
             ha="right", va="center", fontsize=11, fontweight="bold",
             color=RED, zorder=6)
     ax.set_xlim(xlo, xhi)
     ax.set_ylim(ylo, yhi)
     ax.tick_params(labelsize=10)
-    ax.set_xlabel("④ 预测效用(5 折 out-of-fold 审计:每个点由未见过它的模型预测)",
+    ax.set_xlabel("LightGBM『测前模拟』预测效用(5 折 out-of-fold:每个配置由未见过它的模型预测;非当年选点口径)",
                   fontsize=10.5, color=NAVY)
-    ax.set_ylabel("③ 实测效用", fontsize=11, color=NAVY)
-    ax.set_title(f"给第④步『预测器拟合』做体检:预测 vs 实测(prod4 全部 "
-                  f"{n} 个实测配比)— 固有误差 σ≈{sigma:.2f},"
+    ax.set_ylabel("③ 实测效用(每个配置真实训练打分)", fontsize=11, color=NAVY)
+    ax.set_title(f"④ 预测器(LightGBM)拟合体检:『测前模拟』预测 vs 实测"
+                  f"(prod4 全部 {n} 个实测配比)— 固有误差 σ≈{sigma:.2f},"
                   "领先不足 σ 即拟合噪声",
                   fontsize=12.5, fontweight="bold")
     ax.legend(handles=[plt.Line2D([], [], color=NAVY, marker="o", ls="",
@@ -926,9 +930,9 @@ def chart_d20_calibration(out_dir):
         mutation_scale=20, lw=1.5, color=RED,
         connectionstyle="arc3,rad=-0.12", zorder=6))
     fig.text(0.5, 0.105,
-              "⑤ 中等规模实测(prod4 L1a,3B 目标模型,gsm8k):外推终选 "
+              "⑤ 中等规模实测(prod4 L1a,3B 目标模型,gsm8k):无守卫外推终选 "
               "19.72 / 19.90(双种子)— 输给实测前二 cfg72 21.42 / cfg25 "
-              "20.66(−1.70pt);uniform 家族带 16.5–18.3(参考)",
+              "20.66(−1.70pt);uniform 带 16.5–18.3(参考)",
               ha="center", va="center", fontsize=11, fontweight="bold",
               color=RED)
     fig.text(0.5, 0.062,
@@ -936,8 +940,8 @@ def chart_d20_calibration(out_dir):
               f"σ ≈ {sigma:.2f} = 预测固有误差 = 守卫 margin 定标依据",
               ha="center", va="center", fontsize=9.5, color=DGRAY)
     fig.text(0.5, 0.025,
-              "红圈 = 外推终选:④ 的终轮模型预测(曾排全设计空间第一,"
-              "本地重放 +0.59 ~ +0.79,跨版本不可复现;到最近实测点 "
+              "红圈 = prod4 外推终选:终轮模型预测曾排全设计空间第一"
+              "(本地重放 +0.59 ~ +0.79,跨版本不可复现;到最近实测点 "
               "L1 = 0.65 / 0.87)",
               ha="center", va="center", fontsize=9.5, color=DGRAY)
     ok = verify_layout(fig, "d20")
