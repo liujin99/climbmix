@@ -805,7 +805,10 @@ def chart_d19(out_dir):
 
 # ── ③b D20: 预测器校准散点 (真实数据; v1.0.47: v1.0.42 的 p10 校准图
 #    复活; v1.0.48: 定稿为附录页 p22, 整页版式 — 图幅放宽 12.5×5.6,
-#    加 xlabel、字号放大, 不再挤扁条)
+#    加 xlabel、字号放大, 不再挤扁条; v1.0.49: 五步定位 — 本页讲的是
+#    第④步『预测器拟合』的固有误差(点云 = ②③ 实测记录, 横轴 = ④ OOF
+#    审计, 红圈 = ④ 后终选, 落款 = ⑤ 中等规模结局), cfg25 标注双口径
+#    (③ 实测最优 / ④ 测前仅 +0.10))
 #    ─────────────────────────────────────────────────────────────────
 def chart_d20_calibration(out_dir):
     csv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -884,27 +887,29 @@ def chart_d20_calibration(out_dir):
     ax.plot(xs, xs, "--", color=GRAY, lw=1.1, zorder=2)
     ax.scatter(pred_u, actual, s=26, color=NAVY, alpha=0.75, lw=0.4,
                 edgecolors="white", zorder=3)
-    for cid, lab in ((25, "cfg25(实测最优)"), (72, "cfg72(实测 #2)")):
+    for cid, lab, dy in ((25, "cfg25(③ 实测最优)\n④ 测前预测仅 +0.10", 12),
+                          (72, "cfg72(③ 实测 #2)", 8)):
         i = ids.index(cid)
         ax.scatter([pred_u[i]], [actual[i]], s=150, facecolors="none",
                     edgecolors=TEAL, lw=1.8, zorder=5)
-        ax.annotate(lab, (pred_u[i], actual[i]), xytext=(0, 9),
-                    textcoords="offset points", fontsize=10,
+        ax.annotate(lab, (pred_u[i], actual[i]), xytext=(0, dy),
+                    textcoords="offset points", fontsize=10, va="bottom",
                     color=TEAL, ha="center", fontweight="bold", zorder=6)
-    yw = 1.60
+    yw = 1.72
     ax.scatter([pred_w], [yw], s=170, facecolors="none", edgecolors=RED,
                 lw=2.0, zorder=6)
-    ax.text(pred_w - 0.07, yw, "外推终选:预测最优、从未实测",
+    ax.text(pred_w - 0.07, yw, "外推终选(④ 后):预测最优、从未实测",
             ha="right", va="center", fontsize=11, fontweight="bold",
             color=RED, zorder=6)
     ax.set_xlim(xlo, xhi)
     ax.set_ylim(ylo, yhi)
     ax.tick_params(labelsize=10)
-    ax.set_xlabel("预测效用(5 折 out-of-fold,每个点由未见过它的模型预测)",
+    ax.set_xlabel("④ 预测效用(5 折 out-of-fold 审计:每个点由未见过它的模型预测)",
                   fontsize=10.5, color=NAVY)
-    ax.set_ylabel("实测效用", fontsize=11, color=NAVY)
-    ax.set_title(f"预测 vs 实测(prod4 全部 {n} 个实测配置):预测固有误差 "
-                  f"σ≈{sigma:.2f} — 领先不足 σ 即拟合噪声",
+    ax.set_ylabel("③ 实测效用", fontsize=11, color=NAVY)
+    ax.set_title(f"给第④步『预测器拟合』做体检:预测 vs 实测(prod4 全部 "
+                  f"{n} 个实测配比)— 固有误差 σ≈{sigma:.2f},"
+                  "领先不足 σ 即拟合噪声",
                   fontsize=12.5, fontweight="bold")
     ax.legend(handles=[plt.Line2D([], [], color=NAVY, marker="o", ls="",
                                   label=f"实测配置({n} 个)"),
@@ -913,7 +918,7 @@ def chart_d20_calibration(out_dir):
                         Patch(facecolor=TEAL, alpha=0.18,
                               label=f"±σ = ±{sigma:.2f}(预测固有误差)")],
               loc="lower left", fontsize=10, framealpha=0.92)
-    # "打回原形"箭头: 外推点 → 底部落款(正式实测结果)
+    # "打回原形"箭头: 外推点 → 底部落款(⑤ 中等规模实测结果)
     p0 = fig.transFigure.inverted().transform(
         ax.transData.transform((pred_w, yw - 0.10)))
     fig.add_artist(FancyArrowPatch(
@@ -921,9 +926,9 @@ def chart_d20_calibration(out_dir):
         mutation_scale=20, lw=1.5, color=RED,
         connectionstyle="arc3,rad=-0.12", zorder=6))
     fig.text(0.5, 0.105,
-              "正式实测(prod4 L1a,3B 目标模型,gsm8k):外推终选 19.72 / "
-              "19.90(双种子)— 输自家实测点 cfg72 21.42 / cfg25 20.66"
-              "(−1.70pt);uniform 家族带 16.5–18.3(参考)",
+              "⑤ 中等规模实测(prod4 L1a,3B 目标模型,gsm8k):外推终选 "
+              "19.72 / 19.90(双种子)— 输给实测前二 cfg72 21.42 / cfg25 "
+              "20.66(−1.70pt);uniform 家族带 16.5–18.3(参考)",
               ha="center", va="center", fontsize=11, fontweight="bold",
               color=RED)
     fig.text(0.5, 0.062,
@@ -931,8 +936,9 @@ def chart_d20_calibration(out_dir):
               f"σ ≈ {sigma:.2f} = 预测固有误差 = 守卫 margin 定标依据",
               ha="center", va="center", fontsize=9.5, color=DGRAY)
     fig.text(0.5, 0.025,
-              "外推点 = 终轮模型预测(曾排设计空间第一,本地重放 "
-              "+0.59 ~ +0.79,跨版本不可复现;到最近实测点 L1 = 0.65 / 0.87)",
+              "红圈 = 外推终选:④ 的终轮模型预测(曾排全设计空间第一,"
+              "本地重放 +0.59 ~ +0.79,跨版本不可复现;到最近实测点 "
+              "L1 = 0.65 / 0.87)",
               ha="center", va="center", fontsize=9.5, color=DGRAY)
     ok = verify_layout(fig, "d20")
     path = os.path.join(out_dir, "calibration_prod4_oof.png")
