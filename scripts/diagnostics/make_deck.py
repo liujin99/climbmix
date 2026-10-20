@@ -107,7 +107,11 @@ def resolve_chart(dirs, name):
                 return p
     return None
 
-# ── 幻灯片文案 (v10.58 — p3 卡④ 语义修正(用户指出):预测器不是
+# ── 幻灯片文案 (v10.59 — p3 删除 ①→② 之间的『α 配比』芯片(用户
+#    裁决:② 标题即『配比采样』,芯片悬在两卡之间像独立概念,冗余易
+#    混)。α 定义保留在卡① 正文(『一个配比 = 15 维权重向量 α』)与
+#    卡④(『配比 α → 得分』)。verify: p3 禁孤立段落『α』/『配比』。
+#    v10.58 — p3 卡④ 语义修正(用户指出):预测器不是
 #    一次性拟合全部 115 个,而是每轮用截至该轮的全部实测配比重拟合
 #    (iterative_bootstrapper._refit_predictor,档案 3c『A2 全量重拟合
 #    = yes』)。key 行改『逐轮累积的全部实测配比(每轮重拟合)』;
@@ -1451,26 +1455,7 @@ def _flow(slide, s):
             ar.fill.fore_color.rgb = TEAL
             ar.line.fill.background()
             ar.shadow.inherit = False
-    # α 配比芯片 (①→② 之间, 箭头下方): 一个配比 = 15 个簇权重
-    gcx = (centers[0] + centers[1]) // 2
-    chy = by + bh // 2 + Inches(0.24)
-    chip = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE,
-                                  Emu(int(gcx - Inches(0.23))), chy,
-                                  Inches(0.46), Inches(0.32))
-    chip.adjustments[0] = 0.18
-    chip.fill.solid()
-    chip.fill.fore_color.rgb = WHITE
-    chip.line.color.rgb = NAVY
-    chip.line.width = Pt(1.25)
-    chip.shadow.inherit = False
-    p = chip.text_frame.paragraphs[0]
-    p.alignment = 2
-    _run(p, "α", 13, bold=True, color=NAVY)
-    tf = _box(slide, Emu(int(gcx - Inches(0.29))), chy + Inches(0.36), Inches(0.58), Inches(0.24))
-    p = tf.paragraphs[0]
-    p.alignment = 2
-    _run(p, "配比", 9, color=GRAY)
-    # 迭代回环: ④ 预测器 → ② 采样 (跨 ③, 箭头在卡片下方)
+     # 迭代回环: ④ 预测器 → ② 采样 (跨 ③, 箭头在卡片下方)
     lx, rx = centers[1], centers[n - 2]
     lo = slide.shapes.add_shape(MSO_SHAPE.LEFT_ARROW, Emu(lx),
                                 by + bh + Inches(0.18), Emu(rx - lx), Inches(0.3))
