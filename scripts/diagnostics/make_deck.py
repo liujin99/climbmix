@@ -4,9 +4,12 @@
 
 用法 (服务器, run 目录含 report_charts 的图):
     python3 scripts/diagnostics/make_deck.py result/prod5_20260929_201108
-    python3 scripts/diagnostics/make_deck.py <run_dir> --exec     # 精简版(23 页同构)
     python3 scripts/diagnostics/make_deck.py <run_dir> --check    # 只验图
     python3 scripts/diagnostics/make_deck.py <run_dir> -o out.pptx
+
+每次运行同时产出两份 pptx (v10.66): 完整版 (23 页) + 精简版 (与完整版
+逐页同构, 每页文字/技术细节精简) — 精简版文件名 = 主输出加 _exec 后缀
+(-o out.pptx → out_exec.pptx; 默认 <run>_deck.pptx / <run>_deck_exec.pptx)。
 
 依赖: python-pptx (pip install python-pptx; 若报 PEP 668 加
 --break-system-packages 或用 venv)。图表按三代布局解析 (root → state/
@@ -108,7 +111,11 @@ def resolve_chart(dirs, name):
                 return p
     return None
 
-# ── 幻灯片文案 (v10.65 — 精简版重做(用户澄清:完整版该有的内容
+# ── 幻灯片文案 (v10.66 — 一次运行自动产出两份 pptx(用户裁决:
+#    调用 make_deck 应同时生成完整版 + 精简版)。--exec 旗标移除;
+#    -o 只命名完整版,精简版 = 同路径加 _exec 后缀;默认
+#    <run>_deck.pptx / <run>_deck_exec.pptx。
+#    v10.65 — 精简版重做(用户澄清:完整版该有的内容
 #    都得有,不是砍页面,而是逐页做减法)。--exec 的 SLIDES_EXEC 改为
 #    与完整版 23 页逐页同构:每页标题/结论行精简、表格砍列并格
 #    (结论先行删相对提升列、能力归因 6 行并 3 行、改进页 4 行并
@@ -1927,11 +1934,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("run_dir", help="run 目录 (prod5 归档)")
     ap.add_argument("-o", "--output", default=None,
-                    help="输出 pptx (默认 <run_dir>/<basename>_deck.pptx)")
+                    help="完整版输出 pptx (精简版自动同名加 _exec; 默认 "
+                         "<run_dir>/<basename>_deck.pptx)")
     ap.add_argument("--check", action="store_true", help="只验证图表存在, 不生成")
-    ap.add_argument("--exec", action="store_true",
-                    help="生成精简版 (23 页与完整版同构, 每页文字/技术细节"
-                         "精简, 默认输出 *_deck_exec.pptx)")
     args = ap.parse_args()
     if not os.path.isdir(args.run_dir):
         sys.exit(f"✗ 目录不存在: {args.run_dir}")
@@ -1943,12 +1948,16 @@ def main():
             print(f"  {'✓' if p else '✗'} {name}" + (f" → {p}" if p else ""))
             ok = ok and bool(p)
         sys.exit(0 if ok else 1)
-    suffix = "_deck_exec.pptx" if args.exec else "_deck.pptx"
-    out = args.output or os.path.join(
+    # v10.66: 一次运行同时产出完整版 + 精简版两份 pptx; -o 只命名完整版,
+    # 精简版 = 同路径加 _exec 后缀 (out.pptx → out_exec.pptx)
+    out_full = args.output or os.path.join(
         deck_dir_for(args.run_dir),
-        f"{os.path.basename(os.path.normpath(args.run_dir))}{suffix}")
-    sys.exit(build(args.run_dir, out,
-                   SLIDES_EXEC if args.exec else SLIDES))
+        f"{os.path.basename(os.path.normpath(args.run_dir))}_deck.pptx")
+    root, ext = os.path.splitext(out_full)
+    out_exec = root + "_exec" + (ext or ".pptx")
+    rc_full = build(args.run_dir, out_full, SLIDES)
+    rc_exec = build(args.run_dir, out_exec, SLIDES_EXEC)
+    sys.exit(rc_full or rc_exec)
 
 
 if __name__ == "__main__":
