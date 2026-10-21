@@ -4,6 +4,7 @@
 
 用法 (服务器, run 目录含 report_charts 的图):
     python3 scripts/diagnostics/make_deck.py result/prod5_20260929_201108
+    python3 scripts/diagnostics/make_deck.py <run_dir> --exec     # 精简版(10 页)
     python3 scripts/diagnostics/make_deck.py <run_dir> --check    # 只验图
     python3 scripts/diagnostics/make_deck.py <run_dir> -o out.pptx
 
@@ -107,7 +108,14 @@ def resolve_chart(dirs, name):
                 return p
     return None
 
-# ── 幻灯片文案 (v10.63 — p16 成本统计改用天单位(用户裁决):大数字
+# ── 幻灯片文案 (v10.64 — 新增精简版 deck(用户需求:给领导汇报,
+#    完整版太细太多)。--exec 生成第二份 pptx(默认 *_deck_exec.pptx,
+#    10 页): 问题→做法→过程→结果×3→价值→下一步 的宏观叙事;砍掉
+#    机制细节、六臂总表与全部附录;关键数字保留并带口径,技术深度
+#    (LightGBM、z 尺度、Centered、预训练量)只留演讲备注并指向完整版
+#    页码;封面副题标注『精简版』。_flow 回环箭头加 n≥4 守卫(三步
+#    流程无回环可画,零宽箭头会渲染异常)。
+#    v10.63 — p16 成本统计改用天单位(用户裁决):大数字
 #    『≈3,900 NPU·h』→『≈163 NPU·天』(3,900/24 ≈ 163,与原括注一致),
 #    小时数降到说明行保留可追溯性。
 #    v10.62 — p3/p4/p5 加粗结论行孤字换行修复(用户指出:
@@ -1068,7 +1076,147 @@ SLIDES = [
                 "论文代理 350M（消融 62M）/ 目标 1B，比例 1:2.9（旧记 1:3.7 有误，已更正）；代理 tokens ≈800M/个，"
                 "我们 640M ≈ 论文 80%；主结果 40B tokens，400B 长跑档超 Llama-3.2 +2.0%；基线 Random/DoReMi/RegMix；"
                 "初始化同为 Dirichlet。"),
-    ]
+     ]
+
+
+# ── 精简版 (v10.64, --exec): 给领导汇报的第二份 pptx — 10 页
+# 问题→做法→过程→结果×3→价值→下一步 的宏观叙事;数字与完整版同源,
+# 技术深度下沉演讲备注(每页备注均指向完整版对应页)。
+SLIDES_EXEC = [
+    dict(kind="title",
+         title="训练数据怎么配？让算法自己搜",
+         subtitle="CLIMB 数据配比搜索 · 第5轮实验结果（精简版）",
+         meta="数据团队汇报 · 2026-10",
+         stats=[("+17.7%", "STEM 平均分较最强传统配比(对 uniform 6 项全胜)"),
+                ("2.3×", "数学应用题 gsm8k:CLIMB 30.1%,最强传统 12.8%"),
+                ("88.5%", "赢家配方预算集中在 2 个数学簇")]),
+    dict(kind="bullets", title="问题 — 数据配比重要，却长期靠经验设定",
+         takeaway="同样的数据、不同的配比，模型能力可以差很多 — 但配比怎么定，一直没有系统方法",
+         bullets=[
+             ("配比 = 各类数据各喂多少",
+              "训练数据来自多个来源与领域，混合比例直接塑造模型能力"),
+             ("传统做法 = 人工经验",
+              "等权、按域配比、按自然占比 — 凭直觉设定，没有实测依据，"
+              "也无从知道离最优有多远"),
+             ("我们要回答的问题",
+              "在 91.8B tokens 的 STEM 数据池上，配比怎么定，模型能力最强？"),
+         ],
+         notes="口径：数据池 = 116M 篇 STEM 文档、91.8B tokens（聚成 15 个"
+               "语义簇）；三种传统配比 = uniform（15 簇等权）/ domainfix"
+               "（人工域配比，数学 60%）/ natural（池自然占比）。"
+               "完整论证见完整版第 2 页。"),
+    dict(kind="flow", title="做法 — 引入 CLIMB：让算法在实测中搜索最优配比",
+         takeaway="不猜，直接试 — 算法在 115 次真实训练中学习配比与能力的关系，3 轮迭代逼近最优",
+         steps=[
+             ("① 切分数据池", "data",
+              "把数据池按语义切成 15 个簇；配比 = 每个簇各占多少",
+              "数据池 116M 篇 · 91.8B tokens"),
+             ("② 自动搜索", "sample",
+              "算法自动提出候选配比，逐个真实训练小模型、实测打分，"
+              "学出『什么样的配比得高分』",
+              "3 轮迭代 · 115 个候选"),
+             ("③ 对决裁定", "d28",
+              "搜索出的前 3 名与 3 种传统配比、不训练基准同池同预算对决，"
+              "裁定最终赢家",
+              "1.5B 模型 · 每臂 3B tokens"),
+         ],
+         note="CLIMB = NVIDIA 论文方法(arXiv:2504.13161)；搜索用小模型"
+              "(435M)试错、大模型(1.5B)终审，全部开销 ≈163 NPU·天",
+         notes="备答：两级模型都是现成预训练底座上的中训练（搜索层 "
+               "640M tokens/候选 × 115，终审 3B tokens/臂 × 6），不是"
+               "从零训练；方法五步图与完整机制见完整版第 3 页。"),
+    dict(kind="table", title="过程 — 复现之外，四处工程加固让方法在本场景站得住",
+         takeaway="论文方法在窄域数据池上四处水土不服 — 逐一定位、逐一改进，五轮实验收敛到最终结果",
+         table=(["机制改进", "遇到的问题", "改进与效果"],
+                [["① 均衡聚类", "聚类把 99% 的数据并进单一簇，可调旋钮"
+                   "从 15 个只剩 1 个",
+                  "强制 15 簇均衡；对等权配比的领先由 −0.36pt 转正到 "
+                  "**+4.29pt**"],
+                 ["② 评分双信号", "小模型上，数学题准确率分辨不出配比好坏",
+                  "补连续损失信号、永不接管；事故轮 gsm8k −56% → 本轮 "
+                  "**30.1%**"],
+                 ["③ 信噪比权重", "六项基准噪声不同，等权合成会被噪声大的带偏",
+                  "按实测信噪比定权重，信号强的基准多关注"],
+                 ["④ 终选守卫", "上一轮只信预测外推，选中了从未实测的配比",
+                  "只认实测第一；本轮终选即全场最优(**20.86%**)"]]),
+         y=1.95, row_h=0.55, size=12.5, widths=[0.16, 0.42, 0.42],
+         note="四处加固对任何窄域数据池都适用；每处都有实验数据支撑 — "
+              "细节见完整版第 7-10 页",
+         notes="四处加固 = ① 均衡聚类（防链式塌缩，最大簇 99.05% → ≤8.8%）"
+               "② 评分双信号（准确率权重 w ≥ 0.5）③ 信噪比权重 ④ 终选守卫"
+               "（外推点须领先 ≥ margin 才可上场）；每处在完整版 p7-p10 各有"
+               "一页『问题/做法/结果』+ 机理图。五道量化检查（评分先校准 / "
+               "数字能对账 / 误差逐题算 / 结论能复现 / 规则先于结果）见"
+               "完整版第 19 页。"),
+    dict(kind="stats", title="结果 — 同池同预算，只换配比：数学能力大幅提升",
+         takeaway="STEM 平均分较最强传统配比 +17.7%，对 uniform 六项基准全胜 — 增益全部来自配比选择",
+         stats=[("+17.7%", "STEM 平均分较最强传统配比(对 uniform 6 项全胜)"),
+                ("2 次", "独立搜索同水平复现(20.9% / 21.4%)"),
+                ("≈163 NPU·天", "全部实验总开销（≈3,900 NPU·h）")],
+         note="三口径：较最强传统配比 +3.1pt / +17.7%；较不训练基准 "
+              "+3.34pt；对等权配比 +4.29pt（六项全胜，统计显著）",
+         notes="备查：vs 最强传统（domainfix）+3.1pt / +17.7%；vs 不训练"
+               "基准（base）+3.34pt；vs 等权配比（uniform）+4.29pt"
+               "（z = 3.8，六项全胜 p = 0.016）。六臂完整对照表见完整版"
+               "第 2 页；两次独立搜索 = 第 4/5 轮，20.9% / 21.4%"
+               "（预注册口径）。"),
+    dict(kind="table", title="结果 — 提升全部来自数学推理，知识类不掉分",
+         takeaway="两项写过程的数学基准大赢，四项知识类基准全部打平 — 增益在推理，不在知识",
+         table=(["能力 · 基准（题型）", "CLIMB 搜索配比", "最强传统配比", "变化"],
+                [["应用数学 gsm8k（写过程）", "30.1%", "12.8%",
+                  "**2.3×（+17.3pt）**"],
+                 ["竞赛数学 math（写过程）", "5.8%", "2.8%",
+                  "**2.1×（+3.0pt）**"],
+                 ["知识类 4 项（选择题）", "与最强传统打平", "—",
+                  "差异均在噪声内"]]),
+         y=1.95, row_h=0.62, size=13, widths=[0.34, 0.18, 0.18, 0.30],
+         note="最强传统配比 = 三种非搜索配比逐基准取最强；全部对比同池、"
+              "同底座、同预算（每臂 3B tokens 中训练）",
+         notes="备答『为什么知识类没提升』：选择题 4 项里 3 项最优 = 不训练"
+               "基准 — 继续训练在知识题上的共性回退，与配比无关；配比的"
+               "增益集中在推理能力。逐项六臂总表见完整版第 5 页。"),
+    dict(kind="image", title="结果 — 搜出的配比与任何人工经验都不一样",
+         takeaway="算法把 88.5% 的预算押在两个数学相关簇上 — 没有任何人工先验会这样配，而它赢了",
+         bullets=[
+             ("赢家配方", "80.4% 给『算术应用题』簇 + 8.1% 给『形式数学"
+                        "解题』簇，其余 13 簇仅保底"),
+             ("这正是搜索的价值", "重仓簇经逐簇检验与数学能力正相关；"
+                                "靠人工经验，不会给出这个答案"),
+         ],
+         image="recipe_distribution.png",
+         caption="各配比策略在 15 个语义簇上的 token 预算分配（100% 堆叠）",
+         notes="C10『算术应用题』= 池占比仅 5.5% 的簇，拿到 80.4% 预算"
+               "（池占比的 14.6×）；另一簇 C0『形式数学解题』8.1%。逐簇"
+               "检验（各簇配比与得分的相关性）见完整版第 20 页；簇内容"
+               "全景见完整版第 12 页。另：赢家重仓簇的质量分反而最低 — "
+               "质量分 ≠ 训练价值（完整版第 13 页）。"),
+    dict(kind="bullets", title="这意味着什么 — 配比成为一个工程化旋钮",
+         takeaway="这次拧对了的不只是配比，还有『怎么找配比』的方法本身",
+         bullets=[
+             ("可搜索", "配比从经验设定变成系统搜索 — 任何新数据池都能跑"
+                       "同一套流程"),
+             ("可复现", "换随机种子完全重跑，结果同水平；胜负规则先于实验"
+                       "写好存档"),
+             ("可解释", "配比 = 语义簇权重，每个簇是什么内容、为什么多喂，"
+                       "都能讲清楚"),
+             ("能力沉淀", "五轮实验、四处加固、五道量化检查 — 框架与流程"
+                         "可直接用于下一个数据池"),
+         ],
+         notes="五道量化检查 = 评分先校准、数字能对账、误差逐题算、结论能"
+               "复现、规则先于结果（完整版第 19 页）；两次独立搜索 = 第 4 轮"
+               "热启动 21.4% / 第 5 轮冷启动 20.9%，种子带内同水平。"),
+    dict(kind="bullets", title="下一步",
+         takeaway="三个方向",
+         bullets=[
+             ("① 完成中等规模实验验证", ">1.5B 模型、>100B 数据"),
+             ("② 新类型基准的适配与验证", "扩大评测覆盖的能力与题型"),
+             ("③ 超参数调优等事项", ""),
+         ],
+         notes="与完整版第 17 页一致；①的『中等规模』指 >1.5B 模型、"
+               ">100B 数据的更大预算验证。"),
+    dict(kind="title", title="谢谢", subtitle="欢迎提问与讨论 — 技术细节备有完整版",
+         meta="数据团队汇报 · 2026-10"),
+]
 
 
 def png_size(path):
@@ -1484,18 +1632,20 @@ def _flow(slide, s):
             ar.line.fill.background()
             ar.shadow.inherit = False
      # 迭代回环: ④ 预测器 → ② 采样 (跨 ③, 箭头在卡片下方)
-    lx, rx = centers[1], centers[n - 2]
-    lo = slide.shapes.add_shape(MSO_SHAPE.LEFT_ARROW, Emu(lx),
-                                by + bh + Inches(0.18), Emu(rx - lx), Inches(0.3))
-    lo.fill.solid()
-    lo.fill.fore_color.rgb = RGBColor(0xE2, 0xF3, 0xF4)
-    lo.line.color.rgb = TEAL
-    lo.line.width = Pt(1)
-    lo.shadow.inherit = False
-    tf = _box(slide, Emu(lx), by + bh + Inches(0.54), Emu(rx - lx), Inches(0.32))
-    p = tf.paragraphs[0]
-    p.alignment = 2
-    _run(p, s["loop_label"], 11.5, bold=True, color=TEAL)
+    # v10.64: n<4 时跳过 — 精简版三步流程无回环可画, 零宽箭头会渲染异常
+    if n >= 4 and s.get("loop_label"):
+        lx, rx = centers[1], centers[n - 2]
+        lo = slide.shapes.add_shape(MSO_SHAPE.LEFT_ARROW, Emu(lx),
+                                    by + bh + Inches(0.18), Emu(rx - lx), Inches(0.3))
+        lo.fill.solid()
+        lo.fill.fore_color.rgb = RGBColor(0xE2, 0xF3, 0xF4)
+        lo.line.color.rgb = TEAL
+        lo.line.width = Pt(1)
+        lo.shadow.inherit = False
+        tf = _box(slide, Emu(lx), by + bh + Inches(0.54), Emu(rx - lx), Inches(0.32))
+        p = tf.paragraphs[0]
+        p.alignment = 2
+        _run(p, s["loop_label"], 11.5, bold=True, color=TEAL)
     if s.get("note"):
         tf = _box(slide, ML, Inches(5.9), CW, Inches(0.9))
         p = tf.paragraphs[0]
@@ -1503,13 +1653,13 @@ def _flow(slide, s):
         _md(p, s["note"], 11.5, GRAY, bold_color=DARK)
 
 
-def build(run_dir, out):
+def build(run_dir, out, slides=SLIDES):
     run_name = os.path.basename(os.path.normpath(run_dir))
     ddir = deck_dir_for(run_dir)
     os.makedirs(ddir, exist_ok=True)
     missing = []
     n_img = 0
-    for s in SLIDES:
+    for s in slides:
         img = s.get("image")
         if not img:
             continue
@@ -1542,8 +1692,8 @@ def build(run_dir, out):
     prs = Presentation()
     prs.slide_width, prs.slide_height = PAGE_W, PAGE_H
     blank = prs.slide_layouts[6]
-    total = len(SLIDES)
-    for idx, s in enumerate(SLIDES, 1):
+    total = len(slides)
+    for idx, s in enumerate(slides, 1):
         slide = prs.slides.add_slide(blank)
         if s.get("notes"):
             slide.notes_slide.notes_text_frame.text = s["notes"]
@@ -1611,6 +1761,9 @@ def main():
     ap.add_argument("-o", "--output", default=None,
                     help="输出 pptx (默认 <run_dir>/<basename>_deck.pptx)")
     ap.add_argument("--check", action="store_true", help="只验证图表存在, 不生成")
+    ap.add_argument("--exec", action="store_true",
+                    help="生成精简版 (10 页, 问题→做法→结果宏观叙事, 默认 "
+                         "输出 *_deck_exec.pptx)")
     args = ap.parse_args()
     if not os.path.isdir(args.run_dir):
         sys.exit(f"✗ 目录不存在: {args.run_dir}")
@@ -1622,10 +1775,12 @@ def main():
             print(f"  {'✓' if p else '✗'} {name}" + (f" → {p}" if p else ""))
             ok = ok and bool(p)
         sys.exit(0 if ok else 1)
+    suffix = "_deck_exec.pptx" if args.exec else "_deck.pptx"
     out = args.output or os.path.join(
         deck_dir_for(args.run_dir),
-        f"{os.path.basename(os.path.normpath(args.run_dir))}_deck.pptx")
-    sys.exit(build(args.run_dir, out))
+        f"{os.path.basename(os.path.normpath(args.run_dir))}{suffix}")
+    sys.exit(build(args.run_dir, out,
+                   SLIDES_EXEC if args.exec else SLIDES))
 
 
 if __name__ == "__main__":
