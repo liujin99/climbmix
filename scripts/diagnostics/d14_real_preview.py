@@ -31,12 +31,23 @@
 #    本地(合成细簇, 看样式; 结构机理相同, 数字非真实):
 #      python3 scripts/diagnostics/d14_real_preview.py --fixture \
 #        -o /tmp/opencode/rc2/deck/d14_real_preview.png
+#    数据不可出内网时的外网重画(v1.0.79): 服务器 --dump-out 落一个
+#    gzip+base64 单行 blob(只含绘图终态输入 — 二维坐标/簇权重/双划分
+#    归属/合并距离曲线, ~15KB; 不含嵌入向量与原始数据), 贴回本机重画:
+#      python3 scripts/diagnostics/d14_real_preview.py \
+#        --kmeans '<同上>' --data-dir <同上> -o /tmp/check.png \
+#        --dump-out /tmp/d14_dump.json          # 服务器(原命令照旧+两参数)
+#      python3 scripts/diagnostics/d14_real_preview.py \
+#        --from-dump /tmp/d14_dump.json \
+#        -o /tmp/opencode/rc2/deck/d14_real_preview.png   # 外网本机
 #
 #  注: 预览跳过质量剪枝(prune) — 两种方法跑在同一批细簇上, 公平对比;
 #  生产路径的剪枝是质量侧通道, 不影响"塌缩 vs 均衡"的结构对比。
 # ═══════════════════════════════════════════════════════════════════════
 import argparse
+import base64
 import glob
+import gzip
 import json
 import os
 import sys
@@ -280,6 +291,12 @@ def main():
                     help="池 parquet 目录 — 提供 token 权重(可选)")
     ap.add_argument("--fixture", action="store_true",
                     help="本地合成细簇(看样式)")
+    ap.add_argument("--dump-out", default="",
+                    help="管线跑完后把绘图输入压成 gzip+base64 单行 JSON"
+                         " 落盘(供外网本机 --from-dump 重画)")
+    ap.add_argument("--from-dump", default="",
+                    help="从 --dump-out 落的 blob 重画(免 kmeans/池/合并;"
+                         "与 --fixture/--kmeans 互斥)")
     ap.add_argument("--K", type=int, default=K_TARGET)
     ap.add_argument("--slack", type=float, default=0.15)
     ap.add_argument("--tau", type=float, default=0.9,
@@ -287,52 +304,109 @@ def main():
     ap.add_argument("-o", "--out", default="d14_real_preview.png")
     args = ap.parse_args()
 
-    if not args.fixture and not args.kmeans:
-        sys.exit("✗ 需要 --kmeans <glob> 或 --fixture 之一")
-    if args.fixture:
-        labels, cen, tok, src_note = make_fixture()
-    else:
-        labels, cen, tok, src_note = load_real(args.kmeans, args.data_dir)
+    if not args.fixture and not args.kmeans and not args.from_dump:
+        sys.exit("✗ 需要 --kmeans <glob> 或 --fixture 或 --from-dump <file> 之一")
+    if args.from_dump and (args.fixture or args.kmeans):
+        sys.exit("✗ --from-dump 与 --fixture/--kmeans 互斥")
 
-    # 细簇量(token 或文档数) — 点大小与份额统计的权重
-    w = tok if tok is not None else np.ones(len(labels), dtype=np.int64)
-    fine_tok = np.bincount(np.asarray(labels), weights=w,
-                           minlength=len(cen)).astype(np.float64)
-
-    print(f"[3/3] 跑两种划分(生产函数, K={args.K})…", flush=True)
-    fd, prof_path = tempfile.mkstemp(suffix=".json", prefix="d14prof_")
-    os.close(fd)
-    _, _, dist_map = merge_clusters_by_distance(
-        labels, cen, merge_distance=args.tau, target_K=args.K,
-        profile_path=prof_path)
-    with open(prof_path) as f:
-        prof = json.load(f)
-    os.unlink(prof_path)
-    _, _, bal_map = balanced_macro_clusters(
-        labels, cen, token_counts=tok, K=args.K, slack=args.slack)
-
-    dm = np.array([dist_map[i] for i in range(len(cen))])
-    bm = np.array([bal_map[i] for i in range(len(cen))])
-    tot = fine_tok.sum()
-    d_sh = np.array([fine_tok[dm == k].sum() / tot for k in np.unique(dm)])
-    b_sh = np.array([fine_tok[bm == k].sum() / tot for k in np.unique(bm)])
-    print(f"    距离合并: K={len(np.unique(dm))}, 最大簇 {d_sh.max():.1%}")
-    print(f"    均衡划分: K={len(np.unique(bm))}, 最大簇 {b_sh.max():.1%}"
-          f"(上限 {(1 + args.slack) / args.K:.1%})")
-
-    # ── 出图: 二维嵌入(t-SNE 优先; 孤岛外推到流形外), 点 = 细簇珠(白描
-    #    边互相分开 — 否则 986 个点糊成一片, 读者看不出"框里有许多
-    #    细簇"), 分组靠圈/环; -o 可指向尚不存在的 deck/ 目录 ──
+    # -o 可指向尚不存在的 deck/ 目录
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     setup_cjk_font()
-    nrm = cen / np.clip(np.linalg.norm(cen, axis=1, keepdims=True), 1e-9, None)
-    P, embed_note = embed_2d(nrm)
-    giant = int(np.unique(dm)[np.argmax(d_sh)])
-    span = float(max(np.ptp(P[:, 0]), np.ptp(P[:, 1]), 1e-9))
-    P, n_push = separate_islands(P, dm == giant, span)
-    if n_push:
-        print(f"    孤岛外推: {n_push} 个细簇移到流形外(t-SNE 不保全局"
-              f"距离; 高维中孤岛距流形 > τ)", flush=True)
+
+    if args.from_dump:
+        # 外网本机: 用服务器 --dump-out 的 blob 重画(免 kmeans/池/合并)
+        with open(args.from_dump) as f:
+            blob = json.load(f)
+        d = json.loads(gzip.decompress(base64.b64decode(blob["b64"])))
+        P = np.array(d["P"], dtype=np.float64)
+        fine_tok = np.array(d["ftok"], dtype=np.float64) * d["ftok_u"]
+        dm = np.array(d["dm"], dtype=int)
+        bm = np.array(d["bm"], dtype=int)
+        prof = {"profile": [{"K": int(k), "closest_pair_dist": dd}
+                            for k, dd in zip(d["profK"], d["profD"])],
+                "K_final": int(d["K_final"]),
+                "stop_reason": d.get("stop_reason") or "floor",
+                "natural_K": {"0.7": d.get("natural_K_07")}}
+        args.tau = float(d["tau"])
+        span, n_push = float(d["span"]), int(d["n_push"])
+        embed_note, src_note = d["embed_note"], d["src_note"]
+        tot = fine_tok.sum()
+        d_sh = np.array([fine_tok[dm == k].sum() / tot for k in np.unique(dm)])
+        b_sh = np.array([fine_tok[bm == k].sum() / tot for k in np.unique(bm)])
+        giant = int(np.unique(dm)[np.argmax(d_sh)])
+        print(f"[from-dump] F={len(P)}; 距离合并最大簇 {d_sh.max():.1%}, "
+              f"均衡最大簇 {b_sh.max():.1%}(上限 {(1 + args.slack) / args.K:.1%})")
+    else:
+        if args.fixture:
+            labels, cen, tok, src_note = make_fixture()
+        else:
+            labels, cen, tok, src_note = load_real(args.kmeans, args.data_dir)
+
+        # 细簇量(token 或文档数) — 点大小与份额统计的权重
+        w = tok if tok is not None else np.ones(len(labels), dtype=np.int64)
+        fine_tok = np.bincount(np.asarray(labels), weights=w,
+                               minlength=len(cen)).astype(np.float64)
+
+        print(f"[3/3] 跑两种划分(生产函数, K={args.K})…", flush=True)
+        fd, prof_path = tempfile.mkstemp(suffix=".json", prefix="d14prof_")
+        os.close(fd)
+        _, _, dist_map = merge_clusters_by_distance(
+            labels, cen, merge_distance=args.tau, target_K=args.K,
+            profile_path=prof_path)
+        with open(prof_path) as f:
+            prof = json.load(f)
+        os.unlink(prof_path)
+        _, _, bal_map = balanced_macro_clusters(
+            labels, cen, token_counts=tok, K=args.K, slack=args.slack)
+
+        dm = np.array([dist_map[i] for i in range(len(cen))])
+        bm = np.array([bal_map[i] for i in range(len(cen))])
+        tot = fine_tok.sum()
+        d_sh = np.array([fine_tok[dm == k].sum() / tot for k in np.unique(dm)])
+        b_sh = np.array([fine_tok[bm == k].sum() / tot for k in np.unique(bm)])
+        print(f"    距离合并: K={len(np.unique(dm))}, 最大簇 {d_sh.max():.1%}")
+        print(f"    均衡划分: K={len(np.unique(bm))}, 最大簇 {b_sh.max():.1%}"
+              f"(上限 {(1 + args.slack) / args.K:.1%})")
+
+        # ── 出图: 二维嵌入(t-SNE 优先; 孤岛外推到流形外), 点 = 细簇珠(白描
+        #    边互相分开 — 否则 986 个点糊成一片, 读者看不出"框里有许多
+        #    细簇"), 分组靠圈/环 ──
+        nrm = cen / np.clip(np.linalg.norm(cen, axis=1, keepdims=True), 1e-9, None)
+        P, embed_note = embed_2d(nrm)
+        giant = int(np.unique(dm)[np.argmax(d_sh)])
+        span = float(max(np.ptp(P[:, 0]), np.ptp(P[:, 1]), 1e-9))
+        P, n_push = separate_islands(P, dm == giant, span)
+        if n_push:
+            print(f"    孤岛外推: {n_push} 个细簇移到流形外(t-SNE 不保全局"
+                  f"距离; 高维中孤岛距流形 > τ)", flush=True)
+        if args.dump_out:
+            # 绘图终态输入 → gzip+base64 单行 blob(外网本机 --from-dump
+            # 重画用; 不含嵌入向量/原始数据; 权重按 5 位有效数字量化,
+            # 远低于图面显示精度)
+            unit = 10 ** max(0, int(np.floor(np.log10(fine_tok.max()))) - 4)
+            payload = {
+                "P": [[round(float(x), 3) for x in row] for row in P],
+                "ftok_u": unit,
+                "ftok": [int(round(float(t) / unit)) for t in fine_tok],
+                "dm": [int(x) for x in dm], "bm": [int(x) for x in bm],
+                "profK": [int(p["K"]) for p in prof["profile"]],
+                "profD": [round(float(p["closest_pair_dist"]), 4)
+                          for p in prof["profile"]],
+                "K_final": int(prof["K_final"]),
+                "stop_reason": prof.get("stop_reason") or "floor",
+                "natural_K_07": prof.get("natural_K", {}).get("0.7"),
+                "tau": float(args.tau), "span": span, "n_push": int(n_push),
+                "embed_note": embed_note, "src_note": src_note,
+            }
+            blob = {"b64": base64.b64encode(gzip.compress(
+                json.dumps(payload, separators=(",", ":")).encode())).decode()}
+            os.makedirs(os.path.dirname(os.path.abspath(args.dump_out)),
+                        exist_ok=True)
+            with open(args.dump_out, "w") as f:
+                json.dump(blob, f)
+            print(f"    ✓ dump → {args.dump_out} "
+                  f"({len(blob['b64']) / 1024:.1f} KiB, 单行 gzip+base64)")
+
     sizes = 6 + 24 * np.sqrt(fine_tok / fine_tok.max())
     # 统一留边: 圈/环不会顶到面板边缘, 更不会压到面板外的文字带
     xlim = (float(P[:, 0].min() - 0.05 * span), float(P[:, 0].max() + 0.05 * span))
