@@ -71,6 +71,8 @@ tokens per point + 6 target arms at 64-NPU world size + anchor).
 
 ![Where the gain lives: flat on multiple choice, decisive on write-out math](docs/assets/gain_profile.png)
 
+![Search convergence: guided rounds climb above the random-sampling band; the round-3 best (cfg#101) became the d28-winning arm](docs/assets/search_convergence.png)
+
 Key findings:
 
 - **The reproduction holds end-to-end** — a fresh cold-start search
