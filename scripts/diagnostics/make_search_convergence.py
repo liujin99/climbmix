@@ -48,7 +48,7 @@ CSV_NAME = "prod5_search_dump.csv"
 BEST_EXPECTED = {1: 0.8560, 2: 1.0324, 3: 1.4524}   # 终态口径轮最佳
 COUNTS_EXPECTED = {1: 66, 2: 33, 3: 16}              # 文档口径 §3a
 FLEET_BEST_ID, FLEET_BEST_SCORE = 101, 1.4524         # cfg#101, 两口径公共
-ROUND_COLORS = {1: "#9aa5b1", 2: "#4C72B0", 3: "#C44E52"}
+ROUND_COLORS = {1: "#4C72B0", 2: "#55A868", 3: "#C44E52"}  # deck 同款
 ROUND_LABELS = {1: "round 1 (Dirichlet random, n=66)",
                 2: "round 2 (predictor-guided, n=33)",
                 3: "round 3 (predictor-guided, n=16)"}
@@ -101,10 +101,16 @@ def main():
                    label=ROUND_LABELS[r], zorder=3)
     for r, b in ((2, 66.5), (3, 99.5)):
         ax.axvline(b, color="gray", linestyle=":", linewidth=0.8)
-    ax.axhspan(mu - sd, mu + sd, color="#4C72B0", alpha=0.08, zorder=1,
+    ax.axhspan(mu - sd, mu + sd, color="#4C72B0", alpha=0.10, zorder=1,
                label="round-1 random level (mean ± 1σ)")
-    bx = [66, 99, 115]
-    by = [float(scores[it == r].max()) for r in (1, 2, 3)]
+    # best 连线锚定各轮最佳的**真实位置** (deck chart A 同款, 非轮末)
+    bx, by = [], []
+    for r in (1, 2, 3):
+        m = np.where(it == r)[0]
+        gi = int(m[np.argmax(scores[m])])
+        bx.append(gi + 1)
+        by.append(float(scores[gi]))
+    assert ids[bx[2] - 1] == FLEET_BEST_ID, "round-3 best is not cfg#101"
     ax.plot(bx, by, "o-", color="#222222", linewidth=1.4, markersize=6,
             label="best per round", zorder=5)
     for xi, yi in zip(bx, by):
@@ -116,6 +122,8 @@ def main():
             bbox=dict(facecolor="white", edgecolor="gray", alpha=0.85))
     ax.set_xlabel("measured mixture (chronological)")
     ax.set_ylabel("proxy utility (z-scale, higher = better)")
+    ax.set_xlim(-1, 118)
+    ax.set_ylim(float(scores.min()) - 0.12, max(by) + 0.24)
     ax.set_title("Search convergence: 115 measured mixtures over "
                  "3 guided rounds")
     ax.legend(fontsize=8, loc="lower right")
