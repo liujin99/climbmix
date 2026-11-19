@@ -17,7 +17,8 @@ import glob
 import time
 import multiprocessing as mp
 from typing import Dict, List, Optional, Tuple
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import (ProcessPoolExecutor, as_completed,
+                                TimeoutError as FuturesTimeoutError)
 
 import numpy as np
 import numpy.typing as npt
@@ -623,24 +624,48 @@ class ShardMetadataManager:
             for sid in shard_groups:
                 shard_results[sid] = _read_one_shard_texts(*shard_task_args[sid])
         else:
-            log_interval = max(1, n_shards // 20)
+            log_interval = max(1, n_shards // 100)
             done = 0
+            # 2026-11-19 S1'' 实证：worker 卡在分片 I/O 上时 as_completed 无超时
+            # 永久阻塞（exp_0002 冻结在 50/1000 达数小时，无报错无自愈）。
+            # 看门狗与根因无关：超预算即硬杀池、点名卡住分片、响亮失败——
+            # run_batch 把该 exp 记 inf，搜索继续，不悬死整轮。
+            base = float(os.environ.get('CLIMBMIX_READ_BASE_SECONDS') or 120.0)
+            per_slot = float(os.environ.get('CLIMBMIX_READ_SLOT_SECONDS') or 45.0)
+            import math
+            deadline = time.time() + base + math.ceil(n_shards / n_workers) * per_slot
             ctx = mp.get_context("spawn")
-            with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as pool:
-                future_map = {
-                    pool.submit(_read_one_shard_texts, *shard_task_args[sid]): sid
-                    for sid in shard_groups
-                }
-                for future in as_completed(future_map):
-                    sid = future_map[future]
-                    shard_results[sid] = future.result()
-                    done += 1
-                    if verbose and (done % log_interval == 0 or done == n_shards):
-                        elapsed = time.time() - t0
-                        pct = done / n_shards * 100
-                        eta = elapsed / done * (n_shards - done)
-                        print(f"[read_texts] {done}/{n_shards} shards "
-                              f"({pct:.0f}%) — elapsed {elapsed:.0f}s, ETA {eta:.0f}s")
+            pool = ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx)
+            pending = {
+                pool.submit(_read_one_shard_texts, *shard_task_args[sid]): sid
+                for sid in shard_groups
+            }
+            try:
+                while pending:
+                    remaining = max(1.0, deadline - time.time())
+                    try:
+                        for future in as_completed(list(pending), timeout=remaining):
+                            sid = pending.pop(future)
+                            shard_results[sid] = future.result()
+                            done += 1
+                            if verbose and (done % log_interval == 0 or done == n_shards):
+                                elapsed = time.time() - t0
+                                pct = done / n_shards * 100
+                                eta = elapsed / done * (n_shards - done)
+                                print(f"[read_texts] {done}/{n_shards} shards "
+                                      f"({pct:.0f}%) — elapsed {elapsed:.0f}s, ETA {eta:.0f}s")
+                    except FuturesTimeoutError:
+                        stuck = [shard_groups[sid][0] for sid in pending.values()]
+                        for proc in list(getattr(pool, '_processes', {}).values()):
+                            proc.terminate()
+                        raise RuntimeError(
+                            f'read_texts 看门狗超时：{len(pending)}/{n_shards} 分片在预算 '
+                            f'{base + math.ceil(n_shards / n_workers) * per_slot:.0f}s 内未完成'
+                            f'（疑似 OBS/FUSE I/O stall）。卡住分片（前 5）: '
+                            f'{[str(p) for p in stuck[:5]]}。硬杀读进程池并响亮失败——'
+                            '本 exp 记 inf，搜索继续，不悬死迭代') from None
+            finally:
+                pool.shutdown(wait=False, cancel_futures=True)
 
         result = _assemble_texts(
             global_indices, shard_groups, shard_results, self._shard_starts
@@ -688,6 +713,10 @@ def _read_one_shard_texts(
     hard indexing bug into an invisible ~18% mixture quality drift).
     """
     import pyarrow.parquet as pq
+
+    _test_sleep = os.environ.get('CLIMBMIX_TEST_SHARD_READ_SLEEP')
+    if _test_sleep:
+        time.sleep(float(_test_sleep))  # 诊断钩子：仅测试用，模拟卡死的分片读
 
     if row_col is None:
         table = pq.read_table(shard_path, columns=[text_col], use_threads=False)

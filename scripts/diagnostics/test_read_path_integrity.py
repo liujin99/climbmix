@@ -29,6 +29,7 @@ Checks:
 import os
 import sys
 import tempfile
+import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(REPO, "src"))
@@ -269,6 +270,41 @@ def main():
     mm7 = ShardMetadataManager(pool, schema=schema)
     got7 = mm7.read_texts(np.sort(gids), verbose=False)
     check("spawn-path read correct", got7 == exp)
+
+    # 12. read_texts watchdog (2026-11-19 S1'' exp_0002: worker 卡在分片 I/O 上,
+    #     as_completed 无超时永久阻塞，整轮搜索悬死)。看门狗语义：超预算 →
+    #     硬杀池 → 响亮报错点名卡住分片；健康读在正常预算下零误伤。
+    os.environ['CLIMBMIX_TEST_SHARD_READ_SLEEP'] = '60'
+    os.environ['CLIMBMIX_READ_BASE_SECONDS'] = '0.001'
+    os.environ['CLIMBMIX_READ_SLOT_SECONDS'] = '0.001'
+    try:
+        t_wd = time.time()
+        try:
+            mm7.read_texts(np.sort(gids), verbose=False)
+            check("watchdog trips on stuck shard reads", False, "no raise")
+        except RuntimeError as e:
+            msg = str(e)
+            check("watchdog trips on stuck shard reads", "看门狗" in msg)
+            check("watchdog error names stuck count", "3/3 分片" in msg)
+            check("watchdog error names stuck shard path", "shard_" in msg)
+            check("watchdog fails fast (no hang)", time.time() - t_wd < 30)
+    finally:
+        os.environ.pop('CLIMBMIX_TEST_SHARD_READ_SLEEP', None)
+        os.environ.pop('CLIMBMIX_READ_BASE_SECONDS', None)
+        os.environ.pop('CLIMBMIX_READ_SLOT_SECONDS', None)
+
+    # 12b. 紧但合理的预算下健康读零误伤（fast path 不被看门狗咬）
+    os.environ['CLIMBMIX_READ_BASE_SECONDS'] = '30'
+    os.environ['CLIMBMIX_READ_SLOT_SECONDS'] = '10'
+    os.environ['CLIMBMIX_TEST_SHARD_READ_SLEEP'] = '0.2'
+    try:
+        mm8 = ShardMetadataManager(pool, schema=schema)
+        got8 = mm8.read_texts(np.sort(gids), verbose=False)
+        check("healthy reads survive a sane budget (no false trip)", got8 == exp)
+    finally:
+        os.environ.pop('CLIMBMIX_TEST_SHARD_READ_SLEEP', None)
+        os.environ.pop('CLIMBMIX_READ_BASE_SECONDS', None)
+        os.environ.pop('CLIMBMIX_READ_SLOT_SECONDS', None)
 
     print()
     if _failures:
