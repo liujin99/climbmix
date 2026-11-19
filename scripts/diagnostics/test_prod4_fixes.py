@@ -154,7 +154,8 @@ check("done_guard: legacy .done unverifiable -> rejected",
 
 # ── 5. mix_general_data: .done staleness over ratio + both inputs ────
 mix = load_script("mix_general_data")
-fresh = {"stem_ratio": 0.7, "stem_key": "aaa", "general_key": "bbb"}
+fresh = {"ratio_unit": "tokens", "stem_ratio": 0.7, "stem_key": "aaa",
+         "general_key": "bbb"}
 check("mix_guard: exact match not stale",
       not mix._mix_done_stale(fresh, ratio=0.7, stem_key="aaa",
                               general_key="bbb"))
@@ -170,6 +171,10 @@ check("mix_guard: general supply change stale (+1 safety shard)",
 check("mix_guard: legacy .done (no keys) stale",
       mix._mix_done_stale({"stem_ratio": 0.7}, ratio=0.7, stem_key="aaa",
                           general_key="bbb"))
+check("mix_guard: doc-era .done (no ratio_unit) stale — 口径代差",
+      mix._mix_done_stale({"stem_ratio": 0.7, "stem_key": "aaa",
+                           "general_key": "bbb"}, ratio=0.7,
+                          stem_key="aaa", general_key="bbb"))
 
 # ── 6. check_disk_budget: estimator + gate ───────────────────────────
 cdb = load_script("check_disk_budget")
@@ -267,23 +272,58 @@ def _dir_bytes(d):
 with tempfile.TemporaryDirectory() as td:
     stem = os.path.join(td, "stem")
     gen = os.path.join(td, "gen")
-    _mk_text_dir(stem, 4, 50)   # 3 train (last = val) = 150 train docs
-    _mk_text_dir(gen, 2, 50)    # 100 general docs
+    _mk_text_dir(stem, 4, 50)   # 3 train (last = val) = 150 train docs x 2 tok
+    _mk_text_dir(gen, 3, 50)    # 150 general docs x 2 tok
     climb_files = sorted(_glob.glob(os.path.join(gen, "shard_*.parquet")))
     outs = {}
     for wk in ("1", "8"):
         os.environ["CLIMB_MIX_WRITE_WORKERS"] = wk
         od = os.path.join(td, "mixout_" + wk)
-        mix._mix_data_locked(stem, climb_files, od, num_output_files=5,
+        mix._mix_data_locked(stem, climb_files, od,
                              batch_per_file=20, num_npu=8, stem_ratio=0.7)
         outs[wk] = _dir_bytes(od)
     os.environ.pop("CLIMB_MIX_WRITE_WORKERS", None)
-    check("mix_par: 5 train + val + .done produced",
+    # token 贪心：150 stem(300 tok) + 65 gen(130 tok) = 215 docs -> 11 train
+    # shards (10x20 + 15) + val copy + .done
+    check("mix_par: 11 train + val + .done produced",
           sorted(outs["1"]) == sorted(
-              ["shard_%05d.parquet" % i for i in range(6)] + [".done"]),
+              ["shard_%05d.parquet" % i for i in range(12)] + [".done"]),
           str(sorted(outs["1"])))
     check("mix_par: workers=8 byte-identical to serial workers=1",
           outs["1"] == outs["8"])
+    done = json.loads(outs["1"][".done"])
+    check("mix_par: .done records token ledger",
+          done["ratio_unit"] == "tokens"
+          and done["stem_tokens_c4"] == 300
+          and done["general_tokens_c4"] == 130,
+          str(done))
+    check("mix_par: token share = 70% (300/430)",
+          abs(done["stem_tokens_c4"] / (done["stem_tokens_c4"]
+                                        + done["general_tokens_c4"]) - 0.7) < 0.01)
+
+# token 口径 vs 文档级的行为分界：STEM 长文(10 tok)、通用短文(1 tok)时，
+# token 配额吃 215 篇通用配 50 篇 STEM（文档级伯努利只会配 ~21 篇）。
+with tempfile.TemporaryDirectory() as td:
+    stem = os.path.join(td, "stem")
+    gen = os.path.join(td, "gen")
+    os.makedirs(stem); os.makedirs(gen)
+    for i in range(2):
+        pq.write_table(pa.table({"text": ["x" * 40] * 50}),
+                       os.path.join(stem, "shard_%05d.parquet" % i))
+    for i in range(7):
+        pq.write_table(pa.table({"text": ["y" * 4] * 50}),
+                       os.path.join(gen, "shard_%05d.parquet" % i))
+    climb_files = sorted(_glob.glob(os.path.join(gen, "shard_*.parquet")))
+    od = os.path.join(td, "mixout")
+    mix._mix_data_locked(stem, climb_files, od,
+                         batch_per_file=20, num_npu=8, stem_ratio=0.7)
+    done = json.loads(open(os.path.join(od, ".done")).read())
+    check("mix_tok: 500 STEM + 215 general tokens (quota 1500/7)",
+          done["stem_tokens_c4"] == 500 and done["general_tokens_c4"] == 215,
+          str(done))
+    check("mix_tok: token share 69.9% but doc share 18.9% — token 口径实锤",
+          abs(done["stem_tokens_c4"] / (done["stem_tokens_c4"]
+                                         + done["general_tokens_c4"]) - 0.7) < 0.01)
 
 with tempfile.TemporaryDirectory() as td:
     train = ["t%d" % i for i in range(250)]

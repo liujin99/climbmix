@@ -413,12 +413,13 @@ with tempfile.TemporaryDirectory() as fake_run:
           (r.stdout + r.stderr).strip()[-160:])
 
 # ── 11. mix supply preflight: general repetition is loud by default ───
-# mix_general_data draws BOTH sides from cycling generators — a short
-# general supply used to repeat docs silently (ratio intact!). The
-# preflight must turn that into a loud error, with an explicit opt-in.
+# The STEM side is drawn single-pass (exhaust = stop, zero repeats); the
+# general side cycles — a short token supply would repeat docs silently
+# (ratio intact!). The token preflight must turn that into a loud error,
+# with an explicit opt-in.
 mix_src = open(os.path.join(REPO, "scripts/mix_general_data.py")).read()
-check("mix: supply preflight present (count vs need + binomial margin)",
-      "supply preflight" in mix_src and "binomial" in mix_src)
+check("mix: token supply preflight present (quota vs need + margin)",
+      "供应预检" in mix_src and "count_side_tokens" in mix_src)
 check("mix: explicit opt-in flag exists",
       "--allow-general-repeat" in mix_src)
 check("mix: HF_ENDPOINT defaults to hf-mirror BEFORE nanochat import "
@@ -462,12 +463,12 @@ with tempfile.TemporaryDirectory() as td:
     stem_dir = os.path.join(td, "stem")
     os.makedirs(stem_dir)
     write_shard(os.path.join(stem_dir, "shard_00000.parquet"),
-                [f"s{i}" for i in range(40)])
-    write_shard(os.path.join(stem_dir, "shard_00001.parquet"), ["VAL"])
+                [f"stem-doc-{i:03d}" for i in range(40)])  # 40 docs x 3 tok = 120
+    write_shard(os.path.join(stem_dir, "shard_00001.parquet"), ["VAL-VAL-VAL"])
     climb_dir = os.path.join(td, "climb")
     os.makedirs(climb_dir)
     c0 = os.path.join(climb_dir, "shard_c0.parquet")  # shard_* naming: content-keying glob requires it
-    write_shard(c0, [f"g{i}" for i in range(4)])        # 4 docs — short supply
+    write_shard(c0, [f"gen-{i:03d}" for i in range(4)])  # 4 docs x 1 tok = 4 — short supply
 
     def out_texts(out):
         texts = []
@@ -477,7 +478,7 @@ with tempfile.TemporaryDirectory() as td:
 
     try:
         mix.mix_data(stem_dir, [c0], os.path.join(td, "out1"),
-                     2, 20, num_npu=1, stem_ratio=0.5)
+                     batch_per_file=20, num_npu=1, stem_ratio=0.5)
         check("mix: short general supply raises (no silent repetition)", False)
     except ValueError as e:
         check("mix: short general supply raises (no silent repetition)",
@@ -485,22 +486,27 @@ with tempfile.TemporaryDirectory() as td:
               and "allow-general-repeat" in str(e), str(e)[:90])
 
     out2 = os.path.join(td, "out2")
-    mix.mix_data(stem_dir, [c0], out2, 2, 20, num_npu=1, stem_ratio=0.5,
+    mix.mix_data(stem_dir, [c0], out2, batch_per_file=20, num_npu=1, stem_ratio=0.5,
                  allow_general_repeat=True)
-    g = [t for t in out_texts(out2) if t.startswith("g")]
+    g = [t for t in out_texts(out2) if t.startswith("gen-")]
     check("mix: opt-in proceeds and repetition is real (dups observable)",
           len(g) >= 10 and len(set(g)) <= 4,
           f"{len(g)} draws from {len(set(g))} unique docs")
+    done2 = json.load(open(os.path.join(out2, ".done")))
     check("mix: .done records ratio",
-          json.load(open(os.path.join(out2, ".done")))["stem_ratio"] == 0.5)
+          done2["stem_ratio"] == 0.5)
+    check("mix: .done token ledger (50/50 closed by construction)",
+          done2["ratio_unit"] == "tokens"
+          and done2["stem_tokens_c4"] == 120
+          and done2["general_tokens_c4"] == 120, str(done2))
 
     c1 = os.path.join(climb_dir, "shard_c1.parquet")
-    write_shard(c1, [f"h{i}" for i in range(40)])       # ample supply
+    write_shard(c1, [f"hhh-docs-{i:03d}" for i in range(100)])  # 100 x 3 tok = ample
     out3 = os.path.join(td, "out3")
-    mix.mix_data(stem_dir, [c1], out3, 2, 20, num_npu=1, stem_ratio=0.5)
-    h = [t for t in out_texts(out3) if t.startswith("h")]
+    mix.mix_data(stem_dir, [c1], out3, batch_per_file=20, num_npu=1, stem_ratio=0.5)
+    h = [t for t in out_texts(out3) if t.startswith("hhh")]
     check("mix: ample supply mixes clean (no duplicates)",
-          len(h) == len(set(h)), f"{len(h)} draws / {len(set(h))} unique")
+          len(h) == len(set(h)) and len(h) == 40, f"{len(h)} draws / {len(set(h))} unique")
 
 # ── 12. read_total_batch_size: no silent lexicographic pick ──────────
 # meta_999 vs meta_1000 sorts the wrong way lexically; a disagreeing meta
@@ -536,48 +542,35 @@ check("proxy: guard wired after mixture prep, before mid_train",
       < prs.index("mid_cmd = self._build_mid_train_cmd"),
       "search path now guarded like the target stage")
 
-# ── 13. pool sizing / shard constant / remote guard wiring (2026-09-11) ─
-# Three prod2-era data-face bugs, all server-verified (paper_deviations D16):
-#   (a) mix total docs = STEM docs (pool ~ budget x 0.98, NOT /ratio) — the
-#       loader wrapped 3-4 epochs (mid_train.log epoch lines);
-#   (b) CLIMBMIX_DOCS_PER_SHARD 500K vs real ~85K (6x) — general download
-#       under-provisioned, the cycling draw repeated docs;
-#   (c) the remote executor bypassed the guard entirely (prod search path!).
+# ── 13. token-quota mixing / shard constant / remote guard wiring ─────
+# 2026-11-19 口径切换（用户拍板，对齐论文/业界语义）：配比作用在 token 上
+# （char/4，D11 计量标准），池 = STEM tokens / ratio（全选择 + 精确补足）。
+# 历史 prod2 三 bug（doc 池=预算×0.98、分片常数 6× 低估、remote 无守卫）的
+# 修复形态相应迁移到 token 域。
 for name, path in (("proxy", "src/climbmix/pipeline/proxy_runner.py"),
                    ("target", "src/climbmix/pipeline/target_runner.py")):
     rsrc = open(os.path.join(REPO, path)).read()
-    check(f"{name}: pool sized margin-aware (calc_output_files, not len)",
-          "mix_mod.calc_output_files(" in rsrc
+    check(f"{name}: token-quota mixing (count_side_tokens, stem_tokens pass-through)",
+          "mix_mod.count_side_tokens(" in rsrc
+          and "stem_tokens=stem_tokens" in rsrc
           and "num_output_files = len(stem_train_files)" not in rsrc
           and "stem_docs // int(detected_batch * self.stem_ratio)" not in rsrc)
-check("mix CLI: default output sized at calc_output_files",
-      "calc_output_files(stem_docs, batch_per_file, STEM_RATIO)" in mix_src
-      and "default_output_files" in mix_src)
-check("mix: calc_output_files passes the supply preflight BY CONSTRUCTION "
-      "(prod3 iter-1 near-miss replay: 10/16 configs died on the old floor)",
-      # the four prod3 supply-kill doc counts, incl. the weekend killer
-      # exp_0000 (686,540) and the shortest near-miss exp_0013 (1,220,819,
-      # short by 205 docs) — all must now fit draw + 5-sigma margin
-      all(mix.calc_output_files(s, 10000, 0.7) * 7000
-          + mix.binomial_margin(mix.calc_output_files(s, 10000, 0.7) * 10000, 0.7) <= s
-          for s in (686540, 938724, 1220819, 1233765))
-      # previously-passing configs keep the IDENTICAL file count (byte-stable
-      # mixtures; already-trained exps stay resume/warm-start compatible)
-      and mix.calc_output_files(1116247, 10000, 0.7) == 159
-      and mix.calc_output_files(383046, 10000, 0.7) == 54
-      and mix.calc_output_files(417375, 10000, 0.7) == 59)
-check("mix: ClimbMix shard constant = 85K (measured 2026-09-11)",
-      "CLIMBMIX_DOCS_PER_SHARD = 85000" in mix_src)
-check("mix: 85K constant actually drives the shard-count math",
-      mix.CLIMBMIX_DOCS_PER_SHARD == 85000
-      and mix.calc_climbmix_count(1_000_000, 0.7) == 7          # ceil(428.6K/85K)+1
-      and mix.calc_climbmix_count(10_000_000, 0.7) == 50)       # 52 -> cap binds
-check("mix: +1 safety shard clears the real-shard shortfall "
-      "(prod4 cfg11 2026-09-16: 44 estimated = 3,724,288 actual docs, "
-      "short of 3,726,000 + margin by 0.046% — arm blocked)",
-      mix.calc_climbmix_count(8_703_172, 0.7) == 45            # 44 -> 45
-      and 45 * 84643 >= 3_726_000 + mix.binomial_margin(
-          mix.calc_output_files(8_703_172, 10000, 0.7) * 10000, 0.7))
+check("mix CLI: sizes by STEM tokens (char/4), no doc-count output sizing",
+      "count_side_tokens(stem_train_files)" in mix_src
+      and "default_output_files" not in mix_src
+      and "num-output-files" not in mix_src)
+check("mix: STEM single-pass (no cycling) + general cycling behind preflight",
+      "stem_gen = stream_texts_uniform(stem_files)" in mix_src
+      and "endless_generator(stream_texts_uniform, climb_files)" in mix_src)
+check("mix: ClimbMix shard constant = 60M char/4 tokens (measured ~62.5M)",
+      "CLIMBMIX_TOKENS_PER_SHARD = 60_000_000" in mix_src)
+check("mix: token quota drives the shard-count math",
+      mix.CLIMBMIX_TOKENS_PER_SHARD == 60_000_000
+      and mix.calc_climbmix_count(1_000_000, 0.7) == 3            # 428K/60M -> 1+1, MIN 3
+      and mix.calc_climbmix_count(10_000_000_000, 0.7) == 50)     # 144 -> cap binds
+check("mix: +1 safety shard survives the token era (estimate error -> slack)",
+      mix.calc_climbmix_count(240_000_000, 0.7) == 3              # 102.9M -> 1+1, MIN 3
+      and mix.calc_climbmix_count(420_000_000, 0.7) == 4)        # 180M -> 3+1
 re_src = open(os.path.join(
     REPO, "src/climbmix/remote/remote_executor.py")).read()
 check("remote: guard wired between mixture prep and upload "
@@ -586,14 +579,8 @@ check("remote: guard wired between mixture prep and upload "
       < re_src.index("self._guard_single_pass(")
       < re_src.index("self._upload_dir(mixture_data_dir"),
       "fleet experiments were guardless before this")
-check("lss: shard cap 150 (20B needs ~127 at 85K docs/shard)",
+check("lss: shard cap 150 (20B-token quota needs ~144 at 60M tok/shard)",
       'MAX_CLIMBMIX_SHARDS:-150' in lsrc)
-
-# sizing math, floor semantics: draw must stay UNDER the STEM supply
-check("sizing: floor keeps the STEM draw under supply (5-sigma safe)",
-      all(0.7 * ((n // int(b * 0.7)) * b) <= n
-          for n, b in ((503_500, 10_000), (710_000, 10_000),
-                       (43_000, 10_000), (99, 10_000), (1_260_000, 10_000))))
 
 print()
 if FAILED:

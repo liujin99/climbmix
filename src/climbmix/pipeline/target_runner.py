@@ -287,33 +287,29 @@ class TargetRunner:
                 if f.startswith("shard_") and f.endswith(".parquet")
             )[:-1]
 
-            stem_docs = mix_mod.count_stem_docs(stem_train_files)
-            needed_shards = mix_mod.calc_climbmix_count(stem_docs, self.stem_ratio)
+            stem_tokens = mix_mod.count_side_tokens(stem_train_files)
+            needed_shards = mix_mod.calc_climbmix_count(stem_tokens, self.stem_ratio)
 
-            print(f"  [Target] STEM: {stem_docs:,} docs -> need {needed_shards} ClimbMix shards "
-                  f"({self.stem_ratio*100:.0f}% STEM + {(1-self.stem_ratio)*100:.0f}% general)")
+            print(f"  [Target] STEM: {stem_tokens:,} tokens (char/4) -> need {needed_shards} ClimbMix shards "
+                  f"({self.stem_ratio*100:.0f}% STEM + {(1-self.stem_ratio)*100:.0f}% general, token quota)")
 
             climb_files = mix_mod.download_climbmix(
                 self.general_data_dir, needed_shards, self.npu_devices
             )
 
             detected_batch = mix_mod.detect_shard_size(stem_train_files)
-            # Pool = STEM docs / stem_ratio (full selection + general complement)
-            # so training consumption ~ budget stays under 1 epoch by design.
-            # calc_output_files additionally subtracts the binomial margin so
-            # the supply preflight passes BY CONSTRUCTION — the historical
-            # floor(stem_docs / (batch*ratio)) left only the integer remainder
-            # as headroom and died on sub-0.25% near-misses (prod3 iter-1:
-            # 10/16 configs killed by the STEM supply guard).
-            num_output_files = mix_mod.calc_output_files(
-                stem_docs, detected_batch, self.stem_ratio)
+            # Pool = STEM tokens / stem_ratio（全选择 + 精确 token 补足，2026-11-19
+            # 口径）→ 消耗 ~ 预算恒单遍；STEM 单遍抽干构造性零重复，通用短供由
+            # mix_data 的 token 预检响亮拦截。
             mix_mod.mix_data(
                 stem_temp_dir, climb_files, mixture_data_dir,
-                num_output_files, detected_batch, num_npu=nproc,
-                stem_ratio=self.stem_ratio,
+                batch_per_file=detected_batch, num_npu=nproc,
+                stem_ratio=self.stem_ratio, stem_tokens=stem_tokens,
             )
-            print(f"  [Target] Mixed {stem_docs:,} STEM + "
-                  f"~{int(stem_docs * (1-self.stem_ratio) / self.stem_ratio):,} general")
+            quota_tok = int(stem_tokens * (1 - self.stem_ratio) / self.stem_ratio)
+            print(f"  [Target] Mixed {stem_tokens:,} STEM + "
+                  f"~{quota_tok:,} general tokens (char/4, "
+                  f"{self.stem_ratio*100:.0f}/{(1-self.stem_ratio)*100:.0f} quota)")
         else:
             self._copy_stem_only(stem_temp_dir, mixture_data_dir)
             print(f"  [Target] No general data, using {n_stem} STEM docs only")
